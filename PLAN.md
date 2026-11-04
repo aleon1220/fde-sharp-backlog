@@ -34,6 +34,31 @@ graph TD
 
 * **Prompt Design Strategy:** Combine a Senior Technical Project Manager persona with step-by-step Chain-of-Thought instructions and a strict Zero Hallucination clause forbidding invented owners or dates.
 
+* practical process as-is v1
+
+```mermaid
+swimlane-beta TB
+  subgraph local
+    collect[Collect raw data]
+    process[add to Copilot with pre-designed prompt]
+    validate[copy outcome]
+  end
+
+  subgraph Review
+    review[Review outcome]
+    decide{backlog type?}
+  end
+
+  subgraph Jira
+    complete[given When Then]
+    schedule[title + description]
+  end
+
+  collect --> process --> validate --> review --> decide
+    decide -->|Type01| complete
+    decide -->|Type02| schedule
+```
+
 ---
 
 ## Step 3: Testing Approach
