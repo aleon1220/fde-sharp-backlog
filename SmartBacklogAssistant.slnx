@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SmartBacklogAssistant/SmartBacklogAssistant.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SmartBacklogAssistant.Tests/SmartBacklogAssistant.Tests.csproj" />
+  </Folder>
+</Solution>

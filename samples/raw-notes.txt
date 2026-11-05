@@ -1,0 +1,6 @@
+Discovery Note - Sprint 14 Planning
+Context: Support engineers reported that customers cannot export their monthly audit logs when the record count exceeds 5,000 rows.
+Requirement: As an organization admin, I need to export monthly audit logs as a CSV file asynchronously so that compliance reviews do not time out in the browser.
+Precondition: An authenticated organization admin is on the Audit Logs page with a date filter selected.
+Action: The admin clicks "Export CSV".
+Expected Outcome: The system queues an export job and displays a download link within 30 seconds.
