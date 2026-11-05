@@ -1,2 +1,6 @@
 # fde-sharp-backlog
-webapp .NET 10 app that helps create Jira backlogs
+
+## Intro
+
+app .NET 10 app that helps create Jira backlogs. AI-First SDLC paradigm: deterministic C#
+

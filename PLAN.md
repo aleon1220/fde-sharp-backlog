@@ -6,15 +6,47 @@ Building the **Smart Backlog Assistant** in .NET 10 (`net10.0`) using `Microsoft
 
 ## Step 1: Problem Definition
 
-* **Problem Statement:** Engineering teams lose significant velocity translating unstructured discovery notes, noisy meeting transcripts, and PDF specs into standardized, non-duplicate backlog items.
-* **Use Case 1 (Noisy Meeting Transcripts):** Ingest raw MS Teams sprint planning transcripts, filter out conversational filler, and extract actionable user stories with clear acceptance criteria.
-* **Use Case 2 (Technical Spec Decomposition):** Parse requirement PDFs into categorized engineering tasks with suggested priority levels (P0 to P3).
-* **Use Case 3 (Backlog Deduplication):** Cross-reference newly extracted requirements against an existing JSON backlog to flag overlapping tickets before creating duplicates.
-* **AI in Problem Framing:** Document how you used an LLM acting as a Senior Technical PM to stress-test edge cases and refine these three use cases.
+### Problem Statement
+Engineering teams lose significant velocity translating unstructured discovery notes, noisy meeting transcripts, and PDF specs into standardized, non-duplicate backlog items.
+
+1. **Use Case 1** a simple CLI that implements the current process described in practical process as-is v1.
+
+2. **Use Case 2** (Noisy Meeting Transcripts):** Ingest raw MS Teams sprint planning transcripts, filter out conversational filler, and extract actionable user stories with clear acceptance criteria.
+
+3. **Use Case 3** (Technical Spec Decomposition):** Parse requirement PDFs into categorized engineering tasks with suggested priority levels (P0 to P3).
+
+4. (Backlog Deduplication):** Cross-reference newly extracted requirements against an existing JSON backlog to flag overlapping tickets before creating duplicates.
+
+5. **AI in Problem Framing:** Document how you used an LLM acting as a Senior Technical PM to stress-test edge cases and refine these three use cases.
 
 ---
 
 ## Step 2: Solution Design & Architecture
+
+### practical process as-is v1
+
+```mermaid
+swimlane-beta TB
+  subgraph local
+    collect[Collect raw data]
+    process[add to Copilot with pre-designed prompt]
+    validate[copy outcome]
+  end
+
+  subgraph Review
+    review[Review outcome]
+    decide{backlog type?}
+  end
+
+  subgraph Jira
+    complete[use given When Then]
+    schedule[use title + description]
+  end
+
+  collect --> process --> validate --> review --> decide
+    decide -->|Type01| complete
+    decide -->|Type02| schedule
+```
 
 * **Ingestion Service (Deterministic C#):** Reads raw text files or extracts text from PDFs using the `PdfPig` NuGet package, and loads the existing JSON backlog via `System.Text.Json`.
 * **Sequential Prompting Engine (`Microsoft.Extensions.AI`):** Uses `IChatClient` to execute a two-stage reasoning chain—first extracting and deduplicating core requirements, then formatting user stories.
@@ -33,31 +65,6 @@ graph TD
 ```
 
 * **Prompt Design Strategy:** Combine a Senior Technical Project Manager persona with step-by-step Chain-of-Thought instructions and a strict Zero Hallucination clause forbidding invented owners or dates.
-
-* practical process as-is v1
-
-```mermaid
-swimlane-beta TB
-  subgraph local
-    collect[Collect raw data]
-    process[add to Copilot with pre-designed prompt]
-    validate[copy outcome]
-  end
-
-  subgraph Review
-    review[Review outcome]
-    decide{backlog type?}
-  end
-
-  subgraph Jira
-    complete[given When Then]
-    schedule[title + description]
-  end
-
-  collect --> process --> validate --> review --> decide
-    decide -->|Type01| complete
-    decide -->|Type02| schedule
-```
 
 ---
 
