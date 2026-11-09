@@ -12,7 +12,8 @@ public sealed record WorkflowOptions(
     string? ApiKey = null,
     string? BacklogTypeInput = null,
     string? OutputDirectory = null,
-    bool NonInteractive = false);
+    bool NonInteractive = false,
+    string? ModelName = null);
 
 public sealed class AsIsV1Workflow
 {
@@ -26,17 +27,23 @@ public sealed class AsIsV1Workflow
     private readonly PromptTemplateService _promptService;
     private readonly AiModelOrchestrator _orchestrator;
     private readonly JiraBacklogFormatter _formatter;
+    private readonly RuntimeEnvironmentService _runtimeEnvService;
+    private readonly GeminiSecretProvider _secretProvider;
 
     public AsIsV1Workflow(
         RawDataCollector collector,
         PromptTemplateService promptService,
         AiModelOrchestrator orchestrator,
-        JiraBacklogFormatter formatter)
+        JiraBacklogFormatter formatter,
+        RuntimeEnvironmentService? runtimeEnvService = null,
+        GeminiSecretProvider? secretProvider = null)
     {
         _collector = collector ?? throw new ArgumentNullException(nameof(collector));
         _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
         _orchestrator = orchestrator ?? throw new ArgumentNullException(nameof(orchestrator));
         _formatter = formatter ?? throw new ArgumentNullException(nameof(formatter));
+        _runtimeEnvService = runtimeEnvService ?? new RuntimeEnvironmentService();
+        _secretProvider = secretProvider ?? new GeminiSecretProvider();
     }
 
     public JiraBacklogTicket Execute(WorkflowOptions options, TextReader input, TextWriter output)
@@ -47,30 +54,34 @@ public sealed class AsIsV1Workflow
 
         output.WriteLine("=== Smart Backlog Assistant: Use Case 1 (Practical Process As-Is v1) ===");
 
+        // For now, runtime execution defaults to Google Gemini with a Gemini API Key unless another provider is explicitly requested.
+        var provider = string.IsNullOrWhiteSpace(options.ProviderInput)
+            ? AiProviderType.GoogleGemini
+            : _orchestrator.ResolveProvider(options.ProviderInput);
+
+        // Inspect OS, Build Info, Enabled AI Model, and initial secret status
+        var initialSecret = _secretProvider.Resolve(options.ApiKey);
+        var runtimeInfo = _runtimeEnvService.Inspect(provider, options.ModelName);
+        _runtimeEnvService.WriteRuntimeBanner(output, runtimeInfo, initialSecret);
+
         // 1. Local: Collect raw data
         output.WriteLine($"[1/5 Local -> Collect] Reading raw data from '{options.InputFilePath}'...");
         var rawData = _collector.CollectFromFile(options.InputFilePath);
 
-        // 2. Local: Process (Select AI model or default to prompt from markdown file)
+        // 2. Local: Process & Inject Secret API Key at Runtime
         var renderedPrompt = _promptService.LoadAndRenderPrompt(options.PromptFilePath, rawData);
-        var providerSelection = options.ProviderInput;
+        var apiKey = initialSecret.ApiKey;
 
-        if (string.IsNullOrWhiteSpace(providerSelection) && !options.NonInteractive)
+        if (provider == AiProviderType.GoogleGemini)
         {
-            output.WriteLine();
-            output.WriteLine("[2/5 Local -> Process] Select AI Model Provider:");
-            output.WriteLine("  [0 / Enter] Default: Select prompt from Markdown file & run in your desired AI model (Copilot, etc.)");
-            output.WriteLine("  [1] Azure OpenAI (Mock Orchestrator)");
-            output.WriteLine("  [2] Google Gemini (Mock Orchestrator)");
-            output.WriteLine("  [3] Anthropic Claude (Mock Orchestrator)");
-            output.Write("Your choice (default 0): ");
-            providerSelection = input.ReadLine();
+            var resolvedSecret = _secretProvider.ResolveOrPrompt(
+                options.ApiKey,
+                input,
+                output,
+                options.NonInteractive);
+            apiKey = resolvedSecret.ApiKey;
         }
-
-        var provider = _orchestrator.ResolveProvider(providerSelection);
-        var apiKey = options.ApiKey;
-
-        if (provider != AiProviderType.ManualPrompt && string.IsNullOrWhiteSpace(apiKey) && !options.NonInteractive)
+        else if (provider != AiProviderType.ManualPrompt && string.IsNullOrWhiteSpace(apiKey) && !options.NonInteractive)
         {
             output.Write($"Enter API key for {provider} (or press Enter for mock key): ");
             apiKey = input.ReadLine();

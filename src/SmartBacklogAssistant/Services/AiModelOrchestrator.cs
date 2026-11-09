@@ -91,30 +91,19 @@ public sealed class AiModelOrchestrator
     private static string BuildGuidanceMessage(AiProviderType provider, string? apiKey)
     {
         var hasKey = !string.IsNullOrWhiteSpace(apiKey);
-        var keyStatus = hasKey ? $"API key provided ({MaskKey(apiKey!)})" : "no API key provided (running mock simulation)";
+        var keyStatus = hasKey ? $"API key injected ({GeminiSecretProvider.MaskKey(apiKey)})" : "no API key provided (running mock simulation)";
 
         return provider switch
         {
             AiProviderType.AzureOpenAi =>
                 $"[Mock Orchestrator -> Azure OpenAI ({keyStatus})] Processed prompt using mocked Azure OpenAI model.",
             AiProviderType.GoogleGemini =>
-                $"[Mock Orchestrator -> Google Gemini ({keyStatus})] Processed prompt using mocked Google Gemini model.",
+                $"[Gemini Orchestrator -> Google Gemini ({RuntimeEnvironmentService.DefaultGeminiModel}) | {keyStatus} | Keys: {GeminiSecretProvider.GeminiApiKeysUrl}] Processed prompt using Google Gemini model.",
             AiProviderType.AnthropicClaude =>
                 $"[Mock Orchestrator -> Anthropic Claude ({keyStatus})] Processed prompt using mocked Claude model.",
             _ =>
                 "[Default Mode -> Prompt from Markdown] Copy the rendered prompt above and run it in your desired AI model (e.g., Microsoft Copilot, Azure OpenAI, Gemini, or Claude). Using baseline draft outcome for review."
         };
-    }
-
-    private static string MaskKey(string key)
-    {
-        var trimmed = key.Trim();
-        if (trimmed.Length <= 4)
-        {
-            return "****";
-        }
-
-        return $"****{trimmed[^4..]}";
     }
 
     private static (string Title, string Description, string UserStory, GherkinScenario Scenario) ExtractStructuredDraft(string rawData)

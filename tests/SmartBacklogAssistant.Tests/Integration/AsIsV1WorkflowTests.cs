@@ -37,13 +37,17 @@ public sealed class AsIsV1WorkflowTests : IDisposable
     }
 
     [Fact]
-    public void Execute_InteractiveDefaultFlow_PromptsUserAndGeneratesType01Artifacts()
+    public void Execute_WhenNoGeminiKeyRegistered_PromptsForGeminiKeyInCliAndShowsRuntimeDiagnostics()
     {
-        // User presses Enter for default AI provider (ManualPrompt) and Enter for default Type01 (Given/When/Then)
-        using var input = new StringReader("\n\n");
+        // User enters Gemini API key when prompted in CLI, then presses Enter for default Type01 (Given/When/Then)
+        using var input = new StringReader("AIzaSyCliEnteredKey5566\n\n");
         using var output = new StringWriter();
 
-        var workflow = CreateWorkflow();
+        var isolatedSecretProvider = new GeminiSecretProvider(
+            environmentReader: _ => null,
+            environmentWriter: (_, _) => { });
+
+        var workflow = CreateWorkflow(isolatedSecretProvider);
         var options = new WorkflowOptions(
             InputFilePath: _inputFilePath,
             PromptFilePath: _promptFilePath,
@@ -58,11 +62,66 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Single(ticket.AcceptanceCriteria);
 
         var consoleOutput = output.ToString();
-        Assert.Contains("Pre-Designed Prompt (Loaded from Markdown)", consoleOutput);
-        Assert.Contains("run it in your desired AI model", consoleOutput);
+        Assert.Contains("OS Running", consoleOutput);
+        Assert.Contains("Build Info", consoleOutput);
+        Assert.Contains("AI Model Enabled : Google Gemini", consoleOutput);
+        Assert.Contains("https://aistudio.google.com/api-keys", consoleOutput);
+        Assert.Contains("Enter your Gemini API key to proceed", consoleOutput);
+        Assert.Contains("****5566", consoleOutput);
+        Assert.DoesNotContain("AIzaSyCliEnteredKey5566", consoleOutput);
 
         Assert.True(File.Exists(Path.Combine(_outputDir, "jira-backlog-item.md")));
         Assert.True(File.Exists(Path.Combine(_outputDir, "jira-backlog-item.json")));
+    }
+
+    [Fact]
+    public void Execute_WhenGeminiKeyInjectedViaOsEnvironment_ProceedsWithoutKeyPrompt()
+    {
+        // Only one newline needed for BacklogType selection because GEMINI_API_KEY is already in OS environment
+        using var input = new StringReader("1\n");
+        using var output = new StringWriter();
+
+        var envSecretProvider = new GeminiSecretProvider(
+            environmentReader: name => name == GeminiSecretProvider.PrimaryEnvVar ? "AIzaSyOsEnvKey8899" : null,
+            environmentWriter: (_, _) => { });
+
+        var workflow = CreateWorkflow(envSecretProvider);
+        var options = new WorkflowOptions(
+            InputFilePath: _inputFilePath,
+            PromptFilePath: _promptFilePath,
+            OutputDirectory: _outputDir,
+            NonInteractive: false);
+
+        var ticket = workflow.Execute(options, input, output);
+
+        Assert.Equal(BacklogType.Type01, ticket.BacklogType);
+        var consoleOutput = output.ToString();
+        Assert.Contains("OS Environment Variable (GEMINI_API_KEY) [****8899]", consoleOutput);
+        Assert.DoesNotContain("Enter your Gemini API key to proceed", consoleOutput);
+        Assert.DoesNotContain("AIzaSyOsEnvKey8899", consoleOutput);
+    }
+
+    [Fact]
+    public void Execute_InteractiveManualProviderFlow_RendersPromptAndGeneratesType01Artifacts()
+    {
+        using var input = new StringReader("\n");
+        using var output = new StringWriter();
+
+        var workflow = CreateWorkflow();
+        var options = new WorkflowOptions(
+            InputFilePath: _inputFilePath,
+            PromptFilePath: _promptFilePath,
+            ProviderInput: "manual",
+            OutputDirectory: _outputDir,
+            NonInteractive: false);
+
+        var ticket = workflow.Execute(options, input, output);
+
+        Assert.Equal(BacklogType.Type01, ticket.BacklogType);
+        Assert.Equal("complete", ticket.JiraStage);
+        var consoleOutput = output.ToString();
+        Assert.Contains("Pre-Designed Prompt (Loaded from Markdown)", consoleOutput);
+        Assert.Contains("run it in your desired AI model", consoleOutput);
     }
 
     [Fact]
@@ -93,12 +152,16 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Contains("****9999", consoleOutput);
     }
 
-    private static AsIsV1Workflow CreateWorkflow() =>
+    private static AsIsV1Workflow CreateWorkflow(GeminiSecretProvider? secretProvider = null) =>
         new(
             new RawDataCollector(),
             new PromptTemplateService(),
             new AiModelOrchestrator(),
-            new JiraBacklogFormatter());
+            new JiraBacklogFormatter(),
+            new RuntimeEnvironmentService(),
+            secretProvider ?? new GeminiSecretProvider(
+                environmentReader: _ => null,
+                environmentWriter: (_, _) => { }));
 
     public void Dispose()
     {

@@ -21,7 +21,9 @@ public static class Program
                 new RawDataCollector(),
                 new PromptTemplateService(),
                 new AiModelOrchestrator(),
-                new JiraBacklogFormatter());
+                new JiraBacklogFormatter(),
+                new RuntimeEnvironmentService(),
+                new GeminiSecretProvider());
 
             workflow.Execute(options, Console.In, Console.Out);
             return 0;
@@ -38,9 +40,10 @@ public static class Program
         var inputPath = GetArgValue(args, "--input") ?? "samples/raw-notes.txt";
         var promptPath = GetArgValue(args, "--prompt") ?? "prompts/as-is-v1-prompt.md";
         var provider = GetArgValue(args, "--provider");
-        var apiKey = GetArgValue(args, "--api-key") ?? Environment.GetEnvironmentVariable("AI_API_KEY");
+        var apiKey = GetArgValue(args, "--api-key");
         var backlogType = GetArgValue(args, "--type");
         var outputDir = GetArgValue(args, "--output-dir") ?? "output";
+        var modelName = GetArgValue(args, "--model");
         var nonInteractive = args.Contains("--non-interactive", StringComparer.OrdinalIgnoreCase);
 
         return new WorkflowOptions(
@@ -50,7 +53,8 @@ public static class Program
             ApiKey: apiKey,
             BacklogTypeInput: backlogType,
             OutputDirectory: outputDir,
-            NonInteractive: nonInteractive);
+            NonInteractive: nonInteractive,
+            ModelName: modelName);
     }
 
     private static string? GetArgValue(string[] args, string flag)
@@ -68,7 +72,7 @@ public static class Program
 
     private static void PrintHelp(TextWriter output)
     {
-        output.WriteLine("Smart Backlog Assistant — Use Case 1 (Practical Process As-Is v1)");
+        output.WriteLine("Smart Backlog Assistant — Use Case 1 (Practical Process As-Is v1 + Gemini Runtime Secret Injection)");
         output.WriteLine();
         output.WriteLine("Usage:");
         output.WriteLine("  dotnet run --project src/SmartBacklogAssistant -- [options]");
@@ -76,8 +80,10 @@ public static class Program
         output.WriteLine("Options:");
         output.WriteLine("  --input <path>        Path to raw discovery notes (default: samples/raw-notes.txt)");
         output.WriteLine("  --prompt <path>       Path to Markdown prompt template (default: prompts/as-is-v1-prompt.md)");
-        output.WriteLine("  --provider <name>     AI provider: manual (default), azure, gemini, claude");
-        output.WriteLine("  --api-key <key>       Optional API key for mocked provider (or set AI_API_KEY env var)");
+        output.WriteLine("  --provider <name>     AI provider: gemini (default), manual, azure, claude");
+        output.WriteLine("  --model <name>        Gemini model name (default: gemini-2.5-flash, or set GEMINI_MODEL env var)");
+        output.WriteLine("  --api-key <key>       Gemini API key (or set GEMINI_API_KEY / GOOGLE_API_KEY / AI_API_KEY in OS env)");
+        output.WriteLine("                        Obtain a Gemini key from: https://aistudio.google.com/api-keys");
         output.WriteLine("  --type <Type01|Type02> Jira backlog type: Type01 (Given/When/Then) or Type02 (Title+Description)");
         output.WriteLine("  --output-dir <path>   Directory for Jira Markdown & JSON output (default: output)");
         output.WriteLine("  --non-interactive     Run without interactive console prompts");
