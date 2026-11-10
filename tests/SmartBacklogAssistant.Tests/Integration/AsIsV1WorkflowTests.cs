@@ -71,7 +71,32 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.DoesNotContain("AIzaSyCliEnteredKey5566", consoleOutput);
 
         Assert.True(File.Exists(Path.Combine(_outputDir, "jira-backlog-item.md")));
+        Assert.False(File.Exists(Path.Combine(_outputDir, "jira-backlog-item.json")));
+    }
+
+    [Fact]
+    public void Execute_WhenJsonFileOutIsEnabled_WritesBothMarkdownAndJsonArtifacts()
+    {
+        using var input = new StringReader(string.Empty);
+        using var output = new StringWriter();
+
+        var workflow = CreateWorkflow();
+        var options = new WorkflowOptions(
+            InputFilePath: _inputFilePath,
+            PromptFilePath: _promptFilePath,
+            ProviderInput: "gemini",
+            ApiKey: "AIzaSyJsonEnabled9999",
+            BacklogTypeInput: "Type01",
+            OutputDirectory: _outputDir,
+            NonInteractive: true,
+            JsonFileOut: true);
+
+        workflow.Execute(options, input, output);
+
+        Assert.True(File.Exists(Path.Combine(_outputDir, "jira-backlog-item.md")));
         Assert.True(File.Exists(Path.Combine(_outputDir, "jira-backlog-item.json")));
+        Assert.True(File.Exists(Path.Combine(_outputDir, "type01-webhook-retry-policy.md")));
+        Assert.True(File.Exists(Path.Combine(_outputDir, "type01-webhook-retry-policy.json")));
     }
 
     [Fact]

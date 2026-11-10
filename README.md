@@ -14,7 +14,8 @@
    - **WSL Compatible Workspace**: `/mnt/c/workspace/smart-backlog-assistant/in` -> `/mnt/c/workspace/smart-backlog-assistant/out`
    - **Menu `[1]` Process Input Directory**: Reads discovery files from `smart-backlog-assistant/in` and outputs formatted Jira items to `smart-backlog-assistant/out`.
    - **Menu `[2]` Add Goal or Title**: Enter a Goal or Title and select output **`Type 01`** (`complete` — Given/When/Then) or **`Type 02`** (`schedule` — Title + Description) ready to be added into `smart-backlog-assistant/out`.
-   - **Menu `[3]` Workspace & Runtime Status**: Inspects OS, WSL/Windows path mappings, AI model, and directory contents.
+   - **Menu `[3]` Workspace & Runtime Status**: Inspects OS, WSL/Windows path mappings, AI model, settings status, and directory contents.
+   - **Menu `[4]` Configure Settings**: Toggles **JSON File Out** (off by default so only `.md` files are emitted unless enabled) and persists settings to `smart-backlog-assistant/settings.json` (also configurable via `--json-out` / `--no-json-out`).
 4. **Local Processing (`collect` -> `process` -> `validate`)**: Ingests raw discovery notes (`smart-backlog-assistant/in` or `samples/raw-notes.txt`), renders `prompts/as-is-v1-prompt.md`, and validates the structured draft.
 5. **Review & Jira Output (`Type01` | `Type02`)**: Formats `Type01` (`complete` — Given/When/Then) or `Type02` (`schedule` — Title + Description) to console and `smart-backlog-assistant/out` (or `output/`).
 

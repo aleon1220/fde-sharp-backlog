@@ -13,6 +13,19 @@ public sealed class CliArgumentParserTests
         Assert.Null(options.BacklogTypeInput);
         Assert.Equal("output", options.OutputDirectory);
         Assert.False(options.NonInteractive);
+        Assert.Null(options.JsonFileOut);
+    }
+
+    [Theory]
+    [InlineData(new[] { "--json-out" }, true)]
+    [InlineData(new[] { "--json-out", "true" }, true)]
+    [InlineData(new[] { "--json-out", "false" }, false)]
+    [InlineData(new[] { "--no-json-out" }, false)]
+    public void ParseArgs_WithJsonOutFlags_ParsesExpectedJsonFileOutSetting(string[] args, bool expected)
+    {
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal(expected, options.JsonFileOut);
     }
 
     [Fact]

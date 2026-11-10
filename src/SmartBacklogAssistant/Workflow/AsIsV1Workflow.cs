@@ -16,7 +16,8 @@ public sealed record WorkflowOptions(
     string? ModelName = null,
     string? WorkspaceRoot = null,
     string? GoalTitle = null,
-    bool ForceMenu = false);
+    bool ForceMenu = false,
+    bool? JsonFileOut = null);
 
 public sealed class AsIsV1Workflow
 {
@@ -148,7 +149,8 @@ public sealed class AsIsV1Workflow
 
         if (!string.IsNullOrWhiteSpace(options.OutputDirectory))
         {
-            SaveTicketArtifacts(ticket, options.OutputDirectory, colorWriter);
+            var jsonFileOut = options.JsonFileOut ?? false;
+            SaveTicketArtifacts(ticket, options.OutputDirectory, jsonFileOut, colorWriter);
         }
 
         return ticket;
@@ -172,30 +174,39 @@ public sealed class AsIsV1Workflow
         return Execute(goalOptions, input, output);
     }
 
-    private static void SaveTicketArtifacts(JiraBacklogTicket ticket, string outputDirectory, ConsoleColorWriter colorWriter)
+    private static void SaveTicketArtifacts(
+        JiraBacklogTicket ticket,
+        string outputDirectory,
+        bool jsonFileOut,
+        ConsoleColorWriter colorWriter)
     {
         Directory.CreateDirectory(outputDirectory);
 
-        var serializedJson = JsonSerializer.Serialize(ticket, JsonOptions);
-
-        // Canonical output filenames (backward-compatible)
+        // Canonical output filename (backward-compatible)
         var mdPath = Path.Combine(outputDirectory, "jira-backlog-item.md");
-        var jsonPath = Path.Combine(outputDirectory, "jira-backlog-item.json");
         File.WriteAllText(mdPath, ticket.FormattedMarkdown);
-        File.WriteAllText(jsonPath, serializedJson);
 
-        // Slugged ready-to-add filenames per item in smart-backlog-assistant/out
+        // Slugged ready-to-add filename per item in smart-backlog-assistant/out
         var typePrefix = ticket.BacklogType.ToString().ToLowerInvariant();
         var slug = WorkspacePathService.CreateSlug(ticket.Title);
         var slugMdPath = Path.Combine(outputDirectory, $"{typePrefix}-{slug}.md");
-        var slugJsonPath = Path.Combine(outputDirectory, $"{typePrefix}-{slug}.json");
         File.WriteAllText(slugMdPath, ticket.FormattedMarkdown);
-        File.WriteAllText(slugJsonPath, serializedJson);
 
         colorWriter.WriteLine();
         colorWriter.WriteSuccess($"Saved Jira Markdown to: {mdPath}");
-        colorWriter.WriteSuccess($"Saved Jira JSON to    : {jsonPath}");
         colorWriter.WriteMuted($"Ready-to-add item     : {slugMdPath}");
-        colorWriter.WriteMuted($"Ready-to-add JSON     : {slugJsonPath}");
+
+        if (jsonFileOut)
+        {
+            var serializedJson = JsonSerializer.Serialize(ticket, JsonOptions);
+            var jsonPath = Path.Combine(outputDirectory, "jira-backlog-item.json");
+            var slugJsonPath = Path.Combine(outputDirectory, $"{typePrefix}-{slug}.json");
+
+            File.WriteAllText(jsonPath, serializedJson);
+            File.WriteAllText(slugJsonPath, serializedJson);
+
+            colorWriter.WriteSuccess($"Saved Jira JSON to    : {jsonPath}");
+            colorWriter.WriteMuted($"Ready-to-add JSON     : {slugJsonPath}");
+        }
     }
 }

@@ -15,19 +15,22 @@ public sealed class CliMenuRunner
     private readonly RuntimeEnvironmentService _runtimeEnvService;
     private readonly GeminiSecretProvider _secretProvider;
     private readonly AiModelOrchestrator _orchestrator;
+    private readonly CliSettingsService _settingsService;
 
     public CliMenuRunner(
         AsIsV1Workflow workflow,
         WorkspacePathService? workspaceService = null,
         RuntimeEnvironmentService? runtimeEnvService = null,
         GeminiSecretProvider? secretProvider = null,
-        AiModelOrchestrator? orchestrator = null)
+        AiModelOrchestrator? orchestrator = null,
+        CliSettingsService? settingsService = null)
     {
         _workflow = workflow ?? throw new ArgumentNullException(nameof(workflow));
         _workspaceService = workspaceService ?? new WorkspacePathService();
         _runtimeEnvService = runtimeEnvService ?? new RuntimeEnvironmentService();
         _secretProvider = secretProvider ?? new GeminiSecretProvider();
         _orchestrator = orchestrator ?? new AiModelOrchestrator();
+        _settingsService = settingsService ?? new CliSettingsService();
     }
 
     public int Run(WorkflowOptions baseOptions, TextReader input, TextWriter output)
@@ -40,6 +43,11 @@ public sealed class CliMenuRunner
         var workspace = _workspaceService.Resolve(baseOptions.WorkspaceRoot);
         _workspaceService.EnsureDirectoriesExist(workspace);
 
+        var persistedSettings = _settingsService.Load(workspace);
+        var currentSettings = baseOptions.JsonFileOut.HasValue
+            ? persistedSettings with { JsonFileOut = baseOptions.JsonFileOut.Value }
+            : persistedSettings;
+
         // Ensure runtime options point to the resolved workspace out directory unless explicitly overridden
         var effectiveOutputDir = string.IsNullOrWhiteSpace(baseOptions.OutputDirectory) ||
                                  string.Equals(baseOptions.OutputDirectory, "output", StringComparison.OrdinalIgnoreCase)
@@ -48,26 +56,30 @@ public sealed class CliMenuRunner
 
         var sessionOptions = baseOptions with
         {
-            OutputDirectory = effectiveOutputDir
+            OutputDirectory = effectiveOutputDir,
+            JsonFileOut = currentSettings.JsonFileOut
         };
 
         WriteWelcomeBanner(color, workspace);
 
         while (true)
         {
+            var jsonOutLabel = currentSettings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)";
             color.WriteLine();
             color.WriteHeader("┌──────────────────────────────────────────────────────────────────────┐");
             color.WriteHeader("│                 SMART BACKLOG ASSISTANT — CLI MENU                   │");
             color.WriteHeader("└──────────────────────────────────────────────────────────────────────┘");
             color.WriteMuted($"  Input Dir : {workspace.InputDirectory}");
             color.WriteMuted($"  Output Dir: {sessionOptions.OutputDirectory}");
+            color.WriteMuted($"  JSON Out  : {jsonOutLabel}");
             color.WriteLine();
             color.WriteMenuOption("1", "Process Input Directory", $"Read from '{WorkspacePathService.AppDirectoryName}/{WorkspacePathService.InputFolderName}' -> output to '{WorkspacePathService.AppDirectoryName}/{WorkspacePathService.OutputFolderName}'");
             color.WriteMenuOption("2", "Add Goal or Title", "Create a new Goal/Title and select Type 01 or Type 02 ready to be added");
             color.WriteMenuOption("3", "Workspace & Runtime Status", "Inspect WSL / Windows paths, AI model, and directory contents");
+            color.WriteMenuOption("4", "Configure Settings", $"Configure CLI settings (JSON file out: {(currentSettings.JsonFileOut ? "ON" : "OFF")})");
             color.WriteMenuOption("0", "Exit", "Close Smart Backlog Assistant");
             color.WriteLine();
-            color.WriteColored("Select an option (1, 2, 3, or 0 to exit): ", ConsoleColor.Yellow);
+            color.WriteColored("Select an option (1, 2, 3, 4, or 0 to exit): ", ConsoleColor.Yellow);
 
             var choice = input.ReadLine();
             if (choice is null)
@@ -93,11 +105,15 @@ public sealed class CliMenuRunner
                     break;
 
                 case "3":
-                    HandleInspectStatus(workspace, sessionOptions, color);
+                    HandleInspectStatus(workspace, sessionOptions, currentSettings, color);
+                    break;
+
+                case "4" or "s" or "settings" or "config":
+                    HandleConfigureSettings(workspace, ref sessionOptions, ref currentSettings, input, color);
                     break;
 
                 default:
-                    color.WriteWarning($"  [!] Unknown menu option '{choice.Trim()}'. Please choose 1, 2, 3, or 0.");
+                    color.WriteWarning($"  [!] Unknown menu option '{choice.Trim()}'. Please choose 1, 2, 3, 4, or 0.");
                     break;
             }
         }
@@ -212,6 +228,7 @@ public sealed class CliMenuRunner
     private void HandleInspectStatus(
         WorkspaceDirectories workspace,
         WorkflowOptions sessionOptions,
+        CliSettings currentSettings,
         ConsoleColorWriter color)
     {
         color.WriteLine();
@@ -225,6 +242,7 @@ public sealed class CliMenuRunner
         var runtimeInfo = _runtimeEnvService.Inspect(provider, sessionOptions.ModelName);
         color.WriteMuted(_runtimeEnvService.FormatRuntimeBanner(runtimeInfo, secret));
 
+        var settingsFilePath = _settingsService.GetSettingsFilePath(workspace);
         color.WriteLine();
         color.WriteSubHeader("--- Cross-Platform Workspace Paths (Windows & WSL) ---");
         color.WriteLine($"  Windows Default Root : {WorkspacePathService.DefaultWindowsWorkspaceRoot}");
@@ -232,6 +250,8 @@ public sealed class CliMenuRunner
         color.WriteLine($"  Active Workspace Root: {workspace.WorkspaceRoot}");
         color.WriteLine($"  Input Directory (in) : {workspace.InputDirectory}");
         color.WriteLine($"  Output Directory(out): {sessionOptions.OutputDirectory}");
+        color.WriteLine($"  Settings File        : {settingsFilePath}");
+        color.WriteLine($"  JSON File Out        : {(currentSettings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)")}");
 
         var inFiles = _workspaceService.GetInputFiles(workspace.InputDirectory);
         color.WriteLine($"  Files in 'in/' ({inFiles.Count})   : {(inFiles.Count == 0 ? "none" : string.Join(", ", inFiles.Select(Path.GetFileName)))}");
@@ -244,6 +264,68 @@ public sealed class CliMenuRunner
                 .ToArray();
             color.WriteLine($"  Files in 'out/' ({outFiles.Length})  : {(outFiles.Length == 0 ? "none" : string.Join(", ", outFiles))}");
         }
+    }
+
+    private void HandleConfigureSettings(
+        WorkspaceDirectories workspace,
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        TextReader input,
+        ConsoleColorWriter color)
+    {
+        var settingsFilePath = _settingsService.GetSettingsFilePath(workspace);
+        var currentStateLabel = currentSettings.JsonFileOut ? "ON" : "OFF";
+        var currentBehavior = currentSettings.JsonFileOut
+            ? "writes both .md and .json files"
+            : "writes .md files only (default)";
+
+        color.WriteLine();
+        color.WriteHeader("=== [Option 4] Configure Settings ===");
+        color.WriteMuted($"  Settings File: {settingsFilePath}");
+        color.WriteLine();
+        color.WriteMenuOption("1", $"JSON File Out [{currentStateLabel}]", $"Toggle whether .json backlog files are written to the output directory ({currentBehavior})");
+        color.WriteMenuOption("0", "Back", "Return to main menu");
+        color.WriteLine();
+        color.WriteColored("Select setting (1 to toggle JSON file out, on/off, or 0 to return): ", ConsoleColor.Yellow);
+
+        var rawInput = input.ReadLine();
+        if (rawInput is null)
+        {
+            return;
+        }
+
+        var normalized = rawInput.Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(normalized) || normalized is "0" or "b" or "back")
+        {
+            color.WriteMuted("  Returning to main menu without changes.");
+            return;
+        }
+
+        bool newJsonFileOut;
+        if (normalized is "1" or "toggle" or "json" or "json-out")
+        {
+            newJsonFileOut = !currentSettings.JsonFileOut;
+        }
+        else if (normalized is "on" or "true" or "enable" or "enabled" or "yes" or "y")
+        {
+            newJsonFileOut = true;
+        }
+        else if (normalized is "off" or "false" or "disable" or "disabled" or "no" or "n")
+        {
+            newJsonFileOut = false;
+        }
+        else
+        {
+            color.WriteWarning($"  [!] Unknown setting option '{rawInput.Trim()}'. Please choose 1, on, off, or 0.");
+            return;
+        }
+
+        currentSettings = currentSettings with { JsonFileOut = newJsonFileOut };
+        sessionOptions = sessionOptions with { JsonFileOut = newJsonFileOut };
+        var savedPath = _settingsService.Save(workspace, currentSettings);
+
+        var newStateLabel = newJsonFileOut ? "ON (.md + .json)" : "OFF (.md only)";
+        color.WriteSuccess($"[✓] JSON File Out set to {newStateLabel}. Saved settings to '{savedPath}'.");
     }
 
     private void CacheResolvedApiKeyIfPresent(ref WorkflowOptions sessionOptions)

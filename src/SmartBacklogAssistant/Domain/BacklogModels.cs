@@ -106,3 +106,9 @@ public sealed record JiraBacklogTicket(
     string? UserStory,
     IReadOnlyList<GherkinScenario> AcceptanceCriteria,
     string FormattedMarkdown);
+
+/// <summary>
+/// Persistent CLI configuration settings for Smart Backlog Assistant.
+/// </summary>
+public sealed record CliSettings(
+    bool JsonFileOut = false);

@@ -24,6 +24,7 @@ public static class Program
             var runtimeEnvService = new RuntimeEnvironmentService();
             var secretProvider = new GeminiSecretProvider();
             var workspaceService = new WorkspacePathService();
+            var settingsService = new CliSettingsService();
 
             var workflow = new AsIsV1Workflow(
                 collector,
@@ -40,13 +41,14 @@ public static class Program
                     workspaceService,
                     runtimeEnvService,
                     secretProvider,
-                    orchestrator);
+                    orchestrator,
+                    settingsService);
 
                 return menuRunner.Run(options, Console.In, Console.Out);
             }
 
-            // Direct / headless execution: resolve workspace in/out directories if --workspace was specified
-            var resolvedOptions = ResolveDirectExecutionOptions(args, options, workspaceService);
+            // Direct / headless execution: resolve workspace in/out directories and persisted settings
+            var resolvedOptions = ResolveDirectExecutionOptions(args, options, workspaceService, settingsService);
             workflow.Execute(resolvedOptions, Console.In, Console.Out);
             return 0;
         }
@@ -71,6 +73,7 @@ public static class Program
         var goalTitle = GetArgValue(args, "--goal") ?? GetArgValue(args, "--title");
         var nonInteractive = args.Contains("--non-interactive", StringComparer.OrdinalIgnoreCase);
         var forceMenu = args.Contains("--menu", StringComparer.OrdinalIgnoreCase);
+        var jsonFileOut = ParseJsonFileOutArg(args);
 
         return new WorkflowOptions(
             InputFilePath: inputPath,
@@ -83,7 +86,8 @@ public static class Program
             ModelName: modelName,
             WorkspaceRoot: workspaceRoot,
             GoalTitle: goalTitle,
-            ForceMenu: forceMenu);
+            ForceMenu: forceMenu,
+            JsonFileOut: jsonFileOut);
     }
 
     public static bool ShouldLaunchMenu(string[] args, WorkflowOptions options)
@@ -111,14 +115,21 @@ public static class Program
     private static WorkflowOptions ResolveDirectExecutionOptions(
         string[] args,
         WorkflowOptions options,
-        WorkspacePathService workspaceService)
+        WorkspacePathService workspaceService,
+        CliSettingsService settingsService)
     {
+        var workspace = workspaceService.Resolve(options.WorkspaceRoot);
+        var persistedSettings = settingsService.Load(workspace);
+        var effectiveJsonOut = options.JsonFileOut ?? persistedSettings.JsonFileOut;
+
         if (string.IsNullOrWhiteSpace(options.WorkspaceRoot))
         {
-            return options;
+            return options with
+            {
+                JsonFileOut = effectiveJsonOut
+            };
         }
 
-        var workspace = workspaceService.Resolve(options.WorkspaceRoot);
         workspaceService.EnsureDirectoriesExist(workspace);
 
         var inputPath = HasFlag(args, "--input")
@@ -132,8 +143,43 @@ public static class Program
         return options with
         {
             InputFilePath = inputPath,
-            OutputDirectory = outputDir
+            OutputDirectory = outputDir,
+            JsonFileOut = effectiveJsonOut
         };
+    }
+
+    private static bool? ParseJsonFileOutArg(string[] args)
+    {
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (string.Equals(args[i], "--no-json-out", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(args[i], "--no-json-file-out", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            if (string.Equals(args[i], "--json-out", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(args[i], "--json-file-out", StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 < args.Length && !args[i + 1].StartsWith('-'))
+                {
+                    var nextVal = args[i + 1].Trim().ToLowerInvariant();
+                    if (nextVal is "true" or "on" or "1" or "yes")
+                    {
+                        return true;
+                    }
+
+                    if (nextVal is "false" or "off" or "0" or "no")
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        return null;
     }
 
     private static bool HasFlag(string[] args, string flag)
@@ -178,6 +224,8 @@ public static class Program
         output.WriteLine("                        Obtain a Gemini key from: https://aistudio.google.com/api-keys");
         output.WriteLine("  --type <01|02>        Jira backlog type: Type01/01 (Given/When/Then) or Type02/02 (Title+Description)");
         output.WriteLine("  --output-dir <path>   Directory for Jira Markdown & JSON output (default: output)");
+        output.WriteLine("  --json-out [true|false] Enable writing .json backlog files alongside .md files (default: false / .md only)");
+        output.WriteLine("  --no-json-out         Disable writing .json backlog files (generate .md files only)");
         output.WriteLine("  --non-interactive     Run without interactive console prompts");
         output.WriteLine("  -h, --help            Show help information");
     }

@@ -9,6 +9,7 @@ You are a Senior Technical Project Manager. Analyze the raw discovery notes belo
    - **Given / When / Then** acceptance criteria (for `Type01` complete user stories)
 
 ## Raw Input Data
+
 ```text
 {{RAW_DATA}}
 ```

@@ -57,13 +57,58 @@ public sealed class CliMenuRunnerTests : IDisposable
 
         Assert.Equal(0, exitCode);
         Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "jira-backlog-item.md")));
-        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "jira-backlog-item.json")));
+        Assert.False(File.Exists(Path.Combine(dirs.OutputDirectory, "jira-backlog-item.json")));
         Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-automated-failover-check.md")));
-        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-automated-failover-check.json")));
+        Assert.False(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-automated-failover-check.json")));
 
         var consoleText = output.ToString();
         Assert.Contains("SMART BACKLOG ASSISTANT — CLI MENU", consoleText);
         Assert.Contains("Automated Failover Check", consoleText);
+    }
+
+    [Fact]
+    public void Run_Option4_ConfigureSettings_EnablesJsonFileOutAndPersistsSettingsJson()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var settingsService = new CliSettingsService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+
+        // Menu sequence:
+        // "4" -> Option 4 (Configure Settings)
+        // "1" -> Toggle JSON File Out (from default OFF -> ON)
+        // "2" -> Option 2 (Add Goal or Title)
+        // "Enable JSON Export Setting" -> Goal/Title
+        // "01" -> Select Type 01
+        // "0" -> Exit
+        using var input = new StringReader(
+            "4\n1\n" +
+            "2\nEnable JSON Export Setting\n01\n" +
+            "0\n");
+        using var output = new StringWriter();
+
+        var menu = CreateMenuRunner(workspaceService, settingsService);
+        var options = new WorkflowOptions(
+            InputFilePath: "samples/raw-notes.txt",
+            PromptFilePath: _promptFilePath,
+            ApiKey: "AIzaSyMenuSettingsKey1234",
+            WorkspaceRoot: _tempWorkspaceRoot);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+
+        var persistedSettings = settingsService.Load(dirs);
+        Assert.True(persistedSettings.JsonFileOut);
+        Assert.True(File.Exists(settingsService.GetSettingsFilePath(dirs)));
+
+        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "jira-backlog-item.md")));
+        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "jira-backlog-item.json")));
+        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-enable-json-export-setting.md")));
+        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-enable-json-export-setting.json")));
+
+        var consoleText = output.ToString();
+        Assert.Contains("Configure Settings", consoleText);
+        Assert.Contains("JSON File Out set to ON (.md + .json)", consoleText);
     }
 
     [Fact]
@@ -118,7 +163,9 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.Contains("WSL Compatible Root  : /mnt/c/workspace", consoleText);
     }
 
-    private static CliMenuRunner CreateMenuRunner(WorkspacePathService workspaceService)
+    private static CliMenuRunner CreateMenuRunner(
+        WorkspacePathService workspaceService,
+        CliSettingsService? settingsService = null)
     {
         var secretProvider = new GeminiSecretProvider(
             environmentReader: _ => null,
@@ -139,7 +186,8 @@ public sealed class CliMenuRunnerTests : IDisposable
             workspaceService,
             runtimeService,
             secretProvider,
-            orchestrator);
+            orchestrator,
+            settingsService ?? new CliSettingsService());
     }
 
     public void Dispose()
