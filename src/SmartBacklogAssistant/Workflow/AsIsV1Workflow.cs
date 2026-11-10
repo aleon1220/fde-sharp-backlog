@@ -13,7 +13,10 @@ public sealed record WorkflowOptions(
     string? BacklogTypeInput = null,
     string? OutputDirectory = null,
     bool NonInteractive = false,
-    string? ModelName = null);
+    string? ModelName = null,
+    string? WorkspaceRoot = null,
+    string? GoalTitle = null,
+    bool ForceMenu = false);
 
 public sealed class AsIsV1Workflow
 {
@@ -52,9 +55,10 @@ public sealed class AsIsV1Workflow
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
 
-        output.WriteLine("=== Smart Backlog Assistant: Use Case 1 (Practical Process As-Is v1) ===");
+        var colorWriter = new ConsoleColorWriter(output);
+        colorWriter.WriteHeader("=== Smart Backlog Assistant: Use Case 1 (Practical Process As-Is v1) ===");
 
-        // For now, runtime execution defaults to Google Gemini with a Gemini API Key unless another provider is explicitly requested.
+        // Runtime execution defaults to Google Gemini with a Gemini API Key unless another provider is explicitly requested.
         var provider = string.IsNullOrWhiteSpace(options.ProviderInput)
             ? AiProviderType.GoogleGemini
             : _orchestrator.ResolveProvider(options.ProviderInput);
@@ -62,14 +66,26 @@ public sealed class AsIsV1Workflow
         // Inspect OS, Build Info, Enabled AI Model, and initial secret status
         var initialSecret = _secretProvider.Resolve(options.ApiKey);
         var runtimeInfo = _runtimeEnvService.Inspect(provider, options.ModelName);
-        _runtimeEnvService.WriteRuntimeBanner(output, runtimeInfo, initialSecret);
+        colorWriter.WriteMuted(_runtimeEnvService.FormatRuntimeBanner(runtimeInfo, initialSecret));
 
-        // 1. Local: Collect raw data
-        output.WriteLine($"[1/5 Local -> Collect] Reading raw data from '{options.InputFilePath}'...");
-        var rawData = _collector.CollectFromFile(options.InputFilePath);
+        // 1. Local: Collect raw data (either from Goal/Title or from InputFilePath)
+        string rawData;
+        if (!string.IsNullOrWhiteSpace(options.GoalTitle))
+        {
+            colorWriter.WriteSubHeader($"[1/5 Local -> Collect] Generating raw discovery notes from goal/title '{options.GoalTitle}'...");
+            rawData = _collector.CollectFromGoal(options.GoalTitle);
+        }
+        else
+        {
+            colorWriter.WriteSubHeader($"[1/5 Local -> Collect] Reading raw data from '{options.InputFilePath}'...");
+            rawData = _collector.CollectFromFile(options.InputFilePath);
+        }
 
         // 2. Local: Process & Inject Secret API Key at Runtime
-        var renderedPrompt = _promptService.LoadAndRenderPrompt(options.PromptFilePath, rawData);
+        var renderedPrompt = File.Exists(options.PromptFilePath)
+            ? _promptService.LoadAndRenderPrompt(options.PromptFilePath, rawData)
+            : _promptService.RenderPromptFromTemplate("# Practical Process As-Is v1\nAnalyze the following raw notes:\n{{RAW_DATA}}", rawData);
+
         var apiKey = initialSecret.ApiKey;
 
         if (provider == AiProviderType.GoogleGemini)
@@ -83,26 +99,26 @@ public sealed class AsIsV1Workflow
         }
         else if (provider != AiProviderType.ManualPrompt && string.IsNullOrWhiteSpace(apiKey) && !options.NonInteractive)
         {
-            output.Write($"Enter API key for {provider} (or press Enter for mock key): ");
+            colorWriter.WriteColored($"Enter API key for {provider} (or press Enter for mock key): ", ConsoleColor.Yellow);
             apiKey = input.ReadLine();
         }
 
         if (provider == AiProviderType.ManualPrompt)
         {
             output.WriteLine();
-            output.WriteLine("--- Pre-Designed Prompt (Loaded from Markdown) ---");
+            colorWriter.WriteMuted("--- Pre-Designed Prompt (Loaded from Markdown) ---");
             output.WriteLine(renderedPrompt);
-            output.WriteLine("--------------------------------------------------");
+            colorWriter.WriteMuted("--------------------------------------------------");
         }
 
         // 3. Local: Validate outcome
         var outcome = _orchestrator.Process(rawData, renderedPrompt, provider, apiKey);
-        output.WriteLine(outcome.GuidanceMessage);
-        output.WriteLine("[3/5 Local -> Validate] Outcome validated successfully.");
+        colorWriter.WriteMuted(outcome.GuidanceMessage);
+        colorWriter.WriteSuccess("[3/5 Local -> Validate] Outcome validated successfully.");
 
         // 4. Review: Review outcome & Decide backlog type
         output.WriteLine();
-        output.WriteLine("[4/5 Review -> Review Outcome]");
+        colorWriter.WriteHeader("[4/5 Review -> Review Outcome]");
         output.WriteLine($"  Title      : {outcome.Title}");
         output.WriteLine($"  Description: {outcome.Description}");
         output.WriteLine($"  User Story : {outcome.UserStory}");
@@ -115,10 +131,10 @@ public sealed class AsIsV1Workflow
         if (string.IsNullOrWhiteSpace(backlogTypeSelection) && !options.NonInteractive)
         {
             output.WriteLine();
-            output.WriteLine("[4/5 Review -> Decide Backlog Type]");
-            output.WriteLine("  [1 / Type01] complete -> Use Given / When / Then (default)");
-            output.WriteLine("  [2 / Type02] schedule -> Use Title + Description");
-            output.Write("Select backlog type (1 or 2): ");
+            colorWriter.WriteHeader("[4/5 Review -> Decide Backlog Type]");
+            colorWriter.WriteMenuOption("1 / Type01", "complete", "Use Given / When / Then (default)");
+            colorWriter.WriteMenuOption("2 / Type02", "schedule", "Use Title + Description");
+            colorWriter.WriteColored("Select backlog type (01 or 02): ", ConsoleColor.Yellow);
             backlogTypeSelection = input.ReadLine();
         }
 
@@ -127,23 +143,59 @@ public sealed class AsIsV1Workflow
         // 5. Jira: Format output based on Type01 (complete) or Type02 (schedule)
         var ticket = _formatter.Format(outcome, backlogType);
         output.WriteLine();
-        output.WriteLine($"[5/5 Jira -> {ticket.JiraStage} ({ticket.BacklogType})]");
+        colorWriter.WriteSuccess($"[5/5 Jira -> {ticket.JiraStage} ({ticket.BacklogType})]");
         output.WriteLine(ticket.FormattedMarkdown);
 
         if (!string.IsNullOrWhiteSpace(options.OutputDirectory))
         {
-            Directory.CreateDirectory(options.OutputDirectory);
-            var mdPath = Path.Combine(options.OutputDirectory, "jira-backlog-item.md");
-            var jsonPath = Path.Combine(options.OutputDirectory, "jira-backlog-item.json");
-
-            File.WriteAllText(mdPath, ticket.FormattedMarkdown);
-            File.WriteAllText(jsonPath, JsonSerializer.Serialize(ticket, JsonOptions));
-
-            output.WriteLine();
-            output.WriteLine($"Saved Jira Markdown to: {mdPath}");
-            output.WriteLine($"Saved Jira JSON to    : {jsonPath}");
+            SaveTicketArtifacts(ticket, options.OutputDirectory, colorWriter);
         }
 
         return ticket;
+    }
+
+    public JiraBacklogTicket ExecuteQuickGoal(
+        string goalOrTitle,
+        string? backlogTypeInput,
+        WorkflowOptions baseOptions,
+        TextReader input,
+        TextWriter output)
+    {
+        ArgumentNullException.ThrowIfNull(baseOptions);
+
+        var goalOptions = baseOptions with
+        {
+            GoalTitle = goalOrTitle,
+            BacklogTypeInput = backlogTypeInput
+        };
+
+        return Execute(goalOptions, input, output);
+    }
+
+    private static void SaveTicketArtifacts(JiraBacklogTicket ticket, string outputDirectory, ConsoleColorWriter colorWriter)
+    {
+        Directory.CreateDirectory(outputDirectory);
+
+        var serializedJson = JsonSerializer.Serialize(ticket, JsonOptions);
+
+        // Canonical output filenames (backward-compatible)
+        var mdPath = Path.Combine(outputDirectory, "jira-backlog-item.md");
+        var jsonPath = Path.Combine(outputDirectory, "jira-backlog-item.json");
+        File.WriteAllText(mdPath, ticket.FormattedMarkdown);
+        File.WriteAllText(jsonPath, serializedJson);
+
+        // Slugged ready-to-add filenames per item in smart-backlog-assistant/out
+        var typePrefix = ticket.BacklogType.ToString().ToLowerInvariant();
+        var slug = WorkspacePathService.CreateSlug(ticket.Title);
+        var slugMdPath = Path.Combine(outputDirectory, $"{typePrefix}-{slug}.md");
+        var slugJsonPath = Path.Combine(outputDirectory, $"{typePrefix}-{slug}.json");
+        File.WriteAllText(slugMdPath, ticket.FormattedMarkdown);
+        File.WriteAllText(slugJsonPath, serializedJson);
+
+        colorWriter.WriteLine();
+        colorWriter.WriteSuccess($"Saved Jira Markdown to: {mdPath}");
+        colorWriter.WriteSuccess($"Saved Jira JSON to    : {jsonPath}");
+        colorWriter.WriteMuted($"Ready-to-add item     : {slugMdPath}");
+        colorWriter.WriteMuted($"Ready-to-add JSON     : {slugJsonPath}");
     }
 }

@@ -39,4 +39,41 @@ public sealed class CliArgumentParserTests
         Assert.Equal("artifacts", options.OutputDirectory);
         Assert.True(options.NonInteractive);
     }
+
+    [Fact]
+    public void ParseArgs_WithWorkspaceAndGoalArguments_ParsesWorkspaceAndGoalAndMenuFlags()
+    {
+        string[] args =
+        [
+            "--workspace", "/mnt/c/workspace",
+            "--goal", "Add Redis Distributed Cache",
+            "--type", "02",
+            "--menu"
+        ];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("/mnt/c/workspace", options.WorkspaceRoot);
+        Assert.Equal("Add Redis Distributed Cache", options.GoalTitle);
+        Assert.Equal("02", options.BacklogTypeInput);
+        Assert.True(options.ForceMenu);
+    }
+
+    [Fact]
+    public void ShouldLaunchMenu_WhenDefaultInteractiveRun_ReturnsTrue()
+    {
+        string[] args = [];
+        var options = Program.ParseArgs(args);
+
+        Assert.True(Program.ShouldLaunchMenu(args, options));
+    }
+
+    [Fact]
+    public void ShouldLaunchMenu_WhenNonInteractiveOrDirectFlagsProvided_ReturnsFalse()
+    {
+        string[] args = ["--type", "Type01", "--non-interactive"];
+        var options = Program.ParseArgs(args);
+
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
 }

@@ -111,7 +111,7 @@ public sealed class AiModelOrchestrator
         var lines = rawData
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        var title = ExtractPrefixedLine(lines, "Discovery Note", "Title", "Subject")
+        var title = ExtractPrefixedLine(lines, "Discovery Note", "Title", "Subject", "Goal")
             ?? lines.FirstOrDefault()
             ?? "Backlog Requirement";
 
@@ -120,6 +120,22 @@ public sealed class AiModelOrchestrator
         if (title.StartsWith("Discovery Note", StringComparison.OrdinalIgnoreCase) && dashIndex > 0 && dashIndex < title.Length - 1)
         {
             title = title[(dashIndex + 1)..].Trim();
+        }
+        else
+        {
+            foreach (var prefix in new[] { "Title:", "Subject:", "Goal:" })
+            {
+                if (title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    var stripped = title[prefix.Length..].Trim();
+                    if (!string.IsNullOrWhiteSpace(stripped))
+                    {
+                        title = stripped;
+                    }
+
+                    break;
+                }
+            }
         }
 
         var context = ExtractPrefixedValue(lines, "Context:")

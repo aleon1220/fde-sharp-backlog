@@ -20,7 +20,7 @@ public sealed class JiraBacklogFormatter
 
         return userInput.Trim().ToLowerInvariant() switch
         {
-            "2" or "type02" or "type2" or "schedule" => BacklogType.Type02,
+            "2" or "02" or "type02" or "type 02" or "type2" or "type 2" or "schedule" => BacklogType.Type02,
             _ => BacklogType.Type01
         };
     }
