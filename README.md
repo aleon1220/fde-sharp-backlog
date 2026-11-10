@@ -2,10 +2,6 @@
 
 .NET 10 CLI tool for generating Jira backlogs using an **AI-First SDLC** workflow.
 
-```powershell
-winget install Microsoft.DotNet.SDK.10
-```
-
 ## Workflow Overview
 
 1. **Runtime Telemetry**: Displays active OS, build info (`v1.1.0-gemini-runtime`), .NET runtime, and enabled AI model (`Google Gemini / gemini-2.5-flash`).
@@ -17,6 +13,12 @@ winget install Microsoft.DotNet.SDK.10
 4. **Review & Jira Output (`Type01` | `Type02`)**: Formats `Type01` (`complete` — Given/When/Then) or `Type02` (`schedule` — Title + Description) to console and `output/`.
 
 ## Quick Start (.NET 10 SDK)
+
+* [get dotnet](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)
+
+```powershell
+winget install Microsoft.DotNet.SDK.10
+```
 
 * 1. Set OS Environment Variable (Optional)
 
