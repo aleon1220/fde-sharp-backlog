@@ -2,6 +2,10 @@
 
 .NET 10 CLI tool for generating Jira backlogs using an **AI-First SDLC** workflow.
 
+```powershell
+winget install Microsoft.DotNet.SDK.10
+```
+
 ## Workflow Overview
 
 1. **Runtime Telemetry**: Displays active OS, build info (`v1.1.0-gemini-runtime`), .NET runtime, and enabled AI model (`Google Gemini / gemini-2.5-flash`).
@@ -14,35 +18,44 @@
 
 ## Quick Start (.NET 10 SDK)
 
-### 1. Set OS Environment Variable (Optional)
+* 1. Set OS Environment Variable (Optional)
+
+* Windows
+
 ```powershell
 # Windows PowerShell
-$env:GEMINI_API_KEY = "your-gemini-api-key"
-```
-```bash
-# Linux / macOS
-export GEMINI_API_KEY="your-gemini-api-key"
+$env:GEMINI_API_KEY = "useYourGeminiAPI_Key"
 ```
 
-### 2. Run Interactively (Prompts for Key if Unset)
+* Linux / macOS
+
+```bash
+export GEMINI_API_KEY="useYourGeminiAPI_Key"
+```
+
+* 2. Run Interactively (Prompts for Key if Unset)
+
 ```bash
 dotnet run --project src/SmartBacklogAssistant
 ```
 
-### 3. Run Non-Interactively
+* 3. Run Non-Interactively
+
 ```bash
 dotnet run --project src/SmartBacklogAssistant -- \
-  --api-key "demo-key-1234" \
+  --api-key "$GEMINI_API_KEY" \
   --type Type01 \
   --non-interactive
 ```
 
-## Run Tests
+* Run Tests
+
 ```bash
 dotnet test
 ```
 
 ## Containers & Podman Kubernetes
+
 ```bash
 podman build -t localhost/smart-backlog-assistant:v1 -f Containerfile .
 podman kube play k8s/smart-backlog-pod.yaml
@@ -51,4 +64,5 @@ podman kube down k8s/smart-backlog-pod.yaml
 ```
 
 ## Findings & Iteration Backlog
+
 See [BACKLOG.md](BACKLOG.md) for runtime findings and prioritized iteration items (`SBA-101`–`SBA-105`).
