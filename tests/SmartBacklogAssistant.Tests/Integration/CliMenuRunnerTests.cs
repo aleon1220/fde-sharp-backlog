@@ -22,7 +22,7 @@ public sealed class CliMenuRunnerTests : IDisposable
     }
 
     [Fact]
-    public void Run_Option1_ReadsFromSmartBacklogAssistantInAndOutputsToOut()
+    public void Run_ProcessAllFiles_UsesInputDirectoryAndWritesToOutputDirectory()
     {
         var workspaceService = new WorkspacePathService(environmentReader: _ => null);
         var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
@@ -38,12 +38,7 @@ public sealed class CliMenuRunnerTests : IDisposable
             Expected Outcome: Traffic routes to standby region automatically.
             """);
 
-        // Menu sequence:
-        // "1" -> Option 1 (Process Input Directory)
-        // ""  -> Select file 1 (default)
-        // "01" -> Choose Type 01 in workflow review
-        // "0" -> Exit menu
-        using var input = new StringReader("1\n\n01\n0\n");
+        using var input = new StringReader("1\n1\n01\n0\n0\n");
         using var output = new StringWriter();
 
         var menu = CreateMenuRunner(workspaceService);
@@ -62,27 +57,48 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.False(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-automated-failover-check.json")));
 
         var consoleText = output.ToString();
-        Assert.Contains("SMART BACKLOG ASSISTANT — CLI MENU", consoleText);
+        Assert.Contains("Smart Backlog Assistant", consoleText);
+        Assert.Contains("Process Input Files", consoleText);
+        Assert.Contains("In: ./in (1 files) | Out: ./out | Export: .md (JSON: OFF)", consoleText);
         Assert.Contains("Automated Failover Check", consoleText);
     }
 
     [Fact]
-    public void Run_Option4_ConfigureSettings_EnablesJsonFileOutAndPersistsSettingsJson()
+    public void Run_DryRunPreviewsSelectedFileWithoutWritingArtifacts()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        Directory.CreateDirectory(dirs.InputDirectory);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        File.WriteAllText(Path.Combine(dirs.InputDirectory, "preview.txt"), "Title: Preview only\nContext: Validate dry-run behavior.");
+
+        using var input = new StringReader("1\n3\n01\n0\n0\n");
+        using var output = new StringWriter();
+        var menu = CreateMenuRunner(workspaceService);
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            ApiKey: "AIzaSyDryRunKey1234",
+            WorkspaceRoot: _tempWorkspaceRoot);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        Assert.Empty(Directory.GetFiles(dirs.OutputDirectory));
+        Assert.Contains("Dry Run (Preview Only)", output.ToString());
+        Assert.Contains("No files written", output.ToString());
+    }
+
+    [Fact]
+    public void Run_SettingsTogglePersistsAndUpdatesRootStatus()
     {
         var workspaceService = new WorkspacePathService(environmentReader: _ => null);
         var settingsService = new CliSettingsService();
         var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
 
-        // Menu sequence:
-        // "4" -> Option 4 (Configure Settings)
-        // "1" -> Toggle JSON File Out (from default OFF -> ON)
-        // "2" -> Option 2 (Add Goal or Title)
-        // "Enable JSON Export Setting" -> Goal/Title
-        // "01" -> Select Type 01
-        // "0" -> Exit
         using var input = new StringReader(
-            "4\n1\n" +
-            "2\nEnable JSON Export Setting\n01\n" +
+            "3\n1\n0\n" +
+            "2\n1\nEnable JSON Export Setting\n0\n" +
             "0\n");
         using var output = new StringWriter();
 
@@ -107,8 +123,9 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-enable-json-export-setting.json")));
 
         var consoleText = output.ToString();
-        Assert.Contains("Configure Settings", consoleText);
-        Assert.Contains("JSON File Out set to ON (.md + .json)", consoleText);
+        Assert.Contains("Workspace & Settings", consoleText);
+        Assert.Contains("JSON Export is now ON", consoleText);
+        Assert.Contains("Export: .md (JSON: ON)", consoleText);
     }
 
     [Fact]
@@ -117,20 +134,11 @@ public sealed class CliMenuRunnerTests : IDisposable
         var workspaceService = new WorkspacePathService(environmentReader: _ => null);
         var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
 
-        // Menu sequence:
-        // "2" -> Option 2 (Add Goal or Title)
-        // "Implement OAuth2 PKCE Login" -> Goal/Title
-        // "01" -> Select Type 01 (Given/When/Then)
-        // "2" -> Option 2 (Add Goal or Title again)
-        // "Migrate Telemetry to OpenTelemetry" -> Goal/Title
-        // "02" -> Select Type 02 (Title + Description)
-        // "3" -> Inspect Workspace & Runtime Status
-        // "0" -> Exit
         using var input = new StringReader(
-            "2\nImplement OAuth2 PKCE Login\n01\n" +
-            "2\nMigrate Telemetry to OpenTelemetry\n02\n" +
-            "3\n" +
-            "0\n");
+            "2\n1\nImplement OAuth2 PKCE Login\n" +
+            "2\nMigrate Telemetry to OpenTelemetry\n" +
+            "3\nGenerate Both OAuth2 Formats\n0\n" +
+            "3\n3\n0\n0\n");
         using var output = new StringWriter();
 
         var menu = CreateMenuRunner(workspaceService);
@@ -146,9 +154,13 @@ public sealed class CliMenuRunnerTests : IDisposable
 
         var type01MdPath = Path.Combine(dirs.OutputDirectory, "type01-implement-oauth2-pkce-login.md");
         var type02MdPath = Path.Combine(dirs.OutputDirectory, "type02-migrate-telemetry-to-opentelemetry.md");
+        var combinedType01Path = Path.Combine(dirs.OutputDirectory, "type01-generate-both-oauth2-formats.md");
+        var combinedType02Path = Path.Combine(dirs.OutputDirectory, "type02-generate-both-oauth2-formats.md");
 
         Assert.True(File.Exists(type01MdPath));
         Assert.True(File.Exists(type02MdPath));
+        Assert.True(File.Exists(combinedType01Path));
+        Assert.True(File.Exists(combinedType02Path));
 
         var type01Content = File.ReadAllText(type01MdPath);
         Assert.Contains("# [Jira - complete (Type01)] Implement OAuth2 PKCE Login", type01Content);
@@ -159,8 +171,35 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.Contains("## Description", type02Content);
 
         var consoleText = output.ToString();
-        Assert.Contains(@"Windows Default Root : c:\workspace", consoleText);
-        Assert.Contains("WSL Compatible Root  : /mnt/c/workspace", consoleText);
+        Assert.Contains(@"Windows: c:\workspace\smart-backlog-assistant\in", consoleText);
+        Assert.Contains("WSL    : /mnt/c/workspace/smart-backlog-assistant/in", consoleText);
+    }
+
+    [Fact]
+    public void Run_SettingsCanInspectDirectorySizesAndRuntimeDiagnostics()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        Directory.CreateDirectory(dirs.InputDirectory);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        File.WriteAllText(Path.Combine(dirs.InputDirectory, "queued.txt"), "queued");
+        File.WriteAllText(Path.Combine(dirs.OutputDirectory, "existing.md"), "artifact");
+
+        using var input = new StringReader("3\n2\n3\n0\n0\n");
+        using var output = new StringWriter();
+        var menu = CreateMenuRunner(workspaceService);
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        Assert.Contains("queued.txt (6 bytes)", output.ToString());
+        Assert.Contains("existing.md (8 bytes)", output.ToString());
+        Assert.Contains("GEMINI_API_KEY:", output.ToString());
+        Assert.Contains("AI Model Enabled", output.ToString());
     }
 
     private static CliMenuRunner CreateMenuRunner(

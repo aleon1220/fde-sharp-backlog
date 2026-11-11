@@ -19,7 +19,8 @@ public sealed record WorkflowOptions(
     bool ForceMenu = false,
     bool? JsonFileOut = null,
     bool GeminiLive = false,
-    bool ListGeminiModels = false);
+    bool ListGeminiModels = false,
+    bool CombinedOutput = false);
 
 public sealed class AsIsV1Workflow
 {
@@ -160,20 +161,30 @@ public sealed class AsIsV1Workflow
         }
 
         var backlogType = _formatter.ResolveBacklogType(backlogTypeSelection);
+        IReadOnlyList<JiraBacklogTicket> tickets = options.CombinedOutput
+            ? [
+                _formatter.Format(outcome, BacklogType.Type01),
+                _formatter.Format(outcome, BacklogType.Type02)
+            ]
+            : [_formatter.Format(outcome, backlogType)];
 
-        // 5. Jira: Format output based on Type01 (complete) or Type02 (schedule)
-        var ticket = _formatter.Format(outcome, backlogType);
-        output.WriteLine();
-        colorWriter.WriteSuccess($"[5/5 Jira -> {ticket.JiraStage} ({ticket.BacklogType})]");
-        output.WriteLine(ticket.FormattedMarkdown);
+        foreach (var ticketToOutput in tickets)
+        {
+            output.WriteLine();
+            colorWriter.WriteSuccess($"[5/5 Jira -> {ticketToOutput.JiraStage} ({ticketToOutput.BacklogType})]");
+            output.WriteLine(ticketToOutput.FormattedMarkdown);
+        }
 
         if (!string.IsNullOrWhiteSpace(options.OutputDirectory))
         {
             var jsonFileOut = options.JsonFileOut ?? false;
-            SaveTicketArtifacts(ticket, options.OutputDirectory, jsonFileOut, colorWriter);
+            foreach (var ticketToSave in tickets)
+            {
+                SaveTicketArtifacts(ticketToSave, options.OutputDirectory, jsonFileOut, colorWriter);
+            }
         }
 
-        return ticket;
+        return tickets[0];
     }
 
     private static string SelectGeminiModel(

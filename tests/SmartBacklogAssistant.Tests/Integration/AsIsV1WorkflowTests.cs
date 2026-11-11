@@ -223,6 +223,30 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Equal("Created from Gemini", ticket.Description);
     }
 
+    [Fact]
+    public void Execute_WithCombinedOutput_FormatsAndSavesBothTypesFromOneExecution()
+    {
+        using var input = new StringReader(string.Empty);
+        using var output = new StringWriter();
+        var workflow = CreateWorkflow();
+        var options = new WorkflowOptions(
+            InputFilePath: _inputFilePath,
+            PromptFilePath: _promptFilePath,
+            ProviderInput: "manual",
+            BacklogTypeInput: "Type01",
+            OutputDirectory: _outputDir,
+            NonInteractive: true,
+            CombinedOutput: true);
+
+        var ticket = workflow.Execute(options, input, output);
+
+        Assert.Equal(BacklogType.Type01, ticket.BacklogType);
+        Assert.Contains("Jira - complete (Type01)", output.ToString());
+        Assert.Contains("Jira - schedule (Type02)", output.ToString());
+        Assert.True(File.Exists(Path.Combine(_outputDir, "type01-webhook-retry-policy.md")));
+        Assert.True(File.Exists(Path.Combine(_outputDir, "type02-webhook-retry-policy.md")));
+    }
+
     private static AsIsV1Workflow CreateWorkflow(
         GeminiSecretProvider? secretProvider = null,
         GeminiApiClient? geminiApiClient = null) =>

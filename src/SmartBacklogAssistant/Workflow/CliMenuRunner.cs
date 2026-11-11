@@ -10,6 +10,15 @@ namespace SmartBacklogAssistant.Workflow;
 /// </summary>
 public sealed class CliMenuRunner
 {
+    private enum MenuState
+    {
+        Main,
+        ProcessFiles,
+        DraftItem,
+        Settings,
+        Exit
+    }
+
     private readonly AsIsV1Workflow _workflow;
     private readonly WorkspacePathService _workspaceService;
     private readonly RuntimeEnvironmentService _runtimeEnvService;
@@ -60,66 +69,58 @@ public sealed class CliMenuRunner
             JsonFileOut = currentSettings.JsonFileOut
         };
 
-        WriteWelcomeBanner(color, workspace);
-
-        while (true)
+        var state = MenuState.Main;
+        while (state != MenuState.Exit)
         {
-            var jsonOutLabel = currentSettings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)";
-            color.WriteLine();
-            color.WriteHeader("┌──────────────────────────────────────────────────────────────────────┐");
-            color.WriteHeader("│                 SMART BACKLOG ASSISTANT — CLI MENU                   │");
-            color.WriteHeader("└──────────────────────────────────────────────────────────────────────┘");
-            color.WriteMuted($"  Input Dir : {workspace.InputDirectory}");
-            color.WriteMuted($"  Output Dir: {sessionOptions.OutputDirectory}");
-            color.WriteMuted($"  JSON Out  : {jsonOutLabel}");
-            color.WriteLine();
-            color.WriteMenuOption("1", "Process Input Directory", $"Read from '{WorkspacePathService.AppDirectoryName}/{WorkspacePathService.InputFolderName}' -> output to '{WorkspacePathService.AppDirectoryName}/{WorkspacePathService.OutputFolderName}'");
-            color.WriteMenuOption("2", "Add Goal or Title", "Create a new Goal/Title and select Type 01 or Type 02 ready to be added");
-            color.WriteMenuOption("3", "Workspace & Runtime Status", "Inspect WSL / Windows paths, AI model, and directory contents");
-            color.WriteMenuOption("4", "Configure Settings", $"Configure CLI settings (JSON file out: {(currentSettings.JsonFileOut ? "ON" : "OFF")})");
-            color.WriteMenuOption("0", "Exit", "Close Smart Backlog Assistant");
-            color.WriteLine();
-            color.WriteColored("Select an option (1, 2, 3, 4, or 0 to exit): ", ConsoleColor.Yellow);
-
-            var choice = input.ReadLine();
-            if (choice is null)
+            state = state switch
             {
-                color.WriteLine();
-                color.WriteMuted("Exiting Smart Backlog Assistant.");
-                return 0;
-            }
-
-            var normalizedChoice = choice.Trim().ToLowerInvariant();
-            switch (normalizedChoice)
-            {
-                case "0" or "q" or "quit" or "exit":
-                    color.WriteSuccess("Goodbye! Backlog artifacts are ready in: " + sessionOptions.OutputDirectory);
-                    return 0;
-
-                case "1":
-                    HandleProcessInputDirectory(workspace, ref sessionOptions, input, output, color);
-                    break;
-
-                case "2":
-                    HandleAddGoalOrTitle(ref sessionOptions, input, output, color);
-                    break;
-
-                case "3":
-                    HandleInspectStatus(workspace, sessionOptions, currentSettings, color);
-                    break;
-
-                case "4" or "s" or "settings" or "config":
-                    HandleConfigureSettings(workspace, ref sessionOptions, ref currentSettings, input, color);
-                    break;
-
-                default:
-                    color.WriteWarning($"  [!] Unknown menu option '{choice.Trim()}'. Please choose 1, 2, 3, 4, or 0.");
-                    break;
-            }
+                MenuState.Main => ShowMainMenu(workspace, currentSettings, input, color),
+                MenuState.ProcessFiles => ShowProcessFilesMenu(workspace, ref sessionOptions, input, output, color),
+                MenuState.DraftItem => ShowDraftItemMenu(ref sessionOptions, input, output, color),
+                MenuState.Settings => ShowSettingsMenu(workspace, ref sessionOptions, ref currentSettings, input, color),
+                _ => MenuState.Exit
+            };
         }
+
+        color.WriteLine();
+        color.WriteSuccess("Goodbye! Backlog artifacts are ready in: " + sessionOptions.OutputDirectory);
+        return 0;
     }
 
-    private void HandleProcessInputDirectory(
+    private MenuState ShowMainMenu(
+        WorkspaceDirectories workspace,
+        CliSettings currentSettings,
+        TextReader input,
+        ConsoleColorWriter color)
+    {
+        var files = _workspaceService.GetInputFiles(workspace.InputDirectory);
+        color.WriteLine();
+        color.WriteHeader("Smart Backlog Assistant");
+        color.WriteMuted($"In: ./in ({files.Count} files) | Out: ./out | Export: .md (JSON: {(currentSettings.JsonFileOut ? "ON" : "OFF")})");
+        color.WriteLine();
+        color.WriteMenuOption("1", "Process Input Files", "Extract Jira items from './in' to './out'");
+        color.WriteMenuOption("2", "Draft Backlog Item", "Create a User Story (Type01) or Task (Type02)");
+        color.WriteMenuOption("3", "Workspace & Settings", "Configure outputs, inspect files, & diagnostics");
+        color.WriteMenuOption("0", "Exit");
+        color.WriteColored("Select an option (0-3): ", ConsoleColor.Yellow);
+
+        var choice = input.ReadLine();
+        if (choice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        return choice.Trim() switch
+        {
+            "0" or "q" or "Q" => MenuState.Exit,
+            "1" => MenuState.ProcessFiles,
+            "2" => MenuState.DraftItem,
+            "3" => MenuState.Settings,
+            _ => WarnAndStay(color, choice, "0, 1, 2, or 3", MenuState.Main)
+        };
+    }
+
+    private MenuState ShowProcessFilesMenu(
         WorkspaceDirectories workspace,
         ref WorkflowOptions sessionOptions,
         TextReader input,
@@ -130,202 +131,310 @@ public sealed class CliMenuRunner
         var files = _workspaceService.GetInputFiles(workspace.InputDirectory);
 
         color.WriteLine();
-        color.WriteHeader($"=== [Option 1] Process Files from '{workspace.InputDirectory}' ===");
+        color.WriteLine();
+        color.WriteHeader("=== Process Input Files ===");
+        color.WriteMuted($"Queued files in {workspace.InputDirectory}: {files.Count}");
+        for (var index = 0; index < files.Count; index++)
+        {
+            color.WriteLine($"  {Path.GetFileName(files[index])}");
+        }
 
         if (files.Count == 0)
         {
-            color.WriteWarning($"  [!] No .txt or .md files found in '{workspace.InputDirectory}'.");
-            color.WriteMuted("  Tip: Add a discovery file to the 'in' folder or use Option [2] to add a Goal/Title directly.");
+            color.WriteMuted("  No .txt or .md files are queued.");
+        }
+
+        color.WriteLine();
+        color.WriteMenuOption("1", "Process All Files");
+        color.WriteMenuOption("2", "Select Single File");
+        color.WriteMenuOption("3", "Dry Run (Preview Only)");
+        color.WriteMenuOption("0", "Back to Main Menu");
+        color.WriteColored("Select an option (0-3): ", ConsoleColor.Yellow);
+
+        var choice = input.ReadLine();
+        if (choice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        switch (choice.Trim())
+        {
+            case "0":
+                return MenuState.Main;
+            case "1":
+                ProcessFiles(files, false, ref sessionOptions, input, output, color);
+                return MenuState.ProcessFiles;
+            case "2":
+                var selectedFile = SelectSingleFile(files, input, color);
+                if (selectedFile is not null)
+                {
+                    ProcessFiles([selectedFile], false, ref sessionOptions, input, output, color);
+                }
+
+                return MenuState.ProcessFiles;
+            case "3":
+                ProcessFiles(files, true, ref sessionOptions, input, output, color);
+                return MenuState.ProcessFiles;
+            default:
+                return WarnAndStay(color, choice, "0, 1, 2, or 3", MenuState.ProcessFiles);
+        }
+    }
+
+    private string? SelectSingleFile(IReadOnlyList<string> files, TextReader input, ConsoleColorWriter color)
+    {
+        if (files.Count == 0)
+        {
+            color.WriteWarning("  [!] There are no files to select.");
+            return null;
+        }
+
+        for (var index = 0; index < files.Count; index++)
+        {
+            color.WriteMenuOption((index + 1).ToString(), Path.GetFileName(files[index]));
+        }
+
+        color.WriteMenuOption("0", "Cancel");
+        color.WriteColored($"Select a file (1-{files.Count}, or 0 to cancel): ", ConsoleColor.Yellow);
+        var selection = input.ReadLine()?.Trim();
+        if (selection == "0")
+        {
+            return null;
+        }
+
+        if (int.TryParse(selection, out var fileIndex) && fileIndex >= 1 && fileIndex <= files.Count)
+        {
+            return files[fileIndex - 1];
+        }
+
+        color.WriteWarning($"  [!] Invalid file selection '{selection}'.");
+        return null;
+    }
+
+    private void ProcessFiles(
+        IReadOnlyList<string> files,
+        bool dryRun,
+        ref WorkflowOptions sessionOptions,
+        TextReader input,
+        TextWriter output,
+        ConsoleColorWriter color)
+    {
+        if (files.Count == 0)
+        {
+            color.WriteWarning("  [!] No input files to process.");
             return;
         }
 
-        for (var i = 0; i < files.Count; i++)
-        {
-            color.WriteMenuOption((i + 1).ToString(), Path.GetFileName(files[i]), files[i]);
-        }
-
-        if (files.Count > 1)
-        {
-            color.WriteMenuOption("A", "All Files", $"Process all {files.Count} files in '{workspace.InputDirectory}'");
-        }
-
-        color.WriteColored($"Select file [1-{files.Count}] (press Enter for 1{(files.Count > 1 ? ", or A for all" : "")}): ", ConsoleColor.Yellow);
-        var selection = input.ReadLine()?.Trim();
-
-        IReadOnlyList<string> selectedFiles;
-        if (string.IsNullOrWhiteSpace(selection) || selection == "1")
-        {
-            selectedFiles = [files[0]];
-        }
-        else if (string.Equals(selection, "a", StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(selection, "all", StringComparison.OrdinalIgnoreCase))
-        {
-            selectedFiles = files;
-        }
-        else if (int.TryParse(selection, out var index) && index >= 1 && index <= files.Count)
-        {
-            selectedFiles = [files[index - 1]];
-        }
-        else
-        {
-            color.WriteWarning($"  [!] Invalid file selection '{selection}'. Defaulting to '{Path.GetFileName(files[0])}'.");
-            selectedFiles = [files[0]];
-        }
-
-        foreach (var filePath in selectedFiles)
+        foreach (var filePath in files)
         {
             color.WriteLine();
-            color.WriteSubHeader($">>> Processing '{Path.GetFileName(filePath)}'...");
+            color.WriteSubHeader($">>> {(dryRun ? "Previewing" : "Processing")} '{Path.GetFileName(filePath)}'...");
             var fileOptions = sessionOptions with
             {
                 InputFilePath = filePath,
-                GoalTitle = null
+                GoalTitle = null,
+                OutputDirectory = dryRun ? null : sessionOptions.OutputDirectory
             };
 
             var ticket = _workflow.Execute(fileOptions, input, output);
             CacheResolvedApiKeyIfPresent(ref sessionOptions);
-            color.WriteSuccess($"[✓] Completed '{ticket.Title}' ({ticket.BacklogType} -> {ticket.JiraStage}).");
+            if (dryRun)
+            {
+                color.WriteSuccess($"[Preview] '{ticket.Title}' ({ticket.BacklogType} -> {ticket.JiraStage}). No files written.");
+            }
+            else
+            {
+                color.WriteSuccess($"[✓] Completed '{ticket.Title}' ({ticket.BacklogType} -> {ticket.JiraStage}).");
+            }
         }
     }
 
-    private void HandleAddGoalOrTitle(
+    private MenuState ShowDraftItemMenu(
         ref WorkflowOptions sessionOptions,
         TextReader input,
         TextWriter output,
         ConsoleColorWriter color)
     {
         color.WriteLine();
-        color.WriteHeader("=== [Option 2] Add Goal or Title (Ready-to-Add Backlog Item) ===");
-        color.WriteColored("Enter Goal or Title: ", ConsoleColor.Yellow);
+        color.WriteHeader("=== Draft Backlog Item ===");
+        color.WriteMenuOption("1", "Complete User Story (Type 01)", "Title, Description, User Story, and Given/When/Then criteria");
+        color.WriteMenuOption("2", "Schedule Item (Type 02)", "Concise Title and Engineering Description");
+        color.WriteMenuOption("3", "Combined Output (Both)", "Generate Type 01 and Type 02 from one draft");
+        color.WriteMenuOption("0", "Back to Main Menu");
+        color.WriteColored("Select an option (0-3): ", ConsoleColor.Yellow);
 
+        var choice = input.ReadLine();
+        if (choice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var normalizedChoice = choice.Trim();
+        if (normalizedChoice == "0")
+        {
+            return MenuState.Main;
+        }
+
+        if (normalizedChoice is not ("1" or "2" or "3"))
+        {
+            return WarnAndStay(color, choice, "0, 1, 2, or 3", MenuState.DraftItem);
+        }
+
+        color.WriteColored("Enter Goal or Title: ", ConsoleColor.Yellow);
         var goalOrTitle = input.ReadLine()?.Trim();
         if (string.IsNullOrWhiteSpace(goalOrTitle))
         {
-            color.WriteWarning("  [!] Goal or Title cannot be empty. Returning to main menu.");
-            return;
+            color.WriteWarning("  [!] Goal or Title cannot be empty.");
+            return MenuState.DraftItem;
         }
 
-        color.WriteLine();
-        color.WriteSubHeader("Select Output Backlog Type:");
-        color.WriteMenuOption("01", "Type 01 (complete)", "Given / When / Then acceptance criteria + User Story (default)");
-        color.WriteMenuOption("02", "Type 02 (schedule)", "Title + Description ready for scheduling");
-        color.WriteColored("Select output type (01 or 02) [default: 01]: ", ConsoleColor.Yellow);
-
-        var typeInput = input.ReadLine()?.Trim();
-        var resolvedTypeInput = string.IsNullOrWhiteSpace(typeInput) ? "Type01" : typeInput;
-
+        var combinedOutput = normalizedChoice == "3";
+        var backlogType = normalizedChoice == "2" ? "Type02" : "Type01";
         var ticket = _workflow.ExecuteQuickGoal(
             goalOrTitle: goalOrTitle,
-            backlogTypeInput: resolvedTypeInput,
-            baseOptions: sessionOptions,
+            backlogTypeInput: backlogType,
+            baseOptions: sessionOptions with { CombinedOutput = combinedOutput },
             input: input,
             output: output);
 
         CacheResolvedApiKeyIfPresent(ref sessionOptions);
-        color.WriteSuccess($"[✓] Ready-to-add {ticket.BacklogType} item '{ticket.Title}' saved to '{sessionOptions.OutputDirectory}'.");
+        var resultDescription = combinedOutput ? "Type01 and Type02 items" : $"{ticket.BacklogType} item";
+        color.WriteSuccess($"[✓] Ready-to-add {resultDescription} '{ticket.Title}' saved to '{sessionOptions.OutputDirectory}'.");
+        return MenuState.DraftItem;
     }
 
-    private void HandleInspectStatus(
-        WorkspaceDirectories workspace,
-        WorkflowOptions sessionOptions,
-        CliSettings currentSettings,
-        ConsoleColorWriter color)
-    {
-        color.WriteLine();
-        color.WriteHeader("=== [Option 3] Workspace & Runtime Status ===");
-
-        var provider = string.IsNullOrWhiteSpace(sessionOptions.ProviderInput)
-            ? AiProviderType.GoogleGemini
-            : _orchestrator.ResolveProvider(sessionOptions.ProviderInput);
-
-        var secret = _secretProvider.Resolve(sessionOptions.ApiKey);
-        var runtimeInfo = _runtimeEnvService.Inspect(provider, sessionOptions.ModelName);
-        color.WriteMuted(_runtimeEnvService.FormatRuntimeBanner(runtimeInfo, secret));
-
-        var settingsFilePath = _settingsService.GetSettingsFilePath(workspace);
-        color.WriteLine();
-        color.WriteSubHeader("--- Cross-Platform Workspace Paths (Windows & WSL) ---");
-        color.WriteLine($"  Windows Default Root : {WorkspacePathService.DefaultWindowsWorkspaceRoot}");
-        color.WriteLine($"  WSL Compatible Root  : {WorkspacePathService.DefaultWslWorkspaceRoot}");
-        color.WriteLine($"  Active Workspace Root: {workspace.WorkspaceRoot}");
-        color.WriteLine($"  Input Directory (in) : {workspace.InputDirectory}");
-        color.WriteLine($"  Output Directory(out): {sessionOptions.OutputDirectory}");
-        color.WriteLine($"  Settings File        : {settingsFilePath}");
-        color.WriteLine($"  JSON File Out        : {(currentSettings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)")}");
-
-        var inFiles = _workspaceService.GetInputFiles(workspace.InputDirectory);
-        color.WriteLine($"  Files in 'in/' ({inFiles.Count})   : {(inFiles.Count == 0 ? "none" : string.Join(", ", inFiles.Select(Path.GetFileName)))}");
-
-        if (!string.IsNullOrWhiteSpace(sessionOptions.OutputDirectory) && Directory.Exists(sessionOptions.OutputDirectory))
-        {
-            var outFiles = Directory.EnumerateFiles(sessionOptions.OutputDirectory)
-                .Select(Path.GetFileName)
-                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            color.WriteLine($"  Files in 'out/' ({outFiles.Length})  : {(outFiles.Length == 0 ? "none" : string.Join(", ", outFiles))}");
-        }
-    }
-
-    private void HandleConfigureSettings(
+    private MenuState ShowSettingsMenu(
         WorkspaceDirectories workspace,
         ref WorkflowOptions sessionOptions,
         ref CliSettings currentSettings,
         TextReader input,
         ConsoleColorWriter color)
     {
-        var settingsFilePath = _settingsService.GetSettingsFilePath(workspace);
-        var currentStateLabel = currentSettings.JsonFileOut ? "ON" : "OFF";
-        var currentBehavior = currentSettings.JsonFileOut
-            ? "writes both .md and .json files"
-            : "writes .md files only (default)";
+        WriteSettingsHeader(workspace, sessionOptions, currentSettings, color);
+        color.WriteMenuOption("1", $"Toggle JSON Export [{(currentSettings.JsonFileOut ? "ON" : "OFF")}]");
+        color.WriteMenuOption("2", "Inspect Directories");
+        color.WriteMenuOption("3", "Runtime & AI Diagnostics");
+        color.WriteMenuOption("0", "Back to Main Menu");
+        color.WriteColored("Select an option (0-3): ", ConsoleColor.Yellow);
 
-        color.WriteLine();
-        color.WriteHeader("=== [Option 4] Configure Settings ===");
-        color.WriteMuted($"  Settings File: {settingsFilePath}");
-        color.WriteLine();
-        color.WriteMenuOption("1", $"JSON File Out [{currentStateLabel}]", $"Toggle whether .json backlog files are written to the output directory ({currentBehavior})");
-        color.WriteMenuOption("0", "Back", "Return to main menu");
-        color.WriteLine();
-        color.WriteColored("Select setting (1 to toggle JSON file out, on/off, or 0 to return): ", ConsoleColor.Yellow);
-
-        var rawInput = input.ReadLine();
-        if (rawInput is null)
+        var choice = input.ReadLine();
+        if (choice is null)
         {
+            return MenuState.Exit;
+        }
+
+        switch (choice.Trim())
+        {
+            case "0":
+                return MenuState.Main;
+            case "1":
+                currentSettings = currentSettings with { JsonFileOut = !currentSettings.JsonFileOut };
+                sessionOptions = sessionOptions with { JsonFileOut = currentSettings.JsonFileOut };
+                var savedPath = _settingsService.Save(workspace, currentSettings);
+                color.WriteSuccess($"JSON Export is now {(currentSettings.JsonFileOut ? "ON" : "OFF")}. Saved settings to '{savedPath}'.");
+                return MenuState.Settings;
+            case "2":
+                InspectDirectoryContents("Input", workspace.InputDirectory, color);
+                InspectDirectoryContents("Output", sessionOptions.OutputDirectory ?? workspace.OutputDirectory, color);
+                return MenuState.Settings;
+            case "3":
+                WriteRuntimeDiagnostics(workspace, sessionOptions, color);
+                return MenuState.Settings;
+            default:
+                return WarnAndStay(color, choice, "0, 1, 2, or 3", MenuState.Settings);
+        }
+    }
+
+    private void WriteSettingsHeader(
+        WorkspaceDirectories workspace,
+        WorkflowOptions sessionOptions,
+        CliSettings currentSettings,
+        ConsoleColorWriter color)
+    {
+        color.WriteLine();
+        color.WriteHeader("=== Workspace & Settings ===");
+        color.WriteLine($"Input Dir       : {workspace.InputDirectory}");
+        color.WriteLine($"Output Dir      : {sessionOptions.OutputDirectory}");
+        color.WriteLine($"Workspace Root  : {workspace.WorkspaceRoot}");
+        color.WriteLine($"Windows Root    : {WorkspacePathService.DefaultWindowsWorkspaceRoot}");
+        color.WriteLine($"WSL Root        : {WorkspacePathService.DefaultWslWorkspaceRoot}");
+        color.WriteLine($"JSON Export     : {(currentSettings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)")}");
+        color.WriteLine($"Settings File   : {_settingsService.GetSettingsFilePath(workspace)}");
+
+        var provider = string.IsNullOrWhiteSpace(sessionOptions.ProviderInput)
+            ? AiProviderType.GoogleGemini
+            : _orchestrator.ResolveProvider(sessionOptions.ProviderInput);
+        var runtimeInfo = _runtimeEnvService.Inspect(provider, sessionOptions.ModelName);
+        var secret = _secretProvider.Resolve(sessionOptions.ApiKey);
+        color.WriteMuted(_runtimeEnvService.FormatRuntimeBanner(runtimeInfo, secret).TrimEnd());
+    }
+
+    private void InspectDirectoryContents(string label, string directoryPath, ConsoleColorWriter color)
+    {
+        color.WriteLine();
+        color.WriteSubHeader($"{label} Directory: {directoryPath}");
+        if (!Directory.Exists(directoryPath))
+        {
+            color.WriteMuted("  Directory does not exist.");
             return;
         }
 
-        var normalized = rawInput.Trim().ToLowerInvariant();
-        if (string.IsNullOrEmpty(normalized) || normalized is "0" or "b" or "back")
+        try
         {
-            color.WriteMuted("  Returning to main menu without changes.");
-            return;
+            var files = Directory.EnumerateFiles(directoryPath)
+                .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (files.Length == 0)
+            {
+                color.WriteMuted("  No files.");
+                return;
+            }
+
+            foreach (var filePath in files)
+            {
+                var file = new FileInfo(filePath);
+                color.WriteLine($"  {file.Name} ({file.Length:N0} bytes)");
+            }
+        }
+        catch (IOException exception)
+        {
+            color.WriteWarning($"  [!] Could not inspect directory: {exception.Message}");
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            color.WriteWarning($"  [!] Could not inspect directory: {exception.Message}");
+        }
+    }
+
+    private void WriteRuntimeDiagnostics(
+        WorkspaceDirectories workspace,
+        WorkflowOptions sessionOptions,
+        ConsoleColorWriter color)
+    {
+        color.WriteLine();
+        color.WriteSubHeader("--- Windows / WSL Path Mappings ---");
+        color.WriteLine($@"  Windows: {WorkspacePathService.DefaultWindowsWorkspaceRoot}\smart-backlog-assistant\in -> {WorkspacePathService.DefaultWindowsWorkspaceRoot}\smart-backlog-assistant\out");
+        color.WriteLine($"  WSL    : {WorkspacePathService.DefaultWslWorkspaceRoot}/smart-backlog-assistant/in -> {WorkspacePathService.DefaultWslWorkspaceRoot}/smart-backlog-assistant/out");
+        color.WriteLine($"  Active : {workspace.InputDirectory} -> {sessionOptions.OutputDirectory}");
+
+        color.WriteLine();
+        color.WriteSubHeader("--- Gemini Environment Variables ---");
+        foreach (var variableName in new[]
+        {
+            GeminiSecretProvider.PrimaryEnvVar,
+            GeminiSecretProvider.GoogleEnvVar,
+            GeminiSecretProvider.FallbackEnvVar
+        })
+        {
+            var isConfigured = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(variableName));
+            color.WriteLine($"  {variableName}: {(isConfigured ? "configured" : "not set")}");
         }
 
-        bool newJsonFileOut;
-        if (normalized is "1" or "toggle" or "json" or "json-out")
-        {
-            newJsonFileOut = !currentSettings.JsonFileOut;
-        }
-        else if (normalized is "on" or "true" or "enable" or "enabled" or "yes" or "y")
-        {
-            newJsonFileOut = true;
-        }
-        else if (normalized is "off" or "false" or "disable" or "disabled" or "no" or "n")
-        {
-            newJsonFileOut = false;
-        }
-        else
-        {
-            color.WriteWarning($"  [!] Unknown setting option '{rawInput.Trim()}'. Please choose 1, on, off, or 0.");
-            return;
-        }
-
-        currentSettings = currentSettings with { JsonFileOut = newJsonFileOut };
-        sessionOptions = sessionOptions with { JsonFileOut = newJsonFileOut };
-        var savedPath = _settingsService.Save(workspace, currentSettings);
-
-        var newStateLabel = newJsonFileOut ? "ON (.md + .json)" : "OFF (.md only)";
-        color.WriteSuccess($"[✓] JSON File Out set to {newStateLabel}. Saved settings to '{savedPath}'.");
+        var provider = string.IsNullOrWhiteSpace(sessionOptions.ProviderInput)
+            ? AiProviderType.GoogleGemini
+            : _orchestrator.ResolveProvider(sessionOptions.ProviderInput);
+        var runtimeInfo = _runtimeEnvService.Inspect(provider, sessionOptions.ModelName);
+        var secret = _secretProvider.Resolve(sessionOptions.ApiKey);
+        color.WriteMuted(_runtimeEnvService.FormatRuntimeBanner(runtimeInfo, secret).TrimEnd());
     }
 
     private void CacheResolvedApiKeyIfPresent(ref WorkflowOptions sessionOptions)
@@ -342,13 +451,13 @@ public sealed class CliMenuRunner
         }
     }
 
-    private static void WriteWelcomeBanner(ConsoleColorWriter color, WorkspaceDirectories workspace)
+    private static MenuState WarnAndStay(
+        ConsoleColorWriter color,
+        string choice,
+        string expected,
+        MenuState state)
     {
-        color.WriteHeader("========================================================================");
-        color.WriteHeader("  Smart Backlog Assistant — AI-First SDLC CLI (Windows & WSL Compatible)");
-        color.WriteHeader("========================================================================");
-        color.WriteMuted($"  Active Workspace : {workspace.WorkspaceRoot} (Windows: {WorkspacePathService.DefaultWindowsWorkspaceRoot} | WSL: {WorkspacePathService.DefaultWslWorkspaceRoot})");
-        color.WriteMuted($"  Reading from     : {workspace.InputDirectory}");
-        color.WriteMuted($"  Outputting to    : {workspace.OutputDirectory}");
+        color.WriteWarning($"[!] Invalid option '{choice.Trim()}'. Choose {expected}.");
+        return state;
     }
 }

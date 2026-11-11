@@ -1,3 +1,4 @@
 {
-    "xml.downloadExternalResources.enabled": true
+    "xml.downloadExternalResources.enabled": true,
+    "dotnet.defaultSolution": "SmartBacklogAssistant.slnx"
 }
