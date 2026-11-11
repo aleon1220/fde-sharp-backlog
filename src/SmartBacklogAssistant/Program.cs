@@ -17,12 +17,26 @@ public static class Program
             }
 
             var options = ParseArgs(args);
+            var secretProvider = new GeminiSecretProvider();
+            var geminiApiClient = new GeminiApiClient();
+
+            if (options.ListGeminiModels)
+            {
+                var secret = secretProvider.ResolveOrPrompt(options.ApiKey, Console.In, Console.Out, options.NonInteractive);
+                var models = geminiApiClient.ListGenerateContentModels(secret.ApiKey!);
+                foreach (var model in models)
+                {
+                    Console.WriteLine($"{model.ModelId}\t{model.DisplayName}\t{model.Description}");
+                }
+
+                return 0;
+            }
+
             var collector = new RawDataCollector();
             var promptService = new PromptTemplateService();
             var orchestrator = new AiModelOrchestrator();
             var formatter = new JiraBacklogFormatter();
             var runtimeEnvService = new RuntimeEnvironmentService();
-            var secretProvider = new GeminiSecretProvider();
             var workspaceService = new WorkspacePathService();
             var settingsService = new CliSettingsService();
 
@@ -32,7 +46,8 @@ public static class Program
                 orchestrator,
                 formatter,
                 runtimeEnvService,
-                secretProvider);
+                secretProvider,
+                geminiApiClient);
 
             if (ShouldLaunchMenu(args, options))
             {
@@ -74,6 +89,8 @@ public static class Program
         var nonInteractive = args.Contains("--non-interactive", StringComparer.OrdinalIgnoreCase);
         var forceMenu = args.Contains("--menu", StringComparer.OrdinalIgnoreCase);
         var jsonFileOut = ParseJsonFileOutArg(args);
+        var geminiLive = args.Contains("--gemini-live", StringComparer.OrdinalIgnoreCase);
+        var listGeminiModels = args.Contains("--list-models", StringComparer.OrdinalIgnoreCase);
 
         return new WorkflowOptions(
             InputFilePath: inputPath,
@@ -87,7 +104,9 @@ public static class Program
             WorkspaceRoot: workspaceRoot,
             GoalTitle: goalTitle,
             ForceMenu: forceMenu,
-            JsonFileOut: jsonFileOut);
+            JsonFileOut: jsonFileOut,
+            GeminiLive: geminiLive,
+            ListGeminiModels: listGeminiModels);
     }
 
     public static bool ShouldLaunchMenu(string[] args, WorkflowOptions options)
@@ -107,7 +126,9 @@ public static class Program
             HasFlag(args, "--output-dir") ||
             HasFlag(args, "--type") ||
             HasFlag(args, "--goal") ||
-            HasFlag(args, "--title");
+            HasFlag(args, "--title") ||
+            HasFlag(args, "--gemini-live") ||
+            HasFlag(args, "--list-models");
 
         return !hasDirectWorkflowFlag;
     }
@@ -219,7 +240,9 @@ public static class Program
         output.WriteLine("  --input <path>        Path to raw discovery notes or input folder (default: samples/raw-notes.txt)");
         output.WriteLine("  --prompt <path>       Path to Markdown prompt template (default: prompts/as-is-v1-prompt.md)");
         output.WriteLine("  --provider <name>     AI provider: gemini (default), manual, azure, claude");
-        output.WriteLine("  --model <name>        Gemini model name (default: gemini-2.5-flash, or set GEMINI_MODEL env var)");
+        output.WriteLine("  --model <name>        Gemini model ID (default: gemini-3.8-flash, or set GEMINI_MODEL env var)");
+        output.WriteLine("  --list-models         List models available to your API key that support generateContent");
+        output.WriteLine("  --gemini-live         Generate the backlog draft through the Gemini API (otherwise use offline draft)");
         output.WriteLine("  --api-key <key>       Gemini API key (or set GEMINI_API_KEY / GOOGLE_API_KEY / AI_API_KEY in OS env)");
         output.WriteLine("                        Obtain a Gemini key from: https://aistudio.google.com/api-keys");
         output.WriteLine("  --type <01|02>        Jira backlog type: Type01/01 (Given/When/Then) or Type02/02 (Title+Description)");

@@ -37,6 +37,8 @@ public sealed class CliArgumentParserTests
             "--prompt", "custom/prompt.md",
             "--provider", "gemini",
             "--api-key", "gem-12345",
+            "--model", "gemini-3.8-flash",
+            "--gemini-live",
             "--type", "Type02",
             "--output-dir", "artifacts",
             "--non-interactive"
@@ -48,6 +50,8 @@ public sealed class CliArgumentParserTests
         Assert.Equal("custom/prompt.md", options.PromptFilePath);
         Assert.Equal("gemini", options.ProviderInput);
         Assert.Equal("gem-12345", options.ApiKey);
+        Assert.Equal("gemini-3.8-flash", options.ModelName);
+        Assert.True(options.GeminiLive);
         Assert.Equal("Type02", options.BacklogTypeInput);
         Assert.Equal("artifacts", options.OutputDirectory);
         Assert.True(options.NonInteractive);
@@ -70,6 +74,15 @@ public sealed class CliArgumentParserTests
         Assert.Equal("Add Redis Distributed Cache", options.GoalTitle);
         Assert.Equal("02", options.BacklogTypeInput);
         Assert.True(options.ForceMenu);
+    }
+
+    [Fact]
+    public void ParseArgs_WithListModelsFlag_EnablesGeminiModelListing()
+    {
+        var options = Program.ParseArgs(["--list-models", "--non-interactive"]);
+
+        Assert.True(options.ListGeminiModels);
+        Assert.True(options.NonInteractive);
     }
 
     [Fact]

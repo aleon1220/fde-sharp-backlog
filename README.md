@@ -4,7 +4,7 @@
 
 ## Workflow Overview
 
-1. **Runtime Telemetry**: Displays active OS, build info (`v1.1.0-gemini-runtime`), .NET runtime, and enabled AI model (`Google Gemini / gemini-2.5-flash`).
+1. **Runtime Telemetry**: Displays active OS, build info (`v1.1.0-gemini-runtime`), .NET runtime, and enabled AI model (`Google Gemini / gemini-3.8-flash` by default).
 2. **Gemini Secret Injection**: Resolves the API key (obtained from https://aistudio.google.com/api-keys) in order:
    - CLI flag: `--api-key <key>`
    - OS environment variable: `GEMINI_API_KEY` (or `GOOGLE_API_KEY` / `AI_API_KEY`)
@@ -18,6 +18,25 @@
    - **Menu `[4]` Configure Settings**: Toggles **JSON File Out** (off by default so only `.md` files are emitted unless enabled) and persists settings to `smart-backlog-assistant/settings.json` (also configurable via `--json-out` / `--no-json-out`).
 4. **Local Processing (`collect` -> `process` -> `validate`)**: Ingests raw discovery notes (`smart-backlog-assistant/in` or `samples/raw-notes.txt`), renders `prompts/as-is-v1-prompt.md`, and validates the structured draft.
 5. **Review & Jira Output (`Type01` | `Type02`)**: Formats `Type01` (`complete` — Given/When/Then) or `Type02` (`schedule` — Title + Description) to console and `smart-backlog-assistant/out` (or `output/`).
+
+## Gemini API Options
+
+The default workflow stays offline and creates a deterministic draft. Use `--gemini-live` to send the rendered discovery prompt to Gemini. The CLI retrieves models available to your API key and only offers models that advertise the `generateContent` method; use `--model` to select one explicitly or choose from the interactive list.
+
+```bash
+# List models compatible with content generation for this API key
+dotnet run --project src/SmartBacklogAssistant -- --list-models --api-key "$GEMINI_API_KEY"
+
+# Generate with a selected model
+dotnet run --project src/SmartBacklogAssistant -- \
+  --gemini-live \
+  --model gemini-3.8-flash \
+  --api-key "$GEMINI_API_KEY" \
+  --type Type01 \
+  --non-interactive
+```
+
+Model IDs and availability are determined at runtime from the Gemini API, and may vary by API key. See the [AI Studio model catalog](https://aistudio.google.com/docs/models) and [Gemini API model listing reference](https://aistudio.google.com/api-reference/models).
 
 ## Quick Start (.NET 10 SDK)
 

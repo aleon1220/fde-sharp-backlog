@@ -11,7 +11,7 @@ namespace SmartBacklogAssistant.Services;
 /// </summary>
 public sealed class RuntimeEnvironmentService
 {
-    public const string DefaultGeminiModel = "gemini-2.5-flash";
+    public const string DefaultGeminiModel = "gemini-3.8-flash";
     public const string GeminiModelEnvVar = "GEMINI_MODEL";
 
     public RuntimeEnvironmentInfo Inspect(

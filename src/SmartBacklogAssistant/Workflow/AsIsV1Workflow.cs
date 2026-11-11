@@ -17,7 +17,9 @@ public sealed record WorkflowOptions(
     string? WorkspaceRoot = null,
     string? GoalTitle = null,
     bool ForceMenu = false,
-    bool? JsonFileOut = null);
+    bool? JsonFileOut = null,
+    bool GeminiLive = false,
+    bool ListGeminiModels = false);
 
 public sealed class AsIsV1Workflow
 {
@@ -33,6 +35,7 @@ public sealed class AsIsV1Workflow
     private readonly JiraBacklogFormatter _formatter;
     private readonly RuntimeEnvironmentService _runtimeEnvService;
     private readonly GeminiSecretProvider _secretProvider;
+    private readonly GeminiApiClient _geminiApiClient;
 
     public AsIsV1Workflow(
         RawDataCollector collector,
@@ -40,7 +43,8 @@ public sealed class AsIsV1Workflow
         AiModelOrchestrator orchestrator,
         JiraBacklogFormatter formatter,
         RuntimeEnvironmentService? runtimeEnvService = null,
-        GeminiSecretProvider? secretProvider = null)
+        GeminiSecretProvider? secretProvider = null,
+        GeminiApiClient? geminiApiClient = null)
     {
         _collector = collector ?? throw new ArgumentNullException(nameof(collector));
         _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
@@ -48,6 +52,7 @@ public sealed class AsIsV1Workflow
         _formatter = formatter ?? throw new ArgumentNullException(nameof(formatter));
         _runtimeEnvService = runtimeEnvService ?? new RuntimeEnvironmentService();
         _secretProvider = secretProvider ?? new GeminiSecretProvider();
+        _geminiApiClient = geminiApiClient ?? new GeminiApiClient();
     }
 
     public JiraBacklogTicket Execute(WorkflowOptions options, TextReader input, TextWriter output)
@@ -104,6 +109,18 @@ public sealed class AsIsV1Workflow
             apiKey = input.ReadLine();
         }
 
+        var modelName = options.ModelName;
+        if (options.GeminiLive)
+        {
+            if (provider != AiProviderType.GoogleGemini)
+            {
+                throw new InvalidOperationException("--gemini-live can only be used with the Gemini provider.");
+            }
+
+            var availableModels = _geminiApiClient.ListGenerateContentModels(apiKey!);
+            modelName = SelectGeminiModel(availableModels, modelName, input, output, options.NonInteractive);
+        }
+
         if (provider == AiProviderType.ManualPrompt)
         {
             output.WriteLine();
@@ -113,7 +130,10 @@ public sealed class AsIsV1Workflow
         }
 
         // 3. Local: Validate outcome
-        var outcome = _orchestrator.Process(rawData, renderedPrompt, provider, apiKey);
+        var generatedContent = options.GeminiLive
+            ? _geminiApiClient.GenerateContent(apiKey!, modelName!, BuildGeminiPrompt(renderedPrompt))
+            : null;
+        var outcome = _orchestrator.Process(rawData, renderedPrompt, provider, apiKey, generatedContent, modelName);
         colorWriter.WriteMuted(outcome.GuidanceMessage);
         colorWriter.WriteSuccess("[3/5 Local -> Validate] Outcome validated successfully.");
 
@@ -155,6 +175,75 @@ public sealed class AsIsV1Workflow
 
         return ticket;
     }
+
+    private static string SelectGeminiModel(
+        IReadOnlyList<GeminiModel> availableModels,
+        string? requestedModel,
+        TextReader input,
+        TextWriter output,
+        bool nonInteractive)
+    {
+        if (availableModels.Count == 0)
+        {
+            throw new InvalidOperationException("The Gemini API key has no models that support generateContent.");
+        }
+
+        var selectedModel = requestedModel;
+        if (string.IsNullOrWhiteSpace(selectedModel) && !nonInteractive)
+        {
+            output.WriteLine();
+            output.WriteLine("Gemini models available to this API key:");
+            for (var index = 0; index < availableModels.Count; index++)
+            {
+                var model = availableModels[index];
+                output.WriteLine($"  [{index + 1}] {model.DisplayName} ({model.ModelId})");
+            }
+
+            output.Write($"Select a model [default: {RuntimeEnvironmentService.DefaultGeminiModel}]: ");
+            var selection = input.ReadLine()?.Trim();
+            if (int.TryParse(selection, out var modelIndex) && modelIndex >= 1 && modelIndex <= availableModels.Count)
+            {
+                selectedModel = availableModels[modelIndex - 1].ModelId;
+            }
+            else if (!string.IsNullOrWhiteSpace(selection))
+            {
+                selectedModel = selection;
+            }
+        }
+
+        selectedModel = string.IsNullOrWhiteSpace(selectedModel)
+            ? Environment.GetEnvironmentVariable(RuntimeEnvironmentService.GeminiModelEnvVar) ?? RuntimeEnvironmentService.DefaultGeminiModel
+            : selectedModel.Trim();
+        if (selectedModel.StartsWith("models/", StringComparison.OrdinalIgnoreCase))
+        {
+            selectedModel = selectedModel["models/".Length..];
+        }
+
+        var match = availableModels.FirstOrDefault(model =>
+            string.Equals(model.ModelId, selectedModel, StringComparison.OrdinalIgnoreCase));
+        if (match is null)
+        {
+            throw new InvalidOperationException(
+                $"Gemini model '{selectedModel}' is not available for generateContent with this API key. Run --list-models to see compatible models.");
+        }
+
+        return match.ModelId;
+    }
+
+    private static string BuildGeminiPrompt(string renderedPrompt) => $$"""
+        {{renderedPrompt}}
+
+        Return only a JSON object with this shape, using the discovery notes above as the source of truth:
+        {
+          "title": "short backlog title",
+          "description": "clear description",
+          "userStory": "As a ..., I want ..., so that ...",
+          "scenarios": [
+            { "given": "initial context", "when": "action", "then": "observable result" }
+          ]
+        }
+        Do not include Markdown fences or text outside the JSON object.
+        """;
 
     public JiraBacklogTicket ExecuteQuickGoal(
         string goalOrTitle,

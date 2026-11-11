@@ -177,7 +177,55 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Contains("****9999", consoleOutput);
     }
 
-    private static AsIsV1Workflow CreateWorkflow(GeminiSecretProvider? secretProvider = null) =>
+    [Fact]
+    public void Execute_WithGeminiLive_UsesSelectedCompatibleModelAndGeneratedDraft()
+    {
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get)
+            {
+                return JsonResponse("""
+                    {
+                      "models": [{
+                        "name": "models/gemini-3.8-flash",
+                        "baseModelId": "gemini-3.8-flash",
+                        "displayName": "Gemini 3.8 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                      }]
+                    }
+                    """);
+            }
+
+            return JsonResponse("""
+                {
+                  "candidates": [{
+                    "content": { "parts": [{ "text": "{\"title\":\"Gemini Draft\",\"description\":\"Created from Gemini\",\"userStory\":\"As a user, I want a generated draft, so that the team can review it.\",\"scenarios\":[{\"given\":\"the user has notes\",\"when\":\"Gemini drafts a backlog item\",\"then\":\"a structured item is returned\"}]}" }] }
+                  }]
+                }
+                """);
+        });
+        using var httpClient = new HttpClient(handler);
+        var workflow = CreateWorkflow(geminiApiClient: new GeminiApiClient(httpClient));
+        var options = new WorkflowOptions(
+            InputFilePath: _inputFilePath,
+            PromptFilePath: _promptFilePath,
+            ApiKey: "AIzaSyLiveTestKey1234",
+            ModelName: "gemini-3.8-flash",
+            BacklogTypeInput: "Type02",
+            OutputDirectory: _outputDir,
+            NonInteractive: true,
+            GeminiLive: true);
+
+        var ticket = workflow.Execute(options, new StringReader(string.Empty), new StringWriter());
+
+        Assert.Equal(BacklogType.Type02, ticket.BacklogType);
+        Assert.Equal("Gemini Draft", ticket.Title);
+        Assert.Equal("Created from Gemini", ticket.Description);
+    }
+
+    private static AsIsV1Workflow CreateWorkflow(
+        GeminiSecretProvider? secretProvider = null,
+        GeminiApiClient? geminiApiClient = null) =>
         new(
             new RawDataCollector(),
             new PromptTemplateService(),
@@ -186,7 +234,20 @@ public sealed class AsIsV1WorkflowTests : IDisposable
             new RuntimeEnvironmentService(),
             secretProvider ?? new GeminiSecretProvider(
                 environmentReader: _ => null,
-                environmentWriter: (_, _) => { }));
+                environmentWriter: (_, _) => { }),
+            geminiApiClient);
+
+    private static HttpResponseMessage JsonResponse(string json) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
+    };
+
+    private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory)
+        : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(responseFactory(request));
+    }
 
     public void Dispose()
     {
