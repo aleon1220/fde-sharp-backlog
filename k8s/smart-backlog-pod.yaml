@@ -23,5 +23,7 @@ spec:
         - "/app/output"
         - "--non-interactive"
       env:
+        - name: GEMINI_API_KEY
+          value: ""
         - name: AI_API_KEY
           value: ""

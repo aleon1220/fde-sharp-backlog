@@ -27,10 +27,14 @@ public sealed class JiraBacklogFormatterTests
     [InlineData(null, BacklogType.Type01)]
     [InlineData("", BacklogType.Type01)]
     [InlineData("1", BacklogType.Type01)]
+    [InlineData("01", BacklogType.Type01)]
     [InlineData("Type01", BacklogType.Type01)]
+    [InlineData("Type 01", BacklogType.Type01)]
     [InlineData("complete", BacklogType.Type01)]
     [InlineData("2", BacklogType.Type02)]
+    [InlineData("02", BacklogType.Type02)]
     [InlineData("Type02", BacklogType.Type02)]
+    [InlineData("Type 02", BacklogType.Type02)]
     [InlineData("schedule", BacklogType.Type02)]
     public void ResolveBacklogType_MapsInputToExpectedBacklogType(string? input, BacklogType expected)
     {

@@ -4,8 +4,8 @@ namespace SmartBacklogAssistant.Services;
 
 /// <summary>
 /// Step 2 (Local -> process & validate):
-/// Mocked AI model orchestrator that selects an AI model from user input
-/// (e.g., Azure OpenAI, Google Gemini, Anthropic Claude) or defaults to selecting
+/// AI model orchestrator that supports a live Google Gemini API path and mocked
+/// Azure OpenAI/Anthropic providers, or defaults to selecting
 /// a prompt from a Markdown file and suggesting the user run it in their desired AI model.
 /// </summary>
 public sealed class AiModelOrchestrator
@@ -30,7 +30,9 @@ public sealed class AiModelOrchestrator
         string rawData,
         string renderedPrompt,
         AiProviderType provider = AiProviderType.ManualPrompt,
-        string? apiKey = null)
+        string? apiKey = null,
+        string? generatedContent = null,
+        string? modelName = null)
     {
         if (string.IsNullOrWhiteSpace(rawData))
         {
@@ -42,8 +44,10 @@ public sealed class AiModelOrchestrator
             throw new ArgumentException("Rendered prompt is required for processing.", nameof(renderedPrompt));
         }
 
-        var guidanceMessage = BuildGuidanceMessage(provider, apiKey);
-        var (title, description, userStory, scenario) = ExtractStructuredDraft(rawData);
+        var guidanceMessage = BuildGuidanceMessage(provider, apiKey, generatedContent is not null, modelName);
+        var (title, description, userStory, scenarios) = generatedContent is null
+            ? ToDraft(ExtractStructuredDraft(rawData))
+            : ParseGeneratedDraft(generatedContent);
 
         var outcome = new ProcessedOutcome(
             ProviderUsed: provider,
@@ -52,7 +56,7 @@ public sealed class AiModelOrchestrator
             Title: title,
             Description: description,
             UserStory: userStory,
-            Scenarios: [scenario]);
+            Scenarios: scenarios);
 
         ValidateOutcome(outcome);
         return outcome;
@@ -88,17 +92,19 @@ public sealed class AiModelOrchestrator
         }
     }
 
-    private static string BuildGuidanceMessage(AiProviderType provider, string? apiKey)
+    private static string BuildGuidanceMessage(AiProviderType provider, string? apiKey, bool liveGemini, string? modelName)
     {
         var hasKey = !string.IsNullOrWhiteSpace(apiKey);
-        var keyStatus = hasKey ? $"API key provided ({MaskKey(apiKey!)})" : "no API key provided (running mock simulation)";
+        var keyStatus = hasKey ? $"API key injected ({GeminiSecretProvider.MaskKey(apiKey)})" : "no API key provided (running mock simulation)";
 
         return provider switch
         {
             AiProviderType.AzureOpenAi =>
                 $"[Mock Orchestrator -> Azure OpenAI ({keyStatus})] Processed prompt using mocked Azure OpenAI model.",
             AiProviderType.GoogleGemini =>
-                $"[Mock Orchestrator -> Google Gemini ({keyStatus})] Processed prompt using mocked Google Gemini model.",
+                liveGemini
+                    ? $"[Live Gemini API -> Google Gemini ({modelName ?? RuntimeEnvironmentService.DefaultGeminiModel}) | {keyStatus}] Generated backlog draft using the Gemini API."
+                    : $"[Gemini Orchestrator -> Google Gemini ({modelName ?? RuntimeEnvironmentService.DefaultGeminiModel}) | {keyStatus} | Keys: {GeminiSecretProvider.GeminiApiKeysUrl}] Processed prompt using Google Gemini model.",
             AiProviderType.AnthropicClaude =>
                 $"[Mock Orchestrator -> Anthropic Claude ({keyStatus})] Processed prompt using mocked Claude model.",
             _ =>
@@ -106,23 +112,45 @@ public sealed class AiModelOrchestrator
         };
     }
 
-    private static string MaskKey(string key)
+    private static (string Title, string Description, string UserStory, IReadOnlyList<GherkinScenario> Scenarios) ToDraft(
+        (string Title, string Description, string UserStory, GherkinScenario Scenario) draft) =>
+        (draft.Title, draft.Description, draft.UserStory, [draft.Scenario]);
+
+    private static (string Title, string Description, string UserStory, IReadOnlyList<GherkinScenario> Scenarios) ParseGeneratedDraft(
+        string generatedContent)
     {
-        var trimmed = key.Trim();
-        if (trimmed.Length <= 4)
+        using var document = System.Text.Json.JsonDocument.Parse(generatedContent);
+        var root = document.RootElement;
+        var title = ReadJsonString(root, "title");
+        var description = ReadJsonString(root, "description");
+        var userStory = ReadJsonString(root, "userStory");
+        var scenarios = new List<GherkinScenario>();
+
+        if (root.TryGetProperty("scenarios", out var scenarioElements) && scenarioElements.ValueKind == System.Text.Json.JsonValueKind.Array)
         {
-            return "****";
+            foreach (var scenario in scenarioElements.EnumerateArray())
+            {
+                scenarios.Add(new GherkinScenario(
+                    ReadJsonString(scenario, "given"),
+                    ReadJsonString(scenario, "when"),
+                    ReadJsonString(scenario, "then")));
+            }
         }
 
-        return $"****{trimmed[^4..]}";
+        return (title, description, userStory, scenarios);
     }
+
+    private static string ReadJsonString(System.Text.Json.JsonElement element, string propertyName) =>
+        element.TryGetProperty(propertyName, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : string.Empty;
 
     private static (string Title, string Description, string UserStory, GherkinScenario Scenario) ExtractStructuredDraft(string rawData)
     {
         var lines = rawData
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        var title = ExtractPrefixedLine(lines, "Discovery Note", "Title", "Subject")
+        var title = ExtractPrefixedLine(lines, "Discovery Note", "Title", "Subject", "Goal")
             ?? lines.FirstOrDefault()
             ?? "Backlog Requirement";
 
@@ -131,6 +159,22 @@ public sealed class AiModelOrchestrator
         if (title.StartsWith("Discovery Note", StringComparison.OrdinalIgnoreCase) && dashIndex > 0 && dashIndex < title.Length - 1)
         {
             title = title[(dashIndex + 1)..].Trim();
+        }
+        else
+        {
+            foreach (var prefix in new[] { "Title:", "Subject:", "Goal:" })
+            {
+                if (title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    var stripped = title[prefix.Length..].Trim();
+                    if (!string.IsNullOrWhiteSpace(stripped))
+                    {
+                        title = stripped;
+                    }
+
+                    break;
+                }
+            }
         }
 
         var context = ExtractPrefixedValue(lines, "Context:")
