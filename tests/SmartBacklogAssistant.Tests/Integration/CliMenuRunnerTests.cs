@@ -202,6 +202,37 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.Contains("AI Model Enabled", output.ToString());
     }
 
+    [Fact]
+    public void Run_ThemeSelectorSubMenu_DefaultsToAgyAndPersistsUvAndKubectlThemes()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var settingsService = new CliSettingsService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+
+        // 3 (Workspace & Settings) -> 4 (Select CLI Theme) -> 2 (UV Style) -> 4 (Select CLI Theme) -> 3 (Kubectl Style) -> 0 (Back) -> 0 (Exit)
+        using var input = new StringReader("3\n4\n2\n4\n3\n0\n0\n");
+        using var output = new StringWriter();
+
+        var menu = CreateMenuRunner(workspaceService, settingsService);
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        var consoleText = output.ToString();
+        Assert.Contains("Theme: agy", consoleText);
+        Assert.Contains("=== CLI Theme Configuration ===", consoleText);
+        Assert.Contains("CLI Theme is now uv (Astral uv Style)", consoleText);
+        Assert.Contains("CLI Theme is now kubectl (Kubernetes CLI Style)", consoleText);
+        Assert.Contains("Theme: kubectl", consoleText);
+
+        var persistedSettings = settingsService.Load(dirs);
+        Assert.Equal(SmartBacklogAssistant.Domain.CliThemeStyle.Kubectl, persistedSettings.Theme);
+    }
+
     private static CliMenuRunner CreateMenuRunner(
         WorkspacePathService workspaceService,
         CliSettingsService? settingsService = null)

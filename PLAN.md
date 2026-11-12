@@ -93,3 +93,26 @@ graph TD
 * **Prompt Engineering Log:** Document your v1 (monolithic prompt) versus v2 (role-based sequential prompt with structured output schema) to prove iterative prompt refinement.
 * **AI-Assisted Development Evidence:** Include a section detailing how AI tools assisted in generating boilerplate C# records, unit test fixtures, and regex/PDF text sanitization during coding.
 * **Reflection & Future Roadmap:** Discuss what worked well (type-safe structured outputs via `Microsoft.Extensions.AI`) and propose an Evaluator-Optimizer agent loop or MCP server integration as your next iteration.
+
+---
+
+## Step 6: Ergonomic CLI & TUI Standards ([Issue #3](https://github.com/aleon1220/fde-sharp-backlog/issues/3) · [Issue #5](https://github.com/aleon1220/fde-sharp-backlog/issues/5) · [Milestone #1 `release-fde-version`](https://github.com/aleon1220/fde-sharp-backlog/milestone/1))
+
+### 1. Evaluation of Contemporary CLI & TUI Tools
+* **Gemini CLI / Antigravity (`agy`):** Demonstrates progressive disclosure—launching an interactive TUI with a compact status bar (`model`, masked `API key`, active workspace, and active theme) when invoked with no arguments, while supporting single-shot headless execution for automation.
+* **Astral `uv` (Python):** Sets the bar for action-first verb subcommands (`run`, `draft`, `models`, `doctor`, `version`), zero-config workspace discovery, and concise `[✓]` completion summaries.
+* **`kubectl` (Kubernetes CLI):** Establishes predictable resource/verb ergonomics, `-o` / `--output <md|json|both>` format flags, `--dry-run` safe previews, and environment pre-flight diagnostics (`doctor` / `status`).
+
+### 2. Ergonomic Terminal Standards Implemented on `feature/cli-overhaul`
+1. **Hybrid TUI + Verb Subcommands:**
+   * `menu` (or no args): Launches interactive colored TUI (`CliMenuRunner`).
+   * `run` (or `process`): Processes raw discovery notes from `-i|--input` or workspace `./in`.
+   * `draft <goal>` (or `add <goal>`): Generates `Type01` (`complete`), `Type02` (`schedule`), or `both` directly from a positional goal argument.
+   * `models`: Lists Gemini models advertising `generateContent` for the active key.
+   * `doctor` / `status`: Runs a non-destructive pre-flight check of OS/runtime, CLI theme, Windows/WSL workspace paths, prompt templates, and masked `GEMINI_API_KEY` status.
+   * `version`: Prints deterministic build and runtime version metadata.
+2. **Selectable CLI Themes (`agy` Default, `uv`, `kubectl`) in Configuration Sub-Menu:**
+   * Interactive configuration sub-menu (`Workspace & Settings -> [4] Select CLI Theme`) and `--theme <agy|uv|kubectl>` flag supporting **`agy` style (default)**, **`uv` style**, and **`kubectl` style**, persisted in `smart-backlog-assistant/settings.json`.
+3. **Short Flags & Output Selectors:**
+   * `-i` (`--input`), `-p` (`--prompt`), `-t` (`--type <01|02|both>`), `-o` (`--output <md|json|both>`), `--theme <agy|uv|kubectl>`, `--dry-run`, and `-v` (`--version`), while preserving 100% backward compatibility with all existing `--*` flags.
+

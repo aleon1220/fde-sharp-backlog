@@ -108,7 +108,23 @@ public sealed record JiraBacklogTicket(
     string FormattedMarkdown);
 
 /// <summary>
+/// Ergonomic terminal theme styles inspired by contemporary CLI tools (Issue #3 &amp; Issue #5).
+/// </summary>
+public enum CliThemeStyle
+{
+    [Description("Gemini Agy Style (Default) — Cyan headers, Blue steps, Yellow interactive prompts")]
+    Agy = 0,
+
+    [Description("Astral uv Style — Magenta headers, Cyan steps, Green interactive prompts")]
+    Uv = 1,
+
+    [Description("Kubernetes kubectl Style — Blue headers, DarkCyan steps, Cyan interactive prompts")]
+    Kubectl = 2
+}
+
+/// <summary>
 /// Persistent CLI configuration settings for Smart Backlog Assistant.
 /// </summary>
 public sealed record CliSettings(
-    bool JsonFileOut = false);
+    bool JsonFileOut = false,
+    CliThemeStyle Theme = CliThemeStyle.Agy);

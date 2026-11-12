@@ -17,8 +17,24 @@ public static class Program
             }
 
             var options = ParseArgs(args);
+            var runtimeEnvService = new RuntimeEnvironmentService();
             var secretProvider = new GeminiSecretProvider();
             var geminiApiClient = new GeminiApiClient();
+            var workspaceService = new WorkspacePathService();
+            var settingsService = new CliSettingsService();
+            var orchestrator = new AiModelOrchestrator();
+
+            if (options.ShowVersion)
+            {
+                var info = runtimeEnvService.Inspect();
+                Console.WriteLine($"SmartBacklogAssistant v{info.BuildVersion} ({info.BuildConfiguration}) | {info.FrameworkDescription} | {info.OsPlatform} ({info.ProcessArchitecture})");
+                return 0;
+            }
+
+            if (options.ShowDoctorStatus)
+            {
+                return RunDoctorStatus(options, runtimeEnvService, secretProvider, workspaceService, settingsService, orchestrator, Console.Out);
+            }
 
             if (options.ListGeminiModels)
             {
@@ -34,11 +50,7 @@ public static class Program
 
             var collector = new RawDataCollector();
             var promptService = new PromptTemplateService();
-            var orchestrator = new AiModelOrchestrator();
             var formatter = new JiraBacklogFormatter();
-            var runtimeEnvService = new RuntimeEnvironmentService();
-            var workspaceService = new WorkspacePathService();
-            var settingsService = new CliSettingsService();
 
             var workflow = new AsIsV1Workflow(
                 collector,
@@ -77,20 +89,42 @@ public static class Program
 
     public static WorkflowOptions ParseArgs(string[] args)
     {
-        var inputPath = GetArgValue(args, "--input") ?? "samples/raw-notes.txt";
-        var promptPath = GetArgValue(args, "--prompt") ?? "prompts/as-is-v1-prompt.md";
+        var (subcommand, subcommandArg) = ParseSubcommand(args);
+
+        var inputPath = GetArgValue(args, "--input", "-i") ?? "samples/raw-notes.txt";
+        var promptPath = GetArgValue(args, "--prompt", "-p") ?? "prompts/as-is-v1-prompt.md";
         var provider = GetArgValue(args, "--provider");
         var apiKey = GetArgValue(args, "--api-key");
-        var backlogType = GetArgValue(args, "--type");
+        var backlogType = GetArgValue(args, "--type", "-t");
         var outputDir = GetArgValue(args, "--output-dir") ?? "output";
-        var modelName = GetArgValue(args, "--model");
-        var workspaceRoot = GetArgValue(args, "--workspace");
-        var goalTitle = GetArgValue(args, "--goal") ?? GetArgValue(args, "--title");
+        var modelName = GetArgValue(args, "--model", "-m");
+        var workspaceRoot = GetArgValue(args, "--workspace", "-w");
+        var goalTitle = GetArgValue(args, "--goal")
+            ?? GetArgValue(args, "--title")
+            ?? (subcommand is "draft" or "add" ? subcommandArg : null);
+        if (subcommand is "run" or "process" && !string.IsNullOrWhiteSpace(subcommandArg) && !HasAnyFlag(args, "--input", "-i"))
+        {
+            inputPath = subcommandArg;
+        }
+
         var nonInteractive = args.Contains("--non-interactive", StringComparer.OrdinalIgnoreCase);
-        var forceMenu = args.Contains("--menu", StringComparer.OrdinalIgnoreCase);
-        var jsonFileOut = ParseJsonFileOutArg(args);
-        var geminiLive = args.Contains("--gemini-live", StringComparer.OrdinalIgnoreCase);
-        var listGeminiModels = args.Contains("--list-models", StringComparer.OrdinalIgnoreCase);
+        var forceMenu = args.Contains("--menu", StringComparer.OrdinalIgnoreCase) || subcommand is "menu" or "tui";
+        var (jsonFileOut, outputFormatCombined) = ParseOutputAndJsonFlags(args);
+        var combinedOutput = outputFormatCombined ||
+                             args.Contains("--combined", StringComparer.OrdinalIgnoreCase) ||
+                             string.Equals(backlogType?.Trim(), "both", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(backlogType?.Trim(), "all", StringComparison.OrdinalIgnoreCase);
+        var geminiLive = args.Contains("--gemini-live", StringComparer.OrdinalIgnoreCase) ||
+                         args.Contains("--live", StringComparer.OrdinalIgnoreCase);
+        var listGeminiModels = args.Contains("--list-models", StringComparer.OrdinalIgnoreCase) || subcommand is "models";
+        var dryRun = args.Contains("--dry-run", StringComparer.OrdinalIgnoreCase);
+        var showDoctorStatus = args.Contains("--doctor", StringComparer.OrdinalIgnoreCase) ||
+                               args.Contains("--status", StringComparer.OrdinalIgnoreCase) ||
+                               subcommand is "doctor" or "status";
+        var showVersion = args.Contains("--version", StringComparer.OrdinalIgnoreCase) ||
+                          args.Contains("-v", StringComparer.OrdinalIgnoreCase) ||
+                          subcommand is "version";
+        var cliTheme = GetArgValue(args, "--theme");
 
         return new WorkflowOptions(
             InputFilePath: inputPath,
@@ -106,7 +140,13 @@ public static class Program
             ForceMenu: forceMenu,
             JsonFileOut: jsonFileOut,
             GeminiLive: geminiLive,
-            ListGeminiModels: listGeminiModels);
+            ListGeminiModels: listGeminiModels,
+            CombinedOutput: combinedOutput,
+            Subcommand: subcommand,
+            DryRun: dryRun,
+            ShowDoctorStatus: showDoctorStatus,
+            ShowVersion: showVersion,
+            CliTheme: cliTheme);
     }
 
     public static bool ShouldLaunchMenu(string[] args, WorkflowOptions options)
@@ -116,21 +156,112 @@ public static class Program
             return true;
         }
 
-        if (options.NonInteractive)
+        if (options.NonInteractive || options.ShowDoctorStatus || options.ShowVersion || options.ListGeminiModels)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.Subcommand) && options.Subcommand is not ("menu" or "tui"))
         {
             return false;
         }
 
         var hasDirectWorkflowFlag =
-            HasFlag(args, "--input") ||
-            HasFlag(args, "--output-dir") ||
-            HasFlag(args, "--type") ||
-            HasFlag(args, "--goal") ||
-            HasFlag(args, "--title") ||
-            HasFlag(args, "--gemini-live") ||
-            HasFlag(args, "--list-models");
+            HasAnyFlag(args, "--input", "-i") ||
+            HasAnyFlag(args, "--output-dir", "-o", "--output") ||
+            HasAnyFlag(args, "--type", "-t") ||
+            HasAnyFlag(args, "--goal", "--title") ||
+            HasAnyFlag(args, "--gemini-live", "--live") ||
+            HasAnyFlag(args, "--list-models", "--dry-run", "--combined");
 
         return !hasDirectWorkflowFlag;
+    }
+
+    public static int RunDoctorStatus(
+        WorkflowOptions options,
+        RuntimeEnvironmentService runtimeEnvService,
+        GeminiSecretProvider secretProvider,
+        WorkspacePathService workspaceService,
+        CliSettingsService settingsService,
+        AiModelOrchestrator orchestrator,
+        TextWriter output)
+    {
+        var workspace = workspaceService.Resolve(options.WorkspaceRoot);
+        var settings = settingsService.Load(workspace);
+        var resolvedTheme = ConsoleColorWriter.ResolveTheme(options.CliTheme, settings.Theme);
+        var color = new ConsoleColorWriter(output, theme: resolvedTheme);
+        var provider = string.IsNullOrWhiteSpace(options.ProviderInput)
+            ? Domain.AiProviderType.GoogleGemini
+            : orchestrator.ResolveProvider(options.ProviderInput);
+        var runtimeInfo = runtimeEnvService.Inspect(provider, options.ModelName);
+        var secret = secretProvider.Resolve(options.ApiKey);
+
+        color.WriteHeader("Smart Backlog Assistant — Environment & Workspace Readiness (doctor)");
+        color.WriteMuted(runtimeEnvService.FormatRuntimeBanner(runtimeInfo, secret));
+        color.WriteLine();
+
+        var promptExists = File.Exists(options.PromptFilePath);
+        var inputFiles = workspaceService.GetInputFiles(workspace.InputDirectory);
+        var effectiveJsonOut = options.JsonFileOut ?? settings.JsonFileOut;
+
+        color.WriteSuccess($"  [✓] Runtime         : {runtimeInfo.FrameworkDescription} on {runtimeInfo.OsPlatform} ({runtimeInfo.ProcessArchitecture})");
+        color.WriteSuccess($"  [✓] CLI Theme       : {ConsoleColorWriter.FormatThemeDisplay(resolvedTheme)}");
+        color.WriteSuccess($"  [✓] Active Model    : {runtimeInfo.EnabledAiModel}");
+        if (secret.IsConfigured)
+        {
+            color.WriteSuccess($"  [✓] Gemini API Key  : {secret.SourceDetail} [{secret.MaskedKey}]");
+        }
+        else
+        {
+            color.WriteWarning($"  [!] Gemini API Key  : Not set in OS/CLI (obtain from {secret.KeyPortalUrl})");
+        }
+
+        if (promptExists)
+        {
+            color.WriteSuccess($"  [✓] Prompt Template : {options.PromptFilePath}");
+        }
+        else
+        {
+            color.WriteWarning($"  [!] Prompt Template : '{options.PromptFilePath}' not found (will use built-in fallback)");
+        }
+
+        color.WriteSuccess($"  [✓] Workspace Root  : {workspace.WorkspaceRoot}");
+        color.WriteSuccess($"  [✓] Input Directory : {workspace.InputDirectory} ({inputFiles.Count} queued file(s))");
+        color.WriteSuccess($"  [✓] Output Directory: {workspace.OutputDirectory} (Export: {(effectiveJsonOut ? ".md + .json" : ".md only")})");
+        return 0;
+    }
+
+    private static (string? Subcommand, string? PositionalArg) ParseSubcommand(string[] args)
+    {
+        if (args.Length == 0 || args[0].StartsWith('-'))
+        {
+            return (null, null);
+        }
+
+        var token = args[0].Trim().ToLowerInvariant();
+        var canonical = token switch
+        {
+            "run" or "process" => "run",
+            "draft" or "add" => "draft",
+            "models" => "models",
+            "doctor" or "status" => "doctor",
+            "menu" or "tui" => "menu",
+            "version" => "version",
+            _ => null
+        };
+
+        if (canonical is null)
+        {
+            return (null, null);
+        }
+
+        string? positionalArg = null;
+        if (args.Length > 1 && !args[1].StartsWith('-'))
+        {
+            positionalArg = args[1].Trim();
+        }
+
+        return (canonical, positionalArg);
     }
 
     private static WorkflowOptions ResolveDirectExecutionOptions(
@@ -142,18 +273,20 @@ public static class Program
         var workspace = workspaceService.Resolve(options.WorkspaceRoot);
         var persistedSettings = settingsService.Load(workspace);
         var effectiveJsonOut = options.JsonFileOut ?? persistedSettings.JsonFileOut;
+        var effectiveTheme = options.CliTheme ?? ConsoleColorWriter.GetThemeCode(persistedSettings.Theme);
 
         if (string.IsNullOrWhiteSpace(options.WorkspaceRoot))
         {
             return options with
             {
-                JsonFileOut = effectiveJsonOut
+                JsonFileOut = effectiveJsonOut,
+                CliTheme = effectiveTheme
             };
         }
 
         workspaceService.EnsureDirectoriesExist(workspace);
 
-        var inputPath = HasFlag(args, "--input")
+        var inputPath = HasAnyFlag(args, "--input", "-i")
             ? WorkspacePathService.NormalizePathForOs(options.InputFilePath, workspace.IsWindows)
             : workspace.InputDirectory;
 
@@ -165,8 +298,34 @@ public static class Program
         {
             InputFilePath = inputPath,
             OutputDirectory = outputDir,
-            JsonFileOut = effectiveJsonOut
+            JsonFileOut = effectiveJsonOut,
+            CliTheme = effectiveTheme
         };
+    }
+
+    private static (bool? JsonFileOut, bool CombinedTypes) ParseOutputAndJsonFlags(string[] args)
+    {
+        var jsonOut = ParseJsonFileOutArg(args);
+        var combinedTypes = false;
+
+        var outputFormat = GetArgValue(args, "--output", "-o")?.Trim().ToLowerInvariant();
+        if (!string.IsNullOrWhiteSpace(outputFormat))
+        {
+            switch (outputFormat)
+            {
+                case "json":
+                case "both":
+                case "all":
+                    jsonOut = true;
+                    break;
+                case "md":
+                case "markdown":
+                    jsonOut ??= false;
+                    break;
+            }
+        }
+
+        return (jsonOut, combinedTypes);
     }
 
     private static bool? ParseJsonFileOutArg(string[] args)
@@ -208,13 +367,29 @@ public static class Program
         return args.Contains(flag, StringComparer.OrdinalIgnoreCase);
     }
 
-    private static string? GetArgValue(string[] args, string flag)
+    private static bool HasAnyFlag(string[] args, params string[] flags)
+    {
+        foreach (var flag in flags)
+        {
+            if (args.Contains(flag, StringComparer.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string? GetArgValue(string[] args, params string[] flags)
     {
         for (var i = 0; i < args.Length - 1; i++)
         {
-            if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase))
+            foreach (var flag in flags)
             {
-                return args[i + 1];
+                if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase))
+                {
+                    return args[i + 1];
+                }
             }
         }
 
@@ -224,32 +399,45 @@ public static class Program
     private static void PrintHelp(TextWriter output)
     {
         var color = new ConsoleColorWriter(output);
-        color.WriteHeader("Smart Backlog Assistant — Interactive CLI Menu & AI-First Backlog Generator");
+        color.WriteHeader("Smart Backlog Assistant — Ergonomic CLI & TUI for AI-First Backlog Generation");
+        color.WriteMuted("Inspired by Gemini CLI (agy), Astral uv, and kubectl");
         output.WriteLine();
-        output.WriteLine("Usage:");
-        output.WriteLine("  dotnet run --project src/SmartBacklogAssistant -- [options]");
+        output.WriteLine("USAGE:");
+        output.WriteLine("  dotnet run --project src/SmartBacklogAssistant -- [command] [options]");
         output.WriteLine();
-        output.WriteLine("Workspace Directories (Windows & WSL Compatible):");
+        output.WriteLine("COMMANDS (agy / uv / kubectl style):");
+        output.WriteLine("  menu | tui            Launch interactive colored TUI menu (default when run with no args)");
+        output.WriteLine("  run [file]            Process raw discovery notes from file or workspace './in'");
+        output.WriteLine("  draft <goal>          Quick-draft a Jira item directly from a goal/title (alias: add)");
+        output.WriteLine("  models                List Gemini models compatible with generateContent");
+        output.WriteLine("  doctor | status       Run environment, workspace, and Gemini API key readiness check");
+        output.WriteLine("  version               Print build, .NET runtime, and OS architecture version");
+        output.WriteLine();
+        output.WriteLine("WORKSPACE DIRECTORIES (Windows & WSL Compatible):");
         output.WriteLine(@"  Windows Default Root : c:\workspace\smart-backlog-assistant\{in,out}");
         output.WriteLine("  WSL Compatible Root  : /mnt/c/workspace/smart-backlog-assistant/{in,out}");
         output.WriteLine();
-        output.WriteLine("Options:");
+        output.WriteLine("OPTIONS:");
         output.WriteLine("  --menu                Launch interactive colored CLI menu (default when run interactively)");
-        output.WriteLine(@"  --workspace <path>    Workspace root override (default: c:\workspace on Windows, /mnt/c/workspace on WSL)");
+        output.WriteLine("  --theme <agy|uv|kubectl> CLI color theme style (default: agy)");
+        output.WriteLine(@"  -w, --workspace <path> Workspace root override (default: c:\workspace on Windows, /mnt/c/workspace on WSL)");
         output.WriteLine("  --goal <text>         Quick-add a Goal or Title directly into the output directory");
-        output.WriteLine("  --input <path>        Path to raw discovery notes or input folder (default: samples/raw-notes.txt)");
-        output.WriteLine("  --prompt <path>       Path to Markdown prompt template (default: prompts/as-is-v1-prompt.md)");
+        output.WriteLine("  -i, --input <path>    Path to raw discovery notes or input folder (default: samples/raw-notes.txt)");
+        output.WriteLine("  -p, --prompt <path>   Path to Markdown prompt template (default: prompts/as-is-v1-prompt.md)");
         output.WriteLine("  --provider <name>     AI provider: gemini (default), manual, azure, claude");
-        output.WriteLine("  --model <name>        Gemini model ID (default: gemini-3.8-flash, or set GEMINI_MODEL env var)");
+        output.WriteLine("  -m, --model <name>    Gemini model ID (default: gemini-3.8-flash, or set GEMINI_MODEL env var)");
         output.WriteLine("  --list-models         List models available to your API key that support generateContent");
         output.WriteLine("  --gemini-live         Generate the backlog draft through the Gemini API (otherwise use offline draft)");
         output.WriteLine("  --api-key <key>       Gemini API key (or set GEMINI_API_KEY / GOOGLE_API_KEY / AI_API_KEY in OS env)");
         output.WriteLine("                        Obtain a Gemini key from: https://aistudio.google.com/api-keys");
-        output.WriteLine("  --type <01|02>        Jira backlog type: Type01/01 (Given/When/Then) or Type02/02 (Title+Description)");
+        output.WriteLine("  -t, --type <01|02|both> Jira backlog type: Type01/01 (Given/When/Then), Type02/02 (Title+Description), or both");
         output.WriteLine("  --output-dir <path>   Directory for Jira Markdown & JSON output (default: output)");
+        output.WriteLine("  -o, --output <md|json|both> Output artifact format selector (default: md)");
         output.WriteLine("  --json-out [true|false] Enable writing .json backlog files alongside .md files (default: false / .md only)");
         output.WriteLine("  --no-json-out         Disable writing .json backlog files (generate .md files only)");
+        output.WriteLine("  --dry-run             Preview generated Jira item in terminal without writing files to disk");
         output.WriteLine("  --non-interactive     Run without interactive console prompts");
+        output.WriteLine("  -v, --version         Print version information");
         output.WriteLine("  -h, --help            Show help information");
     }
 }

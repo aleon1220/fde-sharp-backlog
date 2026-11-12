@@ -16,6 +16,7 @@ public sealed class CliMenuRunner
         ProcessFiles,
         DraftItem,
         Settings,
+        ThemeSelector,
         Exit
     }
 
@@ -48,14 +49,20 @@ public sealed class CliMenuRunner
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
 
-        var color = new ConsoleColorWriter(output);
         var workspace = _workspaceService.Resolve(baseOptions.WorkspaceRoot);
         _workspaceService.EnsureDirectoriesExist(workspace);
 
         var persistedSettings = _settingsService.Load(workspace);
-        var currentSettings = baseOptions.JsonFileOut.HasValue
-            ? persistedSettings with { JsonFileOut = baseOptions.JsonFileOut.Value }
-            : persistedSettings;
+        var resolvedTheme = !string.IsNullOrWhiteSpace(baseOptions.CliTheme)
+            ? ConsoleColorWriter.ResolveTheme(baseOptions.CliTheme, persistedSettings.Theme)
+            : persistedSettings.Theme;
+        var currentSettings = persistedSettings with
+        {
+            JsonFileOut = baseOptions.JsonFileOut ?? persistedSettings.JsonFileOut,
+            Theme = resolvedTheme
+        };
+
+        var color = new ConsoleColorWriter(output, theme: currentSettings.Theme);
 
         // Ensure runtime options point to the resolved workspace out directory unless explicitly overridden
         var effectiveOutputDir = string.IsNullOrWhiteSpace(baseOptions.OutputDirectory) ||
@@ -66,7 +73,8 @@ public sealed class CliMenuRunner
         var sessionOptions = baseOptions with
         {
             OutputDirectory = effectiveOutputDir,
-            JsonFileOut = currentSettings.JsonFileOut
+            JsonFileOut = currentSettings.JsonFileOut,
+            CliTheme = ConsoleColorWriter.GetThemeCode(currentSettings.Theme)
         };
 
         var state = MenuState.Main;
@@ -78,6 +86,7 @@ public sealed class CliMenuRunner
                 MenuState.ProcessFiles => ShowProcessFilesMenu(workspace, ref sessionOptions, input, output, color),
                 MenuState.DraftItem => ShowDraftItemMenu(ref sessionOptions, input, output, color),
                 MenuState.Settings => ShowSettingsMenu(workspace, ref sessionOptions, ref currentSettings, input, color),
+                MenuState.ThemeSelector => ShowThemeMenu(workspace, ref sessionOptions, ref currentSettings, input, color),
                 _ => MenuState.Exit
             };
         }
@@ -94,13 +103,14 @@ public sealed class CliMenuRunner
         ConsoleColorWriter color)
     {
         var files = _workspaceService.GetInputFiles(workspace.InputDirectory);
+        var themeCode = ConsoleColorWriter.GetThemeCode(currentSettings.Theme);
         color.WriteLine();
         color.WriteHeader("Smart Backlog Assistant");
-        color.WriteMuted($"In: ./in ({files.Count} files) | Out: ./out | Export: .md (JSON: {(currentSettings.JsonFileOut ? "ON" : "OFF")})");
+        color.WriteMuted($"In: ./in ({files.Count} files) | Out: ./out | Export: .md (JSON: {(currentSettings.JsonFileOut ? "ON" : "OFF")}) | Theme: {themeCode}");
         color.WriteLine();
         color.WriteMenuOption("1", "Process Input Files", "Extract Jira items from './in' to './out'");
         color.WriteMenuOption("2", "Draft Backlog Item", "Create a User Story (Type01) or Task (Type02)");
-        color.WriteMenuOption("3", "Workspace & Settings", "Configure outputs, inspect files, & diagnostics");
+        color.WriteMenuOption("3", "Workspace & Settings", "Configure outputs, CLI themes (agy/uv/kubectl), & diagnostics");
         color.WriteMenuOption("0", "Exit");
         color.WriteColored("Select an option (0-3): ", ConsoleColor.Yellow);
 
@@ -313,8 +323,9 @@ public sealed class CliMenuRunner
         color.WriteMenuOption("1", $"Toggle JSON Export [{(currentSettings.JsonFileOut ? "ON" : "OFF")}]");
         color.WriteMenuOption("2", "Inspect Directories");
         color.WriteMenuOption("3", "Runtime & AI Diagnostics");
+        color.WriteMenuOption("4", $"Select CLI Theme [{ConsoleColorWriter.GetThemeCode(currentSettings.Theme)}]", "Switch between agy (default), uv, and kubectl styles");
         color.WriteMenuOption("0", "Back to Main Menu");
-        color.WriteColored("Select an option (0-3): ", ConsoleColor.Yellow);
+        color.WriteColored("Select an option (0-4): ", ConsoleColor.Yellow);
 
         var choice = input.ReadLine();
         if (choice is null)
@@ -339,9 +350,62 @@ public sealed class CliMenuRunner
             case "3":
                 WriteRuntimeDiagnostics(workspace, sessionOptions, color);
                 return MenuState.Settings;
+            case "4":
+                return MenuState.ThemeSelector;
             default:
-                return WarnAndStay(color, choice, "0, 1, 2, or 3", MenuState.Settings);
+                return WarnAndStay(color, choice, "0, 1, 2, 3, or 4", MenuState.Settings);
         }
+    }
+
+    private MenuState ShowThemeMenu(
+        WorkspaceDirectories workspace,
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        TextReader input,
+        ConsoleColorWriter color)
+    {
+        color.WriteLine();
+        color.WriteHeader("=== CLI Theme Configuration ===");
+        color.WriteMuted($"Active Theme: {ConsoleColorWriter.FormatThemeDisplay(currentSettings.Theme)}");
+        color.WriteLine();
+        color.WriteMenuOption("1", "Agy Style (Default)", "Gemini Agy palette (Cyan headers, Blue steps, Yellow prompts)");
+        color.WriteMenuOption("2", "UV Style", "Astral uv palette (Magenta headers, Cyan steps, Green prompts)");
+        color.WriteMenuOption("3", "Kubectl Style", "Kubernetes kubectl palette (Blue headers, DarkCyan steps, Cyan prompts)");
+        color.WriteMenuOption("0", "Back to Workspace & Settings");
+        color.WriteColored("Select a CLI theme (0-3): ", ConsoleColor.Yellow);
+
+        var choice = input.ReadLine();
+        if (choice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var normalized = choice.Trim();
+        if (normalized == "0")
+        {
+            return MenuState.Settings;
+        }
+
+        CliThemeStyle? selectedTheme = normalized.ToLowerInvariant() switch
+        {
+            "1" or "agy" => CliThemeStyle.Agy,
+            "2" or "uv" => CliThemeStyle.Uv,
+            "3" or "kubectl" => CliThemeStyle.Kubectl,
+            _ => null
+        };
+
+        if (selectedTheme is null)
+        {
+            return WarnAndStay(color, choice, "0, 1, 2, or 3", MenuState.ThemeSelector);
+        }
+
+        currentSettings = currentSettings with { Theme = selectedTheme.Value };
+        color.Theme = selectedTheme.Value;
+        var themeCode = ConsoleColorWriter.GetThemeCode(selectedTheme.Value);
+        sessionOptions = sessionOptions with { CliTheme = themeCode };
+        var savedPath = _settingsService.Save(workspace, currentSettings);
+        color.WriteSuccess($"CLI Theme is now {ConsoleColorWriter.FormatThemeDisplay(selectedTheme.Value)}. Saved settings to '{savedPath}'.");
+        return MenuState.Settings;
     }
 
     private void WriteSettingsHeader(
@@ -358,6 +422,7 @@ public sealed class CliMenuRunner
         color.WriteLine($"Windows Root    : {WorkspacePathService.DefaultWindowsWorkspaceRoot}");
         color.WriteLine($"WSL Root        : {WorkspacePathService.DefaultWslWorkspaceRoot}");
         color.WriteLine($"JSON Export     : {(currentSettings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)")}");
+        color.WriteLine($"CLI Theme       : {ConsoleColorWriter.FormatThemeDisplay(currentSettings.Theme)}");
         color.WriteLine($"Settings File   : {_settingsService.GetSettingsFilePath(workspace)}");
 
         var provider = string.IsNullOrWhiteSpace(sessionOptions.ProviderInput)

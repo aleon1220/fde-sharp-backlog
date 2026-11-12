@@ -247,6 +247,28 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.True(File.Exists(Path.Combine(_outputDir, "type02-webhook-retry-policy.md")));
     }
 
+    [Fact]
+    public void Execute_WithDryRunEnabled_PreviewsTicketWithoutWritingFiles()
+    {
+        using var input = new StringReader(string.Empty);
+        using var output = new StringWriter();
+        var workflow = CreateWorkflow();
+        var options = new WorkflowOptions(
+            InputFilePath: _inputFilePath,
+            PromptFilePath: _promptFilePath,
+            ProviderInput: "manual",
+            BacklogTypeInput: "Type01",
+            OutputDirectory: _outputDir,
+            NonInteractive: true,
+            DryRun: true);
+
+        var ticket = workflow.Execute(options, input, output);
+
+        Assert.Equal(BacklogType.Type01, ticket.BacklogType);
+        Assert.Contains("[Preview / Dry Run]", output.ToString());
+        Assert.False(Directory.Exists(_outputDir));
+    }
+
     private static AsIsV1Workflow CreateWorkflow(
         GeminiSecretProvider? secretProvider = null,
         GeminiApiClient? geminiApiClient = null) =>

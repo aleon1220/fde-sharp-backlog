@@ -20,7 +20,12 @@ public sealed record WorkflowOptions(
     bool? JsonFileOut = null,
     bool GeminiLive = false,
     bool ListGeminiModels = false,
-    bool CombinedOutput = false);
+    bool CombinedOutput = false,
+    string? Subcommand = null,
+    bool DryRun = false,
+    bool ShowDoctorStatus = false,
+    bool ShowVersion = false,
+    string? CliTheme = null);
 
 public sealed class AsIsV1Workflow
 {
@@ -62,7 +67,9 @@ public sealed class AsIsV1Workflow
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
 
-        var colorWriter = new ConsoleColorWriter(output);
+        var colorWriter = new ConsoleColorWriter(
+            output,
+            theme: ConsoleColorWriter.ResolveTheme(options.CliTheme));
         colorWriter.WriteHeader("=== Smart Backlog Assistant: Use Case 1 (Practical Process As-Is v1) ===");
 
         // Runtime execution defaults to Google Gemini with a Gemini API Key unless another provider is explicitly requested.
@@ -160,8 +167,13 @@ public sealed class AsIsV1Workflow
             backlogTypeSelection = input.ReadLine();
         }
 
+        var isCombinedType = options.CombinedOutput ||
+                             string.Equals(backlogTypeSelection?.Trim(), "both", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(backlogTypeSelection?.Trim(), "all", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(backlogTypeSelection?.Trim(), "3", StringComparison.OrdinalIgnoreCase);
+
         var backlogType = _formatter.ResolveBacklogType(backlogTypeSelection);
-        IReadOnlyList<JiraBacklogTicket> tickets = options.CombinedOutput
+        IReadOnlyList<JiraBacklogTicket> tickets = isCombinedType
             ? [
                 _formatter.Format(outcome, BacklogType.Type01),
                 _formatter.Format(outcome, BacklogType.Type02)
@@ -175,7 +187,12 @@ public sealed class AsIsV1Workflow
             output.WriteLine(ticketToOutput.FormattedMarkdown);
         }
 
-        if (!string.IsNullOrWhiteSpace(options.OutputDirectory))
+        if (options.DryRun)
+        {
+            output.WriteLine();
+            colorWriter.WriteSuccess($"[Preview / Dry Run] Validated '{tickets[0].Title}' ({tickets[0].BacklogType} -> {tickets[0].JiraStage}). No files written.");
+        }
+        else if (!string.IsNullOrWhiteSpace(options.OutputDirectory))
         {
             var jsonFileOut = options.JsonFileOut ?? false;
             foreach (var ticketToSave in tickets)

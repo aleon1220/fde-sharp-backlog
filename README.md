@@ -1,6 +1,30 @@
 # fde-sharp-backlog (`SmartBacklogAssistant`)
 
-.NET 10 CLI tool for generating Jira backlogs using an **AI-First SDLC** workflow.
+.NET 10 CLI & TUI assistant for transforming unstructured engineering discovery notes into standardized Jira backlog items using an **AI-First SDLC** workflow.
+
+## Executive Summary
+
+**Smart Backlog Assistant** (`fde-sharp-backlog`) combines deterministic .NET 10 ingestion, schema validation, and cross-platform Windows/WSL workspace management with Google Gemini (`generateContent`) reasoning to eliminate backlog grooming overhead. Designed around ergonomic terminal standards inspired by **Gemini CLI (`agy`)**, **Astral `uv`**, and **`kubectl`**, it supports both a zero-config interactive colored TUI and composable single-shot CLI subcommands (`run`, `draft`, `models`, `doctor`).
+
+* **GitHub Repository & Project**: [aleon1220/fde-sharp-backlog](https://github.com/aleon1220/fde-sharp-backlog) · [Project Backlog & Issues](https://github.com/aleon1220/fde-sharp-backlog/issues)
+* **Active Release Milestone**: [Milestone #1 — `release-fde-version`](https://github.com/aleon1220/fde-sharp-backlog/milestone/1)
+* **CLI & TUI Ergonomics Track**: [Issue #3 — Evaluate Contemporary CLI and TUI Tools & Implement Ergonomic Standards](https://github.com/aleon1220/fde-sharp-backlog/issues/3) · [Issue #5 — CLI in the style of `agy`, `uv`, and `kubectl`](https://github.com/aleon1220/fde-sharp-backlog/issues/5)
+
+## Ergonomic CLI Subcommands (`agy` / `uv` / `kubectl` Style)
+
+```bash
+# Launch interactive colored TUI (default when run with no arguments)
+dotnet run --project src/SmartBacklogAssistant
+
+# Quick-draft a Jira item directly from a goal/title (uv/kubectl verb style)
+dotnet run --project src/SmartBacklogAssistant -- draft "Implement OAuth2 PKCE Login" -t 01 --non-interactive
+
+# Process discovery notes with dry-run preview or combined (Type01 + Type02) output
+dotnet run --project src/SmartBacklogAssistant -- run -i samples/raw-notes.txt -t both --dry-run --non-interactive
+
+# Pre-flight environment, workspace, & Gemini API key readiness check
+dotnet run --project src/SmartBacklogAssistant -- doctor
+```
 
 ## Workflow Overview
 
@@ -12,10 +36,13 @@
 3. **Interactive Colored CLI Menu & Workspace Compatibility (`Windows` & `WSL`)**:
    * **Windows Default Workspace**: `c:\workspace\smart-backlog-assistant\in` -> `c:\workspace\smart-backlog-assistant\out`
    * **WSL Compatible Workspace**: `/mnt/c/workspace/smart-backlog-assistant/in` -> `/mnt/c/workspace/smart-backlog-assistant/out`
-   * **Menu `[1]` Process Input Directory**: Reads discovery files from `smart-backlog-assistant/in` and outputs formatted Jira items to `smart-backlog-assistant/out`.
-   * **Menu `[2]` Add Goal or Title**: Enter a Goal or Title and select output **`Type 01`** (`complete` — Given/When/Then) or **`Type 02`** (`schedule` — Title + Description) ready to be added into `smart-backlog-assistant/out`.
-   * **Menu `[3]` Workspace & Runtime Status**: Inspects OS, WSL/Windows path mappings, AI model, settings status, and directory contents.
-   * **Menu `[4]` Configure Settings**: Toggles **JSON File Out** (off by default so only `.md` files are emitted unless enabled) and persists settings to `smart-backlog-assistant/settings.json` (also configurable via `--json-out` / `--no-json-out`).
+   * **Menu `[1]` Process Input Files**: Reads discovery files from `smart-backlog-assistant/in` (all files, single file, or dry-run preview) and outputs formatted Jira items to `smart-backlog-assistant/out`.
+   * **Menu `[2]` Draft Backlog Item**: Enter a Goal or Title and select **`Type 01`** (`complete` — Given/When/Then), **`Type 02`** (`schedule` — Title + Description), or **Combined Output (Both)** ready to be added into `smart-backlog-assistant/out`.
+   * **Menu `[3]` Workspace & Settings**:
+     * `[1]` Toggle **JSON Export** (`.md` only by default, or `.md + .json`).
+     * `[2]` **Inspect Directories** (`in` and `out` file listings & byte sizes).
+     * `[3]` **Runtime & AI Diagnostics** (OS, Windows/WSL path mappings, and Gemini env vars).
+     * `[4]` **Select CLI Theme**: Switch between **`agy` style (default)**, **`uv` style**, and **`kubectl` style** in the configuration sub-menu (persisted to `smart-backlog-assistant/settings.json` and configurable via `--theme <agy|uv|kubectl>`).
 4. **Local Processing (`collect` -> `process` -> `validate`)**: Ingests raw discovery notes (`smart-backlog-assistant/in` or `samples/raw-notes.txt`), renders `prompts/as-is-v1-prompt.md`, and validates the structured draft.
 5. **Review & Jira Output (`Type01` | `Type02`)**: Formats `Type01` (`complete` — Given/When/Then) or `Type02` (`schedule` — Title + Description) to console and `smart-backlog-assistant/out` (or `output/`).
 

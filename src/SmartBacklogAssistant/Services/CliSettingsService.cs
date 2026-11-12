@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using SmartBacklogAssistant.Domain;
 
 namespace SmartBacklogAssistant.Services;
@@ -15,7 +16,8 @@ public sealed class CliSettingsService
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        PropertyNameCaseInsensitive = true
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
 
     public string GetSettingsFilePath(WorkspaceDirectories workspace)

@@ -102,4 +102,47 @@ public sealed class CliArgumentParserTests
 
         Assert.False(Program.ShouldLaunchMenu(args, options));
     }
+
+    [Fact]
+    public void ParseArgs_WithDraftSubcommandAndShortFlags_ParsesGoalTypeOutputAndDryRun()
+    {
+        string[] args = ["draft", "Implement Ergonomic CLI", "-t", "both", "-o", "json", "--dry-run"];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("draft", options.Subcommand);
+        Assert.Equal("Implement Ergonomic CLI", options.GoalTitle);
+        Assert.Equal("both", options.BacklogTypeInput);
+        Assert.True(options.CombinedOutput);
+        Assert.True(options.JsonFileOut);
+        Assert.True(options.DryRun);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
+
+    [Theory]
+    [InlineData("doctor")]
+    [InlineData("status")]
+    [InlineData("--doctor")]
+    public void ParseArgs_WithDoctorOrStatus_EnablesShowDoctorStatusAndSkipsMenu(string arg)
+    {
+        string[] args = [arg];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.True(options.ShowDoctorStatus);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
+
+    [Fact]
+    public void ParseArgs_WithRunSubcommandAndPositionalFile_UsesPositionalInputFilePath()
+    {
+        string[] args = ["run", "samples/custom-notes.md", "-t", "02"];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("run", options.Subcommand);
+        Assert.Equal("samples/custom-notes.md", options.InputFilePath);
+        Assert.Equal("02", options.BacklogTypeInput);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
 }
