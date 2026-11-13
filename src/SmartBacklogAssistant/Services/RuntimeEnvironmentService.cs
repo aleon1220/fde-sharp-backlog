@@ -55,7 +55,7 @@ public sealed class RuntimeEnvironmentService
 
         var keyStatus = secretResolution.IsConfigured
             ? $"{secretResolution.SourceDetail} [{secretResolution.MaskedKey}]"
-            : $"Not registered in OS or CLI — will prompt in CLI (get key: {info.KeyPortalUrl})";
+            : $"Not registered in OS or CLI — required for live Gemini generation (get key: {info.KeyPortalUrl})";
 
         var sb = new StringBuilder();
         sb.AppendLine("--- Runtime Environment & Build Info ---");

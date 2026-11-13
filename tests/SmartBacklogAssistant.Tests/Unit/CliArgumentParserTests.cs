@@ -14,6 +14,15 @@ public sealed class CliArgumentParserTests
         Assert.Equal("output", options.OutputDirectory);
         Assert.False(options.NonInteractive);
         Assert.Null(options.JsonFileOut);
+        Assert.Null(options.GeminiLive);
+    }
+
+    [Fact]
+    public void ParseArgs_LiveGeminiIsDefaultUnlessOfflineIsRequested()
+    {
+        Assert.True(Program.ParseArgs(["--gemini-live"]).GeminiLive);
+        Assert.False(Program.ParseArgs(["--offline"]).GeminiLive);
+        Assert.True(Program.ShouldLaunchMenu([], Program.ParseArgs([])));
     }
 
     [Theory]

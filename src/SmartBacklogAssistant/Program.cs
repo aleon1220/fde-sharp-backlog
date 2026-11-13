@@ -114,8 +114,12 @@ public static class Program
                              args.Contains("--combined", StringComparer.OrdinalIgnoreCase) ||
                              string.Equals(backlogType?.Trim(), "both", StringComparison.OrdinalIgnoreCase) ||
                              string.Equals(backlogType?.Trim(), "all", StringComparison.OrdinalIgnoreCase);
-        var geminiLive = args.Contains("--gemini-live", StringComparer.OrdinalIgnoreCase) ||
-                         args.Contains("--live", StringComparer.OrdinalIgnoreCase);
+        bool? geminiLive = args.Contains("--offline", StringComparer.OrdinalIgnoreCase)
+            ? false
+            : args.Contains("--gemini-live", StringComparer.OrdinalIgnoreCase) ||
+              args.Contains("--live", StringComparer.OrdinalIgnoreCase)
+                ? true
+                : null;
         var listGeminiModels = args.Contains("--list-models", StringComparer.OrdinalIgnoreCase) || subcommand is "models";
         var dryRun = args.Contains("--dry-run", StringComparer.OrdinalIgnoreCase);
         var showDoctorStatus = args.Contains("--doctor", StringComparer.OrdinalIgnoreCase) ||
@@ -171,7 +175,7 @@ public static class Program
             HasAnyFlag(args, "--output-dir", "-o", "--output") ||
             HasAnyFlag(args, "--type", "-t") ||
             HasAnyFlag(args, "--goal", "--title") ||
-            HasAnyFlag(args, "--gemini-live", "--live") ||
+            HasAnyFlag(args, "--gemini-live", "--live", "--offline") ||
             HasAnyFlag(args, "--list-models", "--dry-run", "--combined");
 
         return !hasDirectWorkflowFlag;
@@ -274,24 +278,15 @@ public static class Program
         var persistedSettings = settingsService.Load(workspace);
         var effectiveJsonOut = options.JsonFileOut ?? persistedSettings.JsonFileOut;
         var effectiveTheme = options.CliTheme ?? ConsoleColorWriter.GetThemeCode(persistedSettings.Theme);
-
-        if (string.IsNullOrWhiteSpace(options.WorkspaceRoot))
-        {
-            return options with
-            {
-                JsonFileOut = effectiveJsonOut,
-                CliTheme = effectiveTheme
-            };
-        }
-
         workspaceService.EnsureDirectoriesExist(workspace);
 
-        var inputPath = HasAnyFlag(args, "--input", "-i")
+        var hasExplicitInput = HasAnyFlag(args, "--input", "-i") ||
+                               options.Subcommand == "run" && !string.IsNullOrWhiteSpace(GetSubcommandInput(args));
+        var inputPath = hasExplicitInput
             ? WorkspacePathService.NormalizePathForOs(options.InputFilePath, workspace.IsWindows)
             : workspace.InputDirectory;
-
         var outputDir = HasFlag(args, "--output-dir") && !string.IsNullOrWhiteSpace(options.OutputDirectory)
-            ? WorkspacePathService.NormalizePathForOs(options.OutputDirectory, workspace.IsWindows)
+            ? workspaceService.ResolveCustomOrRelativePath(options.OutputDirectory, workspace.IsWindows)
             : workspace.OutputDirectory;
 
         return options with
@@ -299,8 +294,15 @@ public static class Program
             InputFilePath = inputPath,
             OutputDirectory = outputDir,
             JsonFileOut = effectiveJsonOut,
-            CliTheme = effectiveTheme
+            CliTheme = effectiveTheme,
+            ModelName = options.ModelName ?? persistedSettings.ModelName,
+            GeminiLive = options.GeminiLive ?? persistedSettings.GeminiLive ?? true
         };
+    }
+
+    private static string? GetSubcommandInput(string[] args)
+    {
+        return args.Length > 1 && !args[1].StartsWith('-') ? args[1] : null;
     }
 
     private static (bool? JsonFileOut, bool CombinedTypes) ParseOutputAndJsonFlags(string[] args)
@@ -425,9 +427,10 @@ public static class Program
         output.WriteLine("  -i, --input <path>    Path to raw discovery notes or input folder (default: samples/raw-notes.txt)");
         output.WriteLine("  -p, --prompt <path>   Path to Markdown prompt template (default: prompts/as-is-v1-prompt.md)");
         output.WriteLine("  --provider <name>     AI provider: gemini (default), manual, azure, claude");
-        output.WriteLine("  -m, --model <name>    Gemini model ID (default: gemini-3.8-flash, or set GEMINI_MODEL env var)");
+        output.WriteLine("  -m, --model <name>    Gemini model ID (default: best API-supported model or GEMINI_MODEL)");
         output.WriteLine("  --list-models         List models available to your API key that support generateContent");
-        output.WriteLine("  --gemini-live         Generate the backlog draft through the Gemini API (otherwise use offline draft)");
+        output.WriteLine("  --gemini-live         Generate the backlog draft through the Gemini API (default)");
+        output.WriteLine("  --offline             Use the local deterministic draft without calling the Gemini API");
         output.WriteLine("  --api-key <key>       Gemini API key (or set GEMINI_API_KEY / GOOGLE_API_KEY / AI_API_KEY in OS env)");
         output.WriteLine("                        Obtain a Gemini key from: https://aistudio.google.com/api-keys");
         output.WriteLine("  -t, --type <01|02|both> Jira backlog type: Type01/01 (Given/When/Then), Type02/02 (Title+Description), or both");

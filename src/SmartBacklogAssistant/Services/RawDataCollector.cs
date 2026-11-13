@@ -45,16 +45,28 @@ public sealed class RawDataCollector
         }
 
         var cleanedGoal = goalOrTitle.Trim();
-        var rawNotes = $"""
-            Title: {cleanedGoal}
-            Context: Backlog goal added via Smart Backlog Assistant CLI ({cleanedGoal}).
-            Requirement: As a product stakeholder, I want to {cleanedGoal.ToLowerInvariant()}, so that the engineering backlog captures this deliverable clearly.
-            Precondition: The requirement '{cleanedGoal}' is prioritized for implementation.
-            Action: The engineering team executes and verifies '{cleanedGoal}'.
-            Expected Outcome: '{cleanedGoal}' is completed, verified, and meets acceptance criteria.
-            """;
+        if (cleanedGoal.StartsWith("Goal:", StringComparison.OrdinalIgnoreCase) ||
+            cleanedGoal.StartsWith("Title:", StringComparison.OrdinalIgnoreCase))
+        {
+            return CollectFromText(cleanedGoal);
+        }
 
-        return CollectFromText(rawNotes);
+        return CollectFromText($"Goal: {cleanedGoal}");
+    }
+
+    public IReadOnlyList<string> GetInputFilesFromDirectory(string directoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
+        {
+            return [];
+        }
+
+        return Directory
+            .EnumerateFiles(directoryPath)
+            .Where(f => f.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ||
+                        f.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     public string CollectFromText(string rawText)

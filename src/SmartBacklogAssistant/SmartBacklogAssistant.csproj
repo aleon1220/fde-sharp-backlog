@@ -9,4 +9,10 @@
     <InformationalVersion>1.1.0-gemini-runtime</InformationalVersion>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Content Include="..\..\prompts\**\*.md"
+             Link="prompts\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
