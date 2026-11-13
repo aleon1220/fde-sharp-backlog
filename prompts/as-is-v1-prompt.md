@@ -17,7 +17,7 @@ You are a Senior Technical Project Manager. Analyze the raw discovery notes belo
 
 ## Expected Output Format
 
-- **Title**: Concise summary of the requirement
+- **Title**: Concise summary of the requirement and Goal
 - **Description**: Clear engineering context and scope
 - **User Story**: As a <role>, I want <goal>, so that <benefit>
 - **Acceptance Criteria (Given / When / Then)**:
