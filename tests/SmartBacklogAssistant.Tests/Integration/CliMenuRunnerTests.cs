@@ -1,5 +1,7 @@
 using SmartBacklogAssistant.Services;
 using SmartBacklogAssistant.Workflow;
+using System.Net;
+using System.Text;
 
 namespace SmartBacklogAssistant.Tests.Integration;
 
@@ -46,7 +48,8 @@ public sealed class CliMenuRunnerTests : IDisposable
             InputFilePath: dirs.InputDirectory,
             PromptFilePath: _promptFilePath,
             ApiKey: "AIzaSyMenuTestKey1234",
-            WorkspaceRoot: _tempWorkspaceRoot);
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
 
         var exitCode = menu.Run(options, input, output);
 
@@ -79,7 +82,8 @@ public sealed class CliMenuRunnerTests : IDisposable
             InputFilePath: dirs.InputDirectory,
             PromptFilePath: _promptFilePath,
             ApiKey: "AIzaSyDryRunKey1234",
-            WorkspaceRoot: _tempWorkspaceRoot);
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
 
         var exitCode = menu.Run(options, input, output);
 
@@ -107,7 +111,8 @@ public sealed class CliMenuRunnerTests : IDisposable
             InputFilePath: "samples/raw-notes.txt",
             PromptFilePath: _promptFilePath,
             ApiKey: "AIzaSyMenuSettingsKey1234",
-            WorkspaceRoot: _tempWorkspaceRoot);
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
 
         var exitCode = menu.Run(options, input, output);
 
@@ -146,7 +151,8 @@ public sealed class CliMenuRunnerTests : IDisposable
             InputFilePath: "samples/raw-notes.txt",
             PromptFilePath: _promptFilePath,
             ApiKey: "AIzaSyMenuKey7788",
-            WorkspaceRoot: _tempWorkspaceRoot);
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
 
         var exitCode = menu.Run(options, input, output);
 
@@ -176,6 +182,113 @@ public sealed class CliMenuRunnerTests : IDisposable
     }
 
     [Fact]
+    public void Run_DraftGoal_CallsGeminiAndUsesGeneratedResponse()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var requestMethods = new List<HttpMethod>();
+        var requestBodies = new List<string>();
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(request =>
+        {
+            requestMethods.Add(request.Method);
+            if (request.Method == HttpMethod.Get)
+            {
+                return JsonResponse("""
+                    {
+                      "models": [{
+                        "name": "models/gemini-2.5-flash",
+                        "baseModelId": "gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                      }]
+                    }
+                    """);
+            }
+
+            requestBodies.Add(request.Content!.ReadAsStringAsync().GetAwaiter().GetResult());
+            return JsonResponse("""
+                {
+                  "candidates": [{
+                    "content": {
+                      "parts": [{
+                        "text": "{\"title\":\"Account recovery\",\"description\":\"Users can recover account access.\",\"userStory\":\"As a user, I want to recover my account, so that I can regain access.\",\"scenarios\":[{\"given\":\"I cannot sign in\",\"when\":\"I request account recovery\",\"then\":\"I can regain access\"}]}"
+                      }]
+                    }
+                  }]
+                }
+                """);
+        }));
+        var menu = CreateMenuRunner(workspaceService, geminiApiClient: new GeminiApiClient(httpClient));
+        using var input = new StringReader("2\n1\nImplement account recovery\n\n0\n0\n");
+        using var output = new StringWriter();
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            ApiKey: "test-key-not-a-real-credential",
+            WorkspaceRoot: _tempWorkspaceRoot);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal(new[] { HttpMethod.Get, HttpMethod.Post }, requestMethods);
+        var generationRequest = Assert.Single(requestBodies);
+        Assert.Contains("Goal: Implement account recovery", generationRequest);
+        Assert.DoesNotContain("Context: Backlog goal added", generationRequest);
+        Assert.Contains("[2/5 Local -> Process] Calling Google Gemini API", output.ToString());
+        Assert.Contains("Account recovery", File.ReadAllText(Path.Combine(dirs.OutputDirectory, "type01-account-recovery.md")));
+    }
+
+    [Fact]
+    public void Run_DraftPreview_DoesNotSaveArtifacts()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var menu = CreateMenuRunner(workspaceService);
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+        using var output = new StringWriter();
+
+        var exitCode = menu.Run(options, new StringReader("2\n4\nImplement preview\n0\n0\n"), output);
+
+        Assert.Equal(0, exitCode);
+        Assert.Empty(Directory.GetFiles(dirs.OutputDirectory));
+        Assert.Contains("[Preview] Type01 item 'Implement preview' generated. No files written.", output.ToString());
+    }
+
+    [Fact]
+    public void Run_DisablingLiveGeminiPersistsAndSkipsApiForNextInteractiveDraft()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var settingsService = new CliSettingsService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var apiRequestCount = 0;
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(_ =>
+        {
+            apiRequestCount++;
+            return JsonResponse("{}");
+        }));
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot);
+
+        var settingsMenu = CreateMenuRunner(workspaceService, settingsService, new GeminiApiClient(httpClient));
+        settingsMenu.Run(options, new StringReader("3\n5\n0\n0\n"), new StringWriter());
+
+        var draftMenu = CreateMenuRunner(workspaceService, settingsService, new GeminiApiClient(httpClient));
+        using var output = new StringWriter();
+        draftMenu.Run(options, new StringReader("2\n1\nImplement account recovery\n0\n0\n"), output);
+
+        Assert.False(settingsService.Load(dirs).GeminiLive);
+        Assert.Equal(0, apiRequestCount);
+        Assert.Contains("Live Gemini API is OFF", output.ToString());
+        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-implement-account-recovery.md")));
+    }
+
+    [Fact]
     public void Run_SettingsCanInspectDirectorySizesAndRuntimeDiagnostics()
     {
         var workspaceService = new WorkspacePathService(environmentReader: _ => null);
@@ -191,7 +304,8 @@ public sealed class CliMenuRunnerTests : IDisposable
         var options = new WorkflowOptions(
             InputFilePath: dirs.InputDirectory,
             PromptFilePath: _promptFilePath,
-            WorkspaceRoot: _tempWorkspaceRoot);
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
 
         var exitCode = menu.Run(options, input, output);
 
@@ -217,7 +331,8 @@ public sealed class CliMenuRunnerTests : IDisposable
         var options = new WorkflowOptions(
             InputFilePath: dirs.InputDirectory,
             PromptFilePath: _promptFilePath,
-            WorkspaceRoot: _tempWorkspaceRoot);
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
 
         var exitCode = menu.Run(options, input, output);
 
@@ -235,7 +350,8 @@ public sealed class CliMenuRunnerTests : IDisposable
 
     private static CliMenuRunner CreateMenuRunner(
         WorkspacePathService workspaceService,
-        CliSettingsService? settingsService = null)
+        CliSettingsService? settingsService = null,
+        GeminiApiClient? geminiApiClient = null)
     {
         var secretProvider = new GeminiSecretProvider(
             environmentReader: _ => null,
@@ -249,7 +365,8 @@ public sealed class CliMenuRunnerTests : IDisposable
             orchestrator,
             new JiraBacklogFormatter(),
             runtimeService,
-            secretProvider);
+            secretProvider,
+            geminiApiClient);
 
         return new CliMenuRunner(
             workflow,
@@ -266,5 +383,17 @@ public sealed class CliMenuRunnerTests : IDisposable
         {
             Directory.Delete(_tempWorkspaceRoot, recursive: true);
         }
+    }
+
+    private static HttpResponseMessage JsonResponse(string json) => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent(json, Encoding.UTF8, "application/json")
+    };
+
+    private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responseFactory)
+        : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(responseFactory(request));
     }
 }

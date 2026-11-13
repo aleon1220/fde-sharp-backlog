@@ -42,13 +42,55 @@ public sealed class PromptTemplateService
             throw new ArgumentException("Prompt file path cannot be empty.", nameof(promptFilePath));
         }
 
-        if (!File.Exists(promptFilePath))
+        var resolvedPath = TryFindExistingPromptPath(promptFilePath) ?? promptFilePath;
+        if (!File.Exists(resolvedPath))
         {
             throw new FileNotFoundException($"Prompt markdown file not found at '{promptFilePath}'.", promptFilePath);
         }
 
-        var template = File.ReadAllText(promptFilePath);
+        var template = File.ReadAllText(resolvedPath);
         return RenderPromptFromTemplate(template, rawData);
+    }
+
+    public string? TryFindExistingPromptPath(string? promptFilePath)
+    {
+        if (string.IsNullOrWhiteSpace(promptFilePath))
+        {
+            return null;
+        }
+
+        if (File.Exists(promptFilePath))
+        {
+            return promptFilePath;
+        }
+
+        if (Path.IsPathRooted(promptFilePath))
+        {
+            return null;
+        }
+
+        var normalizedRelative = promptFilePath.Replace('\\', Path.DirectorySeparatorChar).Replace('/', Path.DirectorySeparatorChar);
+        foreach (var startDir in new[] { Directory.GetCurrentDirectory(), AppContext.BaseDirectory })
+        {
+            if (string.IsNullOrWhiteSpace(startDir))
+            {
+                continue;
+            }
+
+            var current = new DirectoryInfo(startDir);
+            while (current is not null)
+            {
+                var candidate = Path.Combine(current.FullName, normalizedRelative);
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+
+                current = current.Parent;
+            }
+        }
+
+        return null;
     }
 
     public string RenderPromptFromTemplate(string templateContent, string rawData)

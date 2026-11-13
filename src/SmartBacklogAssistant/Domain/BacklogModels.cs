@@ -127,4 +127,6 @@ public enum CliThemeStyle
 /// </summary>
 public sealed record CliSettings(
     bool JsonFileOut = false,
-    CliThemeStyle Theme = CliThemeStyle.Agy);
+    CliThemeStyle Theme = CliThemeStyle.Agy,
+    string? ModelName = null,
+    bool? GeminiLive = null);

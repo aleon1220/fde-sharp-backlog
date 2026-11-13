@@ -89,6 +89,24 @@ public sealed class AiModelOrchestratorTests
     }
 
     [Fact]
+    public void Process_OfflineGoalDraft_DoesNotInventContextOrRepeatGoalInEveryField()
+    {
+        var outcome = _sut.Process(
+            rawData: "Goal: Implement account recovery",
+            renderedPrompt: "Rendered prompt",
+            provider: AiProviderType.GoogleGemini,
+            backlogType: BacklogType.Type01);
+
+        Assert.Equal("Implement account recovery", outcome.Title);
+        Assert.Equal("Not specified in discovery notes.", outcome.Description);
+        Assert.Equal("Not specified in discovery notes.", outcome.UserStory);
+        var scenario = Assert.Single(outcome.Scenarios);
+        Assert.Equal("Not specified in discovery notes.", scenario.Given);
+        Assert.Equal("Not specified in discovery notes.", scenario.When);
+        Assert.Equal("Not specified in discovery notes.", scenario.Then);
+    }
+
+    [Fact]
     public void ValidateOutcome_WithMissingScenarioFields_ThrowsInvalidOperationException()
     {
         var invalidOutcome = new ProcessedOutcome(

@@ -16,11 +16,11 @@
 # Launch interactive colored TUI (default when run with no arguments)
 dotnet run --project src/SmartBacklogAssistant
 
-# Quick-draft a Jira item directly from a goal/title (uv/kubectl verb style)
+# Quick-draft through Gemini (set GEMINI_API_KEY first)
 dotnet run --project src/SmartBacklogAssistant -- draft "Implement OAuth2 PKCE Login" -t 01 --non-interactive
 
-# Process discovery notes with dry-run preview or combined (Type01 + Type02) output
-dotnet run --project src/SmartBacklogAssistant -- run -i samples/raw-notes.txt -t both --dry-run --non-interactive
+# Process discovery notes offline with dry-run preview or combined (Type01 + Type02) output
+dotnet run --project src/SmartBacklogAssistant -- run -i samples/raw-notes.txt -t both --dry-run --offline --non-interactive
 
 # Pre-flight environment, workspace, & Gemini API key readiness check
 dotnet run --project src/SmartBacklogAssistant -- doctor
@@ -28,7 +28,7 @@ dotnet run --project src/SmartBacklogAssistant -- doctor
 
 ## Workflow Overview
 
-1. **Runtime Telemetry**: Displays active OS, build info (`v1.1.0-gemini-runtime`), .NET runtime, and enabled AI model (`Google Gemini / gemini-3.8-flash` by default).
+1. **Runtime Telemetry**: Displays active OS, build info (`v1.1.0-gemini-runtime`), .NET runtime, and Gemini live/offline mode. In live mode the model is selected from the models available to the configured API key.
 2. **Gemini Secret Injection**: Resolves the API key. Obtained from [Google AI studio](https://aistudio.google.com/api-keys) in order:
    * CLI flag: `--api-key <key>`
    * OS environment variable: `GEMINI_API_KEY` (or `GOOGLE_API_KEY` / `AI_API_KEY`)
@@ -43,12 +43,14 @@ dotnet run --project src/SmartBacklogAssistant -- doctor
      * `[2]` **Inspect Directories** (`in` and `out` file listings & byte sizes).
      * `[3]` **Runtime & AI Diagnostics** (OS, Windows/WSL path mappings, and Gemini env vars).
      * `[4]` **Select CLI Theme**: Switch between **`agy` style (default)**, **`uv` style**, and **`kubectl` style** in the configuration sub-menu (persisted to `smart-backlog-assistant/settings.json` and configurable via `--theme <agy|uv|kubectl>`).
+     * `[5]` Toggle live Gemini API generation (enabled by default) or local offline drafting.
+     * `[6]` Fetch and select a Gemini model supported by the configured API key.
 4. **Local Processing (`collect` -> `process` -> `validate`)**: Ingests raw discovery notes (`smart-backlog-assistant/in` or `samples/raw-notes.txt`), renders the Type01 or Type02 prompt, and validates the structured draft.
 5. **Review & Jira Output (`Type01` | `Type02`)**: Formats `Type01` (`complete` — Given/When/Then) or `Type02` (`schedule` — Title + Description) to console and `smart-backlog-assistant/out` (or `output/`).
 
 ## Gemini API Options
 
-The default workflow stays offline and creates a deterministic draft. Use `--gemini-live` to send the rendered discovery prompt to Gemini. `prompts/prompt-goal-type01.md` and `prompts/prompt-goal-type02.md` define the distinct response contracts; a custom `--prompt` path overrides the selected template. The CLI retrieves models available to your API key and only offers models that advertise the `generateContent` method; use `--model` to select one explicitly or choose from the interactive list.
+Interactive and non-interactive workflows use the same prompt, Gemini model discovery, response validation, output formatting, and file-writing pipeline. Live Gemini generation is enabled by default; the first interactive draft asks for a key if needed, lists models that support `generateContent`, then sends the selected type-specific prompt to Gemini. The goal is passed as a single `Goal:` input rather than being expanded into invented context, requirements, and acceptance criteria. Use `--offline` or the interactive settings toggle to opt into deterministic local drafting without an API call. `prompts/prompt-goal-type01.md` and `prompts/prompt-goal-type02.md` define the response contracts; a custom `--prompt` path overrides the selected template.
 
 ```bash
 # List models compatible with content generation for this API key
@@ -63,6 +65,12 @@ dotnet run --project src/SmartBacklogAssistant -- \
   --non-interactive
 ```
 
+For an offline draft that does not require an API key:
+
+```bash
+dotnet run --project src/SmartBacklogAssistant -- draft "Implement OAuth2 PKCE Login" -t 01 --offline
+```
+
 Model IDs and availability are determined at runtime from the Gemini API, and may vary by API key. See the [AI Studio model catalog](https://aistudio.google.com/docs/models) and [Gemini API model listing reference](https://aistudio.google.com/api-reference/models).
 
 ## Quick Start (.NET 10 SDK)
@@ -73,7 +81,7 @@ Model IDs and availability are determined at runtime from the Gemini API, and ma
 winget install Microsoft.DotNet.SDK.10
 ```
 
-* 1. Set OS Environment Variable (Optional)
+* 1. Set an OS Environment Variable for live Gemini generation (or choose offline mode)
 
 * Windows
 

@@ -16,6 +16,18 @@ public sealed class RawDataCollectorTests
         Assert.Equal("Title: Export CSV\nContext: Large dataset", result);
     }
 
+    [Fact]
+    public void CollectFromGoal_ProducesOnlyTheSuppliedGoalWithoutSyntheticRequirements()
+    {
+        var result = _sut.CollectFromGoal("Implement account recovery");
+
+        Assert.Equal("Goal: Implement account recovery", result);
+        Assert.DoesNotContain("Context:", result);
+        Assert.DoesNotContain("Requirement:", result);
+        Assert.DoesNotContain("Precondition:", result);
+        Assert.DoesNotContain("Expected Outcome:", result);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("   ")]

@@ -59,7 +59,9 @@ public sealed class CliMenuRunner
         var currentSettings = persistedSettings with
         {
             JsonFileOut = baseOptions.JsonFileOut ?? persistedSettings.JsonFileOut,
-            Theme = resolvedTheme
+            Theme = resolvedTheme,
+            ModelName = baseOptions.ModelName ?? persistedSettings.ModelName,
+            GeminiLive = baseOptions.GeminiLive ?? persistedSettings.GeminiLive ?? true
         };
 
         var color = new ConsoleColorWriter(output, theme: currentSettings.Theme);
@@ -74,7 +76,9 @@ public sealed class CliMenuRunner
         {
             OutputDirectory = effectiveOutputDir,
             JsonFileOut = currentSettings.JsonFileOut,
-            CliTheme = ConsoleColorWriter.GetThemeCode(currentSettings.Theme)
+            CliTheme = ConsoleColorWriter.GetThemeCode(currentSettings.Theme),
+            ModelName = currentSettings.ModelName,
+            GeminiLive = currentSettings.GeminiLive
         };
 
         var state = MenuState.Main;
@@ -83,8 +87,8 @@ public sealed class CliMenuRunner
             state = state switch
             {
                 MenuState.Main => ShowMainMenu(workspace, currentSettings, input, color),
-                MenuState.ProcessFiles => ShowProcessFilesMenu(workspace, ref sessionOptions, input, output, color),
-                MenuState.DraftItem => ShowDraftItemMenu(ref sessionOptions, input, output, color),
+                MenuState.ProcessFiles => ShowProcessFilesMenu(workspace, ref sessionOptions, ref currentSettings, input, output, color),
+                MenuState.DraftItem => ShowDraftItemMenu(workspace, ref sessionOptions, ref currentSettings, input, output, color),
                 MenuState.Settings => ShowSettingsMenu(workspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.ThemeSelector => ShowThemeMenu(workspace, ref sessionOptions, ref currentSettings, input, color),
                 _ => MenuState.Exit
@@ -106,7 +110,7 @@ public sealed class CliMenuRunner
         var themeCode = ConsoleColorWriter.GetThemeCode(currentSettings.Theme);
         color.WriteLine();
         color.WriteHeader("Smart Backlog Assistant");
-        color.WriteMuted($"In: ./in ({files.Count} files) | Out: ./out | Export: .md (JSON: {(currentSettings.JsonFileOut ? "ON" : "OFF")}) | Theme: {themeCode}");
+        color.WriteMuted($"In: ./in ({files.Count} files) | Out: ./out | Export: .md (JSON: {(currentSettings.JsonFileOut ? "ON" : "OFF")}) | Theme: {themeCode} | Gemini Live: {(currentSettings.GeminiLive == true ? "ON" : "OFF")}");
         color.WriteLine();
         color.WriteMenuOption("1", "Process Input Files", "Extract Jira items from './in' to './out'");
         color.WriteMenuOption("2", "Draft Backlog Item", "Create a User Story (Type01) or Task (Type02)");
@@ -133,6 +137,7 @@ public sealed class CliMenuRunner
     private MenuState ShowProcessFilesMenu(
         WorkspaceDirectories workspace,
         ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
         TextReader input,
         TextWriter output,
         ConsoleColorWriter color)
@@ -172,18 +177,18 @@ public sealed class CliMenuRunner
             case "0":
                 return MenuState.Main;
             case "1":
-                ProcessFiles(files, false, ref sessionOptions, input, output, color);
+                ProcessFiles(files, false, workspace, ref sessionOptions, ref currentSettings, input, output, color);
                 return MenuState.ProcessFiles;
             case "2":
                 var selectedFile = SelectSingleFile(files, input, color);
                 if (selectedFile is not null)
                 {
-                    ProcessFiles([selectedFile], false, ref sessionOptions, input, output, color);
+                    ProcessFiles([selectedFile], false, workspace, ref sessionOptions, ref currentSettings, input, output, color);
                 }
 
                 return MenuState.ProcessFiles;
             case "3":
-                ProcessFiles(files, true, ref sessionOptions, input, output, color);
+                ProcessFiles(files, true, workspace, ref sessionOptions, ref currentSettings, input, output, color);
                 return MenuState.ProcessFiles;
             default:
                 return WarnAndStay(color, choice, "0, 1, 2, or 3", MenuState.ProcessFiles);
@@ -223,7 +228,9 @@ public sealed class CliMenuRunner
     private void ProcessFiles(
         IReadOnlyList<string> files,
         bool dryRun,
+        WorkspaceDirectories workspace,
         ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
         TextReader input,
         TextWriter output,
         ConsoleColorWriter color)
@@ -236,18 +243,20 @@ public sealed class CliMenuRunner
 
         foreach (var filePath in files)
         {
+            var previewOnly = dryRun || sessionOptions.DryRun;
             color.WriteLine();
-            color.WriteSubHeader($">>> {(dryRun ? "Previewing" : "Processing")} '{Path.GetFileName(filePath)}'...");
+            color.WriteSubHeader($">>> {(previewOnly ? "Previewing" : "Processing")} '{Path.GetFileName(filePath)}'...");
             var fileOptions = sessionOptions with
             {
                 InputFilePath = filePath,
                 GoalTitle = null,
-                OutputDirectory = dryRun ? null : sessionOptions.OutputDirectory
+                OutputDirectory = previewOnly ? null : sessionOptions.OutputDirectory,
+                DryRun = previewOnly
             };
 
             var ticket = _workflow.Execute(fileOptions, input, output);
-            CacheResolvedApiKeyIfPresent(ref sessionOptions);
-            if (dryRun)
+            CacheResolvedWorkflowOptions(ref sessionOptions, ref currentSettings, workspace);
+            if (previewOnly)
             {
                 color.WriteSuccess($"[Preview] '{ticket.Title}' ({ticket.BacklogType} -> {ticket.JiraStage}). No files written.");
             }
@@ -259,7 +268,9 @@ public sealed class CliMenuRunner
     }
 
     private MenuState ShowDraftItemMenu(
+        WorkspaceDirectories workspace,
         ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
         TextReader input,
         TextWriter output,
         ConsoleColorWriter color)
@@ -269,8 +280,9 @@ public sealed class CliMenuRunner
         color.WriteMenuOption("1", "Complete User Story (Type 01)", "Title, Description, User Story, and Given/When/Then criteria");
         color.WriteMenuOption("2", "Schedule Item (Type 02)", "Concise Title and Engineering Description");
         color.WriteMenuOption("3", "Combined Output (Both)", "Generate Type 01 and Type 02 from one draft");
+        color.WriteMenuOption("4", "Preview Type 01 Draft", "Generate without saving files");
         color.WriteMenuOption("0", "Back to Main Menu");
-        color.WriteColored("Select an option (0-3): ", ConsoleColor.Yellow);
+        color.WriteColored("Select an option (0-4): ", ConsoleColor.Yellow);
 
         var choice = input.ReadLine();
         if (choice is null)
@@ -284,9 +296,9 @@ public sealed class CliMenuRunner
             return MenuState.Main;
         }
 
-        if (normalizedChoice is not ("1" or "2" or "3"))
+        if (normalizedChoice is not ("1" or "2" or "3" or "4"))
         {
-            return WarnAndStay(color, choice, "0, 1, 2, or 3", MenuState.DraftItem);
+            return WarnAndStay(color, choice, "0, 1, 2, 3, or 4", MenuState.DraftItem);
         }
 
         color.WriteColored("Enter Goal or Title: ", ConsoleColor.Yellow);
@@ -299,16 +311,23 @@ public sealed class CliMenuRunner
 
         var combinedOutput = normalizedChoice == "3";
         var backlogType = normalizedChoice == "2" ? "Type02" : "Type01";
+        var previewOnly = sessionOptions.DryRun || normalizedChoice == "4";
         var ticket = _workflow.ExecuteQuickGoal(
             goalOrTitle: goalOrTitle,
             backlogTypeInput: backlogType,
-            baseOptions: sessionOptions with { CombinedOutput = combinedOutput },
+            baseOptions: sessionOptions with
+            {
+                CombinedOutput = combinedOutput,
+                DryRun = previewOnly
+            },
             input: input,
             output: output);
 
-        CacheResolvedApiKeyIfPresent(ref sessionOptions);
+        CacheResolvedWorkflowOptions(ref sessionOptions, ref currentSettings, workspace);
         var resultDescription = combinedOutput ? "Type01 and Type02 items" : $"{ticket.BacklogType} item";
-        color.WriteSuccess($"[✓] Ready-to-add {resultDescription} '{ticket.Title}' saved to '{sessionOptions.OutputDirectory}'.");
+        color.WriteSuccess(previewOnly
+            ? $"[Preview] {resultDescription} '{ticket.Title}' generated. No files written."
+            : $"[✓] Ready-to-add {resultDescription} '{ticket.Title}' saved to '{sessionOptions.OutputDirectory}'.");
         return MenuState.DraftItem;
     }
 
@@ -324,8 +343,10 @@ public sealed class CliMenuRunner
         color.WriteMenuOption("2", "Inspect Directories");
         color.WriteMenuOption("3", "Runtime & AI Diagnostics");
         color.WriteMenuOption("4", $"Select CLI Theme [{ConsoleColorWriter.GetThemeCode(currentSettings.Theme)}]", "Switch between agy (default), uv, and kubectl styles");
+        color.WriteMenuOption("5", $"Toggle Live Gemini API [{(currentSettings.GeminiLive == true ? "ON" : "OFF")}]", "ON calls Gemini generateContent; OFF uses the local draft");
+        color.WriteMenuOption("6", $"Select Gemini Model [{currentSettings.ModelName ?? "automatic"}]", "Fetch models supported by your API key");
         color.WriteMenuOption("0", "Back to Main Menu");
-        color.WriteColored("Select an option (0-4): ", ConsoleColor.Yellow);
+        color.WriteColored("Select an option (0-6): ", ConsoleColor.Yellow);
 
         var choice = input.ReadLine();
         if (choice is null)
@@ -352,8 +373,17 @@ public sealed class CliMenuRunner
                 return MenuState.Settings;
             case "4":
                 return MenuState.ThemeSelector;
+            case "5":
+                currentSettings = currentSettings with { GeminiLive = currentSettings.GeminiLive != true };
+                sessionOptions = sessionOptions with { GeminiLive = currentSettings.GeminiLive };
+                var liveSettingsPath = _settingsService.Save(workspace, currentSettings);
+                color.WriteSuccess($"Live Gemini API is now {(currentSettings.GeminiLive == true ? "ON" : "OFF")}. Saved settings to '{liveSettingsPath}'.");
+                return MenuState.Settings;
+            case "6":
+                SelectGeminiModel(workspace, ref sessionOptions, ref currentSettings, input, color);
+                return MenuState.Settings;
             default:
-                return WarnAndStay(color, choice, "0, 1, 2, 3, or 4", MenuState.Settings);
+                return WarnAndStay(color, choice, "0, 1, 2, 3, 4, 5, or 6", MenuState.Settings);
         }
     }
 
@@ -422,6 +452,8 @@ public sealed class CliMenuRunner
         color.WriteLine($"Windows Root    : {WorkspacePathService.DefaultWindowsWorkspaceRoot}");
         color.WriteLine($"WSL Root        : {WorkspacePathService.DefaultWslWorkspaceRoot}");
         color.WriteLine($"JSON Export     : {(currentSettings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)")}");
+        color.WriteLine($"Gemini Live API : {(currentSettings.GeminiLive == true ? "ON" : "OFF")}");
+        color.WriteLine($"Gemini Model    : {currentSettings.ModelName ?? "automatic (best available)"}");
         color.WriteLine($"CLI Theme       : {ConsoleColorWriter.FormatThemeDisplay(currentSettings.Theme)}");
         color.WriteLine($"Settings File   : {_settingsService.GetSettingsFilePath(workspace)}");
 
@@ -502,18 +534,50 @@ public sealed class CliMenuRunner
         color.WriteMuted(_runtimeEnvService.FormatRuntimeBanner(runtimeInfo, secret).TrimEnd());
     }
 
-    private void CacheResolvedApiKeyIfPresent(ref WorkflowOptions sessionOptions)
+    private void SelectGeminiModel(
+        WorkspaceDirectories workspace,
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        TextReader input,
+        ConsoleColorWriter color)
     {
-        if (!string.IsNullOrWhiteSpace(sessionOptions.ApiKey))
+        var secret = _secretProvider.ResolveOrPrompt(sessionOptions.ApiKey, input, color.InnerWriter);
+        var models = _workflow.ListGeminiModels(secret.ApiKey!);
+        var modelName = AsIsV1Workflow.SelectGeminiModel(
+            models,
+            requestedModel: null,
+            input,
+            color.InnerWriter,
+            nonInteractive: false);
+        sessionOptions = sessionOptions with { ApiKey = secret.ApiKey, ModelName = modelName };
+        currentSettings = currentSettings with { ModelName = modelName };
+        var savedPath = _settingsService.Save(workspace, currentSettings);
+        color.WriteSuccess($"Gemini model set to '{modelName}'. Saved settings to '{savedPath}'.");
+    }
+
+    private void CacheResolvedWorkflowOptions(
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        WorkspaceDirectories? workspace)
+    {
+        var updatedOptions = sessionOptions;
+        if (string.IsNullOrWhiteSpace(updatedOptions.ApiKey) &&
+            !string.IsNullOrWhiteSpace(_workflow.LastResolvedApiKey))
         {
-            return;
+            updatedOptions = updatedOptions with { ApiKey = _workflow.LastResolvedApiKey };
         }
 
-        var resolved = _secretProvider.Resolve();
-        if (resolved.IsConfigured)
+        if (!string.IsNullOrWhiteSpace(_workflow.LastSelectedModel))
         {
-            sessionOptions = sessionOptions with { ApiKey = resolved.ApiKey };
+            updatedOptions = updatedOptions with { ModelName = _workflow.LastSelectedModel };
+            currentSettings = currentSettings with { ModelName = _workflow.LastSelectedModel };
+            if (workspace is not null)
+            {
+                _settingsService.Save(workspace, currentSettings);
+            }
         }
+
+        sessionOptions = updatedOptions;
     }
 
     private static MenuState WarnAndStay(

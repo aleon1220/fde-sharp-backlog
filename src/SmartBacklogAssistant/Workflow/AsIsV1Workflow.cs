@@ -18,7 +18,7 @@ public sealed record WorkflowOptions(
     string? GoalTitle = null,
     bool ForceMenu = false,
     bool? JsonFileOut = null,
-    bool GeminiLive = false,
+    bool? GeminiLive = null,
     bool ListGeminiModels = false,
     bool CombinedOutput = false,
     string? Subcommand = null,
@@ -61,11 +61,27 @@ public sealed class AsIsV1Workflow
         _geminiApiClient = geminiApiClient ?? new GeminiApiClient();
     }
 
+    public string? LastSelectedModel { get; private set; }
+
+    public string? LastResolvedApiKey { get; private set; }
+
+    public IReadOnlyList<GeminiModel> ListGeminiModels(string apiKey) =>
+        _geminiApiClient.ListGenerateContentModels(apiKey);
+
     public JiraBacklogTicket Execute(WorkflowOptions options, TextReader input, TextWriter output)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
+
+        if (string.IsNullOrWhiteSpace(options.GoalTitle) && Directory.Exists(options.InputFilePath))
+        {
+            var directoryFiles = _collector.GetInputFilesFromDirectory(options.InputFilePath);
+            if (directoryFiles.Count > 1)
+            {
+                return ExecuteDirectoryBatch(directoryFiles, options, input, output);
+            }
+        }
 
         var colorWriter = new ConsoleColorWriter(
             output,
@@ -86,7 +102,7 @@ public sealed class AsIsV1Workflow
         string rawData;
         if (!string.IsNullOrWhiteSpace(options.GoalTitle))
         {
-            colorWriter.WriteSubHeader($"[1/5 Local -> Collect] Generating raw discovery notes from goal/title '{options.GoalTitle}'...");
+            colorWriter.WriteSubHeader($"[1/5 Local -> Collect] Preparing backlog goal '{options.GoalTitle}'...");
             rawData = _collector.CollectFromGoal(options.GoalTitle);
         }
         else
@@ -98,7 +114,7 @@ public sealed class AsIsV1Workflow
         // 2. Local: Process & Inject Secret API Key at Runtime
         var apiKey = initialSecret.ApiKey;
 
-        if (provider == AiProviderType.GoogleGemini)
+        if (provider == AiProviderType.GoogleGemini && options.GeminiLive == true)
         {
             var resolvedSecret = _secretProvider.ResolveOrPrompt(
                 options.ApiKey,
@@ -106,11 +122,17 @@ public sealed class AsIsV1Workflow
                 output,
                 options.NonInteractive);
             apiKey = resolvedSecret.ApiKey;
+            LastResolvedApiKey = apiKey;
+        }
+        else if (provider == AiProviderType.GoogleGemini)
+        {
+            apiKey = initialSecret.ApiKey;
         }
         else if (provider != AiProviderType.ManualPrompt && string.IsNullOrWhiteSpace(apiKey) && !options.NonInteractive)
         {
             colorWriter.WriteColored($"Enter API key for {provider} (or press Enter for mock key): ", ConsoleColor.Yellow);
             apiKey = input.ReadLine();
+            LastResolvedApiKey = apiKey;
         }
 
         var backlogTypeSelection = options.BacklogTypeInput;
@@ -136,22 +158,26 @@ public sealed class AsIsV1Workflow
         var backlogType = _formatter.ResolveBacklogType(backlogTypeSelection);
         var promptType = isCombinedType ? BacklogType.Type01 : backlogType;
         var selectedPromptPath = _promptService.ResolvePromptFilePath(options.PromptFilePath, promptType);
-        var renderedPrompt = File.Exists(selectedPromptPath)
-            ? _promptService.LoadAndRenderPrompt(selectedPromptPath, rawData)
-            : File.Exists(options.PromptFilePath)
-                ? _promptService.LoadAndRenderPrompt(options.PromptFilePath, rawData)
+        var existingSelectedPrompt = _promptService.TryFindExistingPromptPath(selectedPromptPath);
+        var existingFallbackPrompt = _promptService.TryFindExistingPromptPath(options.PromptFilePath);
+        var renderedPrompt = existingSelectedPrompt is not null
+            ? _promptService.LoadAndRenderPrompt(existingSelectedPrompt, rawData)
+            : existingFallbackPrompt is not null
+                ? _promptService.LoadAndRenderPrompt(existingFallbackPrompt, rawData)
                 : _promptService.RenderPromptFromTemplate("# Practical Process As-Is v1\nAnalyze the following raw notes:\n{{RAW_DATA}}", rawData);
 
         var modelName = options.ModelName;
-        if (options.GeminiLive)
+        if (options.GeminiLive == true)
         {
             if (provider != AiProviderType.GoogleGemini)
             {
                 throw new InvalidOperationException("--gemini-live can only be used with the Gemini provider.");
             }
 
+            colorWriter.WriteSubHeader("[2/5 Local -> Process] Calling Gemini API to list models supporting generateContent...");
             var availableModels = _geminiApiClient.ListGenerateContentModels(apiKey!);
             modelName = SelectGeminiModel(availableModels, modelName, input, output, options.NonInteractive);
+            LastSelectedModel = modelName;
         }
 
         if (provider == AiProviderType.ManualPrompt)
@@ -162,10 +188,18 @@ public sealed class AsIsV1Workflow
             colorWriter.WriteMuted("--------------------------------------------------");
         }
 
-        // 3. Local: Validate outcome
-        var generatedContent = options.GeminiLive
-            ? _geminiApiClient.GenerateContent(apiKey!, modelName!, BuildGeminiPrompt(renderedPrompt, promptType))
-            : null;
+        // 3. Local: Generate & Validate outcome
+        string? generatedContent = null;
+        if (options.GeminiLive == true)
+        {
+            colorWriter.WriteSubHeader($"[2/5 Local -> Process] Calling Google Gemini API ({modelName}) with '{Path.GetFileName(existingSelectedPrompt ?? selectedPromptPath)}'...");
+            generatedContent = _geminiApiClient.GenerateContent(apiKey!, modelName!, BuildGeminiPrompt(renderedPrompt, promptType));
+        }
+        else if (provider == AiProviderType.GoogleGemini)
+        {
+            colorWriter.WriteMuted("[2/5 Local -> Process] Live Gemini API is OFF; using the local deterministic draft.");
+        }
+
         var outcome = _orchestrator.Process(rawData, renderedPrompt, provider, apiKey, generatedContent, modelName, promptType);
         colorWriter.WriteMuted(outcome.GuidanceMessage);
         colorWriter.WriteSuccess("[3/5 Local -> Validate] Outcome validated successfully.");
@@ -175,7 +209,11 @@ public sealed class AsIsV1Workflow
         colorWriter.WriteHeader("[4/5 Review -> Review Outcome]");
         output.WriteLine($"  Title      : {outcome.Title}");
         output.WriteLine($"  Description: {outcome.Description}");
-        output.WriteLine($"  User Story : {outcome.UserStory}");
+        if (!string.IsNullOrWhiteSpace(outcome.UserStory))
+        {
+            output.WriteLine($"  User Story : {outcome.UserStory}");
+        }
+
         foreach (var scenario in outcome.Scenarios)
         {
             output.WriteLine($"  Scenario   : Given {scenario.Given} | When {scenario.When} | Then {scenario.Then}");
@@ -212,7 +250,31 @@ public sealed class AsIsV1Workflow
         return tickets[0];
     }
 
-    private static string SelectGeminiModel(
+    private JiraBacklogTicket ExecuteDirectoryBatch(
+        IReadOnlyList<string> files,
+        WorkflowOptions baseOptions,
+        TextReader input,
+        TextWriter output)
+    {
+        var currentOptions = baseOptions;
+        JiraBacklogTicket? lastTicket = null;
+
+        foreach (var filePath in files)
+        {
+            var fileOptions = currentOptions with { InputFilePath = filePath };
+            lastTicket = Execute(fileOptions, input, output);
+            currentOptions = currentOptions with
+            {
+                ApiKey = LastResolvedApiKey ?? currentOptions.ApiKey,
+                ModelName = LastSelectedModel ?? currentOptions.ModelName,
+                BacklogTypeInput = currentOptions.BacklogTypeInput ?? (lastTicket.BacklogType == BacklogType.Type02 ? "Type02" : "Type01")
+            };
+        }
+
+        return lastTicket!;
+    }
+
+    public static string SelectGeminiModel(
         IReadOnlyList<GeminiModel> availableModels,
         string? requestedModel,
         TextReader input,
@@ -224,6 +286,7 @@ public sealed class AsIsV1Workflow
             throw new InvalidOperationException("The Gemini API key has no models that support generateContent.");
         }
 
+        var defaultModelId = ResolveDefaultModelId(availableModels);
         var selectedModel = requestedModel;
         if (string.IsNullOrWhiteSpace(selectedModel) && !nonInteractive)
         {
@@ -235,7 +298,7 @@ public sealed class AsIsV1Workflow
                 output.WriteLine($"  [{index + 1}] {model.DisplayName} ({model.ModelId})");
             }
 
-            output.Write($"Select a model [default: {RuntimeEnvironmentService.DefaultGeminiModel}]: ");
+            output.Write($"Select a model [default: {defaultModelId}]: ");
             var selection = input.ReadLine()?.Trim();
             if (int.TryParse(selection, out var modelIndex) && modelIndex >= 1 && modelIndex <= availableModels.Count)
             {
@@ -248,7 +311,7 @@ public sealed class AsIsV1Workflow
         }
 
         selectedModel = string.IsNullOrWhiteSpace(selectedModel)
-            ? Environment.GetEnvironmentVariable(RuntimeEnvironmentService.GeminiModelEnvVar) ?? RuntimeEnvironmentService.DefaultGeminiModel
+            ? defaultModelId
             : selectedModel.Trim();
         if (selectedModel.StartsWith("models/", StringComparison.OrdinalIgnoreCase))
         {
@@ -266,14 +329,53 @@ public sealed class AsIsV1Workflow
         return match.ModelId;
     }
 
-        private static string BuildGeminiPrompt(string renderedPrompt, BacklogType backlogType)
+    private static string ResolveDefaultModelId(IReadOnlyList<GeminiModel> availableModels)
+    {
+        var envModel = Environment.GetEnvironmentVariable(RuntimeEnvironmentService.GeminiModelEnvVar)?.Trim();
+        if (!string.IsNullOrWhiteSpace(envModel))
         {
-                var responseContract = backlogType == BacklogType.Type02
-                        ? "Return only a JSON object with string properties `title` and `description`. Do not include a user story or acceptance criteria."
-                        : "Return only a JSON object with string properties `title`, `description`, `userStory`, and a `scenarios` array containing `given`, `when`, and `then`.";
-
-                return $"{renderedPrompt.Trim()}\n\n{responseContract} Do not include Markdown fences or commentary.";
+            var normalizedEnv = envModel.StartsWith("models/", StringComparison.OrdinalIgnoreCase)
+                ? envModel["models/".Length..]
+                : envModel;
+            var envMatch = availableModels.FirstOrDefault(m =>
+                string.Equals(m.ModelId, normalizedEnv, StringComparison.OrdinalIgnoreCase));
+            if (envMatch is not null)
+            {
+                return envMatch.ModelId;
+            }
         }
+
+        string[] preferredModels =
+        [
+            RuntimeEnvironmentService.DefaultGeminiModel,
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash"
+        ];
+
+        foreach (var candidate in preferredModels)
+        {
+            var match = availableModels.FirstOrDefault(m =>
+                string.Equals(m.ModelId, candidate, StringComparison.OrdinalIgnoreCase));
+            if (match is not null)
+            {
+                return match.ModelId;
+            }
+        }
+
+        var flashModel = availableModels.FirstOrDefault(m =>
+            m.ModelId.Contains("flash", StringComparison.OrdinalIgnoreCase));
+        return (flashModel ?? availableModels[0]).ModelId;
+    }
+
+    private static string BuildGeminiPrompt(string renderedPrompt, BacklogType backlogType)
+    {
+        var responseContract = backlogType == BacklogType.Type02
+            ? "Return only a JSON object with string properties `title` and `description`. Do not include a user story or acceptance criteria."
+            : "Return only a JSON object with string properties `title`, `description`, `userStory`, and a `scenarios` array containing `given`, `when`, and `then`.";
+
+        return $"{renderedPrompt.Trim()}\n\n{responseContract} Do not include Markdown fences or commentary.";
+    }
 
     public JiraBacklogTicket ExecuteQuickGoal(
         string goalOrTitle,

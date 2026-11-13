@@ -103,7 +103,11 @@ public sealed class AiModelOrchestrator
     private static string BuildGuidanceMessage(AiProviderType provider, string? apiKey, bool liveGemini, string? modelName)
     {
         var hasKey = !string.IsNullOrWhiteSpace(apiKey);
-        var keyStatus = hasKey ? $"API key injected ({GeminiSecretProvider.MaskKey(apiKey)})" : "no API key provided (running mock simulation)";
+        var keyStatus = hasKey
+            ? $"API key injected ({GeminiSecretProvider.MaskKey(apiKey)})"
+            : provider == AiProviderType.GoogleGemini && !liveGemini
+                ? "API key not required (offline mode)"
+                : "no API key provided";
 
         return provider switch
         {
@@ -112,7 +116,7 @@ public sealed class AiModelOrchestrator
             AiProviderType.GoogleGemini =>
                 liveGemini
                     ? $"[Live Gemini API -> Google Gemini ({modelName ?? RuntimeEnvironmentService.DefaultGeminiModel}) | {keyStatus}] Generated backlog draft using the Gemini API."
-                    : $"[Gemini Orchestrator -> Google Gemini ({modelName ?? RuntimeEnvironmentService.DefaultGeminiModel}) | {keyStatus} | Keys: {GeminiSecretProvider.GeminiApiKeysUrl}] Processed prompt using Google Gemini model.",
+                    : $"[Offline Gemini Draft -> Google Gemini ({modelName ?? RuntimeEnvironmentService.DefaultGeminiModel}) | {keyStatus} | Keys: {GeminiSecretProvider.GeminiApiKeysUrl}] Processed prompt using local deterministic fallback (enable Live Gemini API to call generateContent).",
             AiProviderType.AnthropicClaude =>
                 $"[Mock Orchestrator -> Anthropic Claude ({keyStatus})] Processed prompt using mocked Claude model.",
             _ =>
@@ -127,29 +131,106 @@ public sealed class AiModelOrchestrator
     private static (string Title, string Description, string UserStory, IReadOnlyList<GherkinScenario> Scenarios) ParseGeneratedDraft(
         string generatedContent)
     {
-        using var document = System.Text.Json.JsonDocument.Parse(generatedContent);
+        var sanitizedJson = StripMarkdownCodeFences(generatedContent);
+        using var document = System.Text.Json.JsonDocument.Parse(sanitizedJson);
         var root = document.RootElement;
-        var title = ReadJsonString(root, "title");
-        var description = ReadJsonString(root, "description");
-        var userStory = ReadJsonString(root, "userStory");
+        if (root.ValueKind == System.Text.Json.JsonValueKind.Array && root.GetArrayLength() > 0)
+        {
+            root = root[0];
+        }
+
+        var title = ReadJsonString(root, "title", "Title");
+        var description = ReadJsonString(root, "description", "Description");
+        var userStory = ReadJsonString(root, "userStory", "UserStory", "user_story");
         var scenarios = new List<GherkinScenario>();
 
-        if (root.TryGetProperty("scenarios", out var scenarioElements) && scenarioElements.ValueKind == System.Text.Json.JsonValueKind.Array)
+        if (TryGetPropertyIgnoreCase(root, out var scenarioElements, "scenarios", "Scenarios", "acceptanceCriteria", "AcceptanceCriteria") &&
+            scenarioElements.ValueKind == System.Text.Json.JsonValueKind.Array)
         {
             foreach (var scenario in scenarioElements.EnumerateArray())
             {
                 scenarios.Add(new GherkinScenario(
-                    ReadJsonString(scenario, "given"),
-                    ReadJsonString(scenario, "when"),
-                    ReadJsonString(scenario, "then")));
+                    ReadJsonString(scenario, "given", "Given"),
+                    ReadJsonString(scenario, "when", "When"),
+                    ReadJsonString(scenario, "then", "Then")));
+            }
+        }
+
+        if (scenarios.Count > 0)
+        {
+            if (string.IsNullOrWhiteSpace(description) && !string.IsNullOrWhiteSpace(userStory))
+            {
+                description = userStory;
+            }
+            else if (string.IsNullOrWhiteSpace(userStory) && !string.IsNullOrWhiteSpace(description))
+            {
+                userStory = description;
             }
         }
 
         return (title, description, userStory, scenarios);
     }
 
-    private static string ReadJsonString(System.Text.Json.JsonElement element, string propertyName) =>
-        element.TryGetProperty(propertyName, out var value) && value.ValueKind == System.Text.Json.JsonValueKind.String
+    private static string StripMarkdownCodeFences(string text)
+    {
+        var trimmed = text.Trim();
+        if (!trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            return trimmed;
+        }
+
+        var firstNewline = trimmed.IndexOf('\n');
+        if (firstNewline > 0)
+        {
+            trimmed = trimmed[(firstNewline + 1)..];
+        }
+        else
+        {
+            trimmed = trimmed.TrimStart('`');
+        }
+
+        if (trimmed.EndsWith("```", StringComparison.Ordinal))
+        {
+            trimmed = trimmed[..^3];
+        }
+
+        return trimmed.Trim();
+    }
+
+    private static bool TryGetPropertyIgnoreCase(
+        System.Text.Json.JsonElement element,
+        out System.Text.Json.JsonElement value,
+        params string[] propertyNames)
+    {
+        if (element.ValueKind == System.Text.Json.JsonValueKind.Object)
+        {
+            foreach (var name in propertyNames)
+            {
+                if (element.TryGetProperty(name, out value))
+                {
+                    return true;
+                }
+            }
+
+            foreach (var prop in element.EnumerateObject())
+            {
+                foreach (var name in propertyNames)
+                {
+                    if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        value = prop.Value;
+                        return true;
+                    }
+                }
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static string ReadJsonString(System.Text.Json.JsonElement element, params string[] propertyNames) =>
+        TryGetPropertyIgnoreCase(element, out var value, propertyNames) && value.ValueKind == System.Text.Json.JsonValueKind.String
             ? value.GetString() ?? string.Empty
             : string.Empty;
 
@@ -186,21 +267,23 @@ public sealed class AiModelOrchestrator
         }
 
         var context = ExtractPrefixedValue(lines, "Context:")
-            ?? string.Join(" ", lines);
+            ?? (lines.Length == 1 && lines[0].StartsWith("Goal:", StringComparison.OrdinalIgnoreCase)
+                ? "Not specified in discovery notes."
+                : string.Join(" ", lines));
 
         var userStory = ExtractPrefixedValue(lines, "Requirement:")
             ?? ExtractLineContaining(lines, "As a ")
             ?? ExtractLineContaining(lines, "As an ")
-            ?? $"As a user, I want {title.ToLowerInvariant()}, so that the team delivers the requested capability.";
+            ?? "Not specified in discovery notes.";
 
         var given = ExtractPrefixedValue(lines, "Precondition:", "Given:")
-            ?? "the system is in a valid initial state for the requirement";
+            ?? "Not specified in discovery notes.";
         var when = ExtractPrefixedValue(lines, "Action:", "When:")
-            ?? "the user triggers the requested workflow action";
+            ?? "Not specified in discovery notes.";
         var then = ExtractPrefixedValue(lines, "Expected Outcome:", "Then:")
-            ?? "the system completes the action and meets acceptance criteria";
+            ?? "Not specified in discovery notes.";
 
-        var description = $"{context} {userStory}".Trim();
+        var description = context.Trim();
 
         return (title, description, userStory, new GherkinScenario(given, when, then));
     }

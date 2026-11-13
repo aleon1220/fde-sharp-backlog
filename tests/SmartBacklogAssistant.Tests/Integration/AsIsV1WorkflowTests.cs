@@ -42,16 +42,41 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         // User enters Gemini API key when prompted in CLI, then presses Enter for default Type01 (Given/When/Then)
         using var input = new StringReader("AIzaSyCliEnteredKey5566\n\n");
         using var output = new StringWriter();
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(request =>
+            request.Method == HttpMethod.Get
+                ? JsonResponse("""
+                    {
+                      "models": [{
+                        "name": "models/gemini-2.5-flash",
+                        "baseModelId": "gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                      }]
+                    }
+                    """)
+                : JsonResponse("""
+                    {
+                      "candidates": [{
+                        "content": {
+                          "parts": [{
+                            "text": "{\"title\":\"Webhook Retry Policy\",\"description\":\"Retry transient webhook failures.\",\"userStory\":\"As an integration developer, I want retries, so that transient failures do not drop events.\",\"scenarios\":[{\"given\":\"A webhook endpoint returns HTTP 503\",\"when\":\"The delivery attempt fails\",\"then\":\"The event is retried\"}]}"
+                          }]
+                        }
+                      }]
+                    }
+                    """)));
 
         var isolatedSecretProvider = new GeminiSecretProvider(
             environmentReader: _ => null,
             environmentWriter: (_, _) => { });
 
-        var workflow = CreateWorkflow(isolatedSecretProvider);
+        var workflow = CreateWorkflow(isolatedSecretProvider, new GeminiApiClient(httpClient));
         var options = new WorkflowOptions(
             InputFilePath: _inputFilePath,
             PromptFilePath: _promptFilePath,
             OutputDirectory: _outputDir,
+            ModelName: "gemini-2.5-flash",
+            GeminiLive: true,
             NonInteractive: false);
 
         var ticket = workflow.Execute(options, input, output);
