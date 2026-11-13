@@ -43,12 +43,12 @@ dotnet run --project src/SmartBacklogAssistant -- doctor
      * `[2]` **Inspect Directories** (`in` and `out` file listings & byte sizes).
      * `[3]` **Runtime & AI Diagnostics** (OS, Windows/WSL path mappings, and Gemini env vars).
      * `[4]` **Select CLI Theme**: Switch between **`agy` style (default)**, **`uv` style**, and **`kubectl` style** in the configuration sub-menu (persisted to `smart-backlog-assistant/settings.json` and configurable via `--theme <agy|uv|kubectl>`).
-4. **Local Processing (`collect` -> `process` -> `validate`)**: Ingests raw discovery notes (`smart-backlog-assistant/in` or `samples/raw-notes.txt`), renders `prompts/as-is-v1-prompt.md`, and validates the structured draft.
+4. **Local Processing (`collect` -> `process` -> `validate`)**: Ingests raw discovery notes (`smart-backlog-assistant/in` or `samples/raw-notes.txt`), renders the Type01 or Type02 prompt, and validates the structured draft.
 5. **Review & Jira Output (`Type01` | `Type02`)**: Formats `Type01` (`complete` — Given/When/Then) or `Type02` (`schedule` — Title + Description) to console and `smart-backlog-assistant/out` (or `output/`).
 
 ## Gemini API Options
 
-The default workflow stays offline and creates a deterministic draft. Use `--gemini-live` to send the rendered discovery prompt to Gemini. The CLI retrieves models available to your API key and only offers models that advertise the `generateContent` method; use `--model` to select one explicitly or choose from the interactive list.
+The default workflow stays offline and creates a deterministic draft. Use `--gemini-live` to send the rendered discovery prompt to Gemini. `prompts/prompt-goal-type01.md` and `prompts/prompt-goal-type02.md` define the distinct response contracts; a custom `--prompt` path overrides the selected template. The CLI retrieves models available to your API key and only offers models that advertise the `generateContent` method; use `--model` to select one explicitly or choose from the interactive list.
 
 ```bash
 # List models compatible with content generation for this API key

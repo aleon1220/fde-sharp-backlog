@@ -71,6 +71,24 @@ public sealed class AiModelOrchestratorTests
     }
 
     [Fact]
+    public void Process_WithGeneratedType02Response_RequiresOnlyTitleAndDescription()
+    {
+        var outcome = _sut.Process(
+            rawData: "Goal: Improve onboarding",
+            renderedPrompt: "Type02 prompt",
+            provider: AiProviderType.GoogleGemini,
+            generatedContent: """
+                { "title": "Improve onboarding", "description": "Clarify the onboarding workflow." }
+                """,
+            backlogType: BacklogType.Type02);
+
+        Assert.Equal("Improve onboarding", outcome.Title);
+        Assert.Equal("Clarify the onboarding workflow.", outcome.Description);
+        Assert.Empty(outcome.UserStory);
+        Assert.Empty(outcome.Scenarios);
+    }
+
+    [Fact]
     public void ValidateOutcome_WithMissingScenarioFields_ThrowsInvalidOperationException()
     {
         var invalidOutcome = new ProcessedOutcome(

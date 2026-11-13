@@ -32,7 +32,8 @@ public sealed class AiModelOrchestrator
         AiProviderType provider = AiProviderType.ManualPrompt,
         string? apiKey = null,
         string? generatedContent = null,
-        string? modelName = null)
+        string? modelName = null,
+        BacklogType backlogType = BacklogType.Type01)
     {
         if (string.IsNullOrWhiteSpace(rawData))
         {
@@ -58,11 +59,13 @@ public sealed class AiModelOrchestrator
             UserStory: userStory,
             Scenarios: scenarios);
 
-        ValidateOutcome(outcome);
+        ValidateOutcome(outcome, backlogType);
         return outcome;
     }
 
-    public void ValidateOutcome(ProcessedOutcome outcome)
+    public void ValidateOutcome(ProcessedOutcome outcome) => ValidateOutcome(outcome, BacklogType.Type01);
+
+    public void ValidateOutcome(ProcessedOutcome outcome, BacklogType backlogType)
     {
         ArgumentNullException.ThrowIfNull(outcome);
 
@@ -74,6 +77,11 @@ public sealed class AiModelOrchestrator
         if (string.IsNullOrWhiteSpace(outcome.Description))
         {
             throw new InvalidOperationException("Validation failed: Outcome Description is missing.");
+        }
+
+        if (backlogType == BacklogType.Type02)
+        {
+            return;
         }
 
         if (outcome.Scenarios is null || outcome.Scenarios.Count == 0)

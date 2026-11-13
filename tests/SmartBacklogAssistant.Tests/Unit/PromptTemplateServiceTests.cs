@@ -1,3 +1,4 @@
+using SmartBacklogAssistant.Domain;
 using SmartBacklogAssistant.Services;
 
 namespace SmartBacklogAssistant.Tests.Unit;
@@ -29,6 +30,29 @@ public sealed class PromptTemplateServiceTests
         Assert.StartsWith("You are a Senior PM.", rendered);
         Assert.Contains("## Raw Input Data", rendered);
         Assert.Contains("Requirement: Add audit log export", rendered);
+    }
+
+    [Theory]
+    [InlineData(BacklogType.Type01, PromptTemplateService.Type01PromptFilePath, "Complete User Story")]
+    [InlineData(BacklogType.Type02, PromptTemplateService.Type02PromptFilePath, "Schedule Item")]
+    public void ResolvePromptFilePath_DefaultPathSelectsPromptForBacklogType(
+        BacklogType backlogType,
+        string expectedPath,
+        string expectedTitle)
+    {
+        var resolvedPath = _sut.ResolvePromptFilePath(PromptTemplateService.DefaultPromptFilePath, backlogType);
+        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
+
+        Assert.Equal(expectedPath, resolvedPath);
+        Assert.Contains(expectedTitle, File.ReadAllText(Path.Combine(repositoryRoot, resolvedPath)));
+    }
+
+    [Fact]
+    public void ResolvePromptFilePath_CustomPathRemainsAnOverride()
+    {
+        var resolvedPath = _sut.ResolvePromptFilePath("custom/prompt.md", BacklogType.Type02);
+
+        Assert.Equal("custom/prompt.md", resolvedPath);
     }
 
     [Theory]

@@ -1,3 +1,5 @@
+using SmartBacklogAssistant.Domain;
+
 namespace SmartBacklogAssistant.Services;
 
 /// <summary>
@@ -6,6 +8,32 @@ namespace SmartBacklogAssistant.Services;
 public sealed class PromptTemplateService
 {
     public const string RawDataPlaceholder = "{{RAW_DATA}}";
+    public const string DefaultPromptFilePath = "prompts/as-is-v1-prompt.md";
+    public const string Type01PromptFilePath = "prompts/prompt-goal-type01.md";
+    public const string Type02PromptFilePath = "prompts/prompt-goal-type02.md";
+
+    public string ResolvePromptFilePath(string promptFilePath, BacklogType backlogType)
+    {
+        if (string.IsNullOrWhiteSpace(promptFilePath))
+        {
+            throw new ArgumentException("Prompt file path cannot be empty.", nameof(promptFilePath));
+        }
+
+        if (!PathsMatch(promptFilePath, DefaultPromptFilePath))
+        {
+            return promptFilePath;
+        }
+
+        return backlogType == BacklogType.Type02
+            ? Type02PromptFilePath
+            : Type01PromptFilePath;
+    }
+
+    public string LoadAndRenderPromptForType(string promptFilePath, string rawData, BacklogType backlogType)
+    {
+        var resolvedPath = ResolvePromptFilePath(promptFilePath, backlogType);
+        return LoadAndRenderPrompt(resolvedPath, rawData);
+    }
 
     public string LoadAndRenderPrompt(string promptFilePath, string rawData)
     {
@@ -42,5 +70,12 @@ public sealed class PromptTemplateService
         }
 
         return $"{normalizedTemplate}\n\n## Raw Input Data\n```text\n{rawData.Trim()}\n```";
+    }
+
+    private static bool PathsMatch(string firstPath, string secondPath)
+    {
+        var normalizedFirst = firstPath.Replace('\\', '/').TrimStart('.', '/');
+        var normalizedSecond = secondPath.Replace('\\', '/').TrimStart('.', '/');
+        return string.Equals(normalizedFirst, normalizedSecond, StringComparison.OrdinalIgnoreCase);
     }
 }

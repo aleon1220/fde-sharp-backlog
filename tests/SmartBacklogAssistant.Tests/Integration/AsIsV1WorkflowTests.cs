@@ -180,6 +180,7 @@ public sealed class AsIsV1WorkflowTests : IDisposable
     [Fact]
     public void Execute_WithGeminiLive_UsesSelectedCompatibleModelAndGeneratedDraft()
     {
+        var requestBody = string.Empty;
         var handler = new StubHttpMessageHandler(request =>
         {
             if (request.Method == HttpMethod.Get)
@@ -196,19 +197,21 @@ public sealed class AsIsV1WorkflowTests : IDisposable
                     """);
             }
 
+                        requestBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
             return JsonResponse("""
                 {
                   "candidates": [{
-                    "content": { "parts": [{ "text": "{\"title\":\"Gemini Draft\",\"description\":\"Created from Gemini\",\"userStory\":\"As a user, I want a generated draft, so that the team can review it.\",\"scenarios\":[{\"given\":\"the user has notes\",\"when\":\"Gemini drafts a backlog item\",\"then\":\"a structured item is returned\"}]}" }] }
+                                        "content": { "parts": [{ "text": "{\"title\":\"Gemini Draft\",\"description\":\"Created from Gemini\"}" }] }
                   }]
                 }
                 """);
         });
         using var httpClient = new HttpClient(handler);
         var workflow = CreateWorkflow(geminiApiClient: new GeminiApiClient(httpClient));
+                var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
         var options = new WorkflowOptions(
             InputFilePath: _inputFilePath,
-            PromptFilePath: _promptFilePath,
+                        PromptFilePath: Path.Combine(repositoryRoot, PromptTemplateService.Type02PromptFilePath),
             ApiKey: "AIzaSyLiveTestKey1234",
             ModelName: "gemini-3.8-flash",
             BacklogTypeInput: "Type02",
@@ -221,6 +224,8 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Equal(BacklogType.Type02, ticket.BacklogType);
         Assert.Equal("Gemini Draft", ticket.Title);
         Assert.Equal("Created from Gemini", ticket.Description);
+        Assert.Contains("Schedule Item (Type 02)", requestBody);
+        Assert.Contains("Do not add a user story", requestBody);
     }
 
     [Fact]

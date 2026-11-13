@@ -96,10 +96,6 @@ public sealed class AsIsV1Workflow
         }
 
         // 2. Local: Process & Inject Secret API Key at Runtime
-        var renderedPrompt = File.Exists(options.PromptFilePath)
-            ? _promptService.LoadAndRenderPrompt(options.PromptFilePath, rawData)
-            : _promptService.RenderPromptFromTemplate("# Practical Process As-Is v1\nAnalyze the following raw notes:\n{{RAW_DATA}}", rawData);
-
         var apiKey = initialSecret.ApiKey;
 
         if (provider == AiProviderType.GoogleGemini)
@@ -116,6 +112,35 @@ public sealed class AsIsV1Workflow
             colorWriter.WriteColored($"Enter API key for {provider} (or press Enter for mock key): ", ConsoleColor.Yellow);
             apiKey = input.ReadLine();
         }
+
+        var backlogTypeSelection = options.BacklogTypeInput;
+        if (options.CombinedOutput && string.IsNullOrWhiteSpace(backlogTypeSelection))
+        {
+            backlogTypeSelection = "both";
+        }
+        else if (string.IsNullOrWhiteSpace(backlogTypeSelection) && !options.NonInteractive)
+        {
+            output.WriteLine();
+            colorWriter.WriteHeader("[4/5 Review -> Decide Backlog Type]");
+            colorWriter.WriteMenuOption("1 / Type01", "complete", "Use Given / When / Then (default)");
+            colorWriter.WriteMenuOption("2 / Type02", "schedule", "Use Title + Description");
+            colorWriter.WriteMenuOption("3 / Both", "combined", "Generate both formats");
+            colorWriter.WriteColored("Select backlog type (01, 02, or 3): ", ConsoleColor.Yellow);
+            backlogTypeSelection = input.ReadLine();
+        }
+
+        var isCombinedType = options.CombinedOutput ||
+                             string.Equals(backlogTypeSelection?.Trim(), "both", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(backlogTypeSelection?.Trim(), "all", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(backlogTypeSelection?.Trim(), "3", StringComparison.OrdinalIgnoreCase);
+        var backlogType = _formatter.ResolveBacklogType(backlogTypeSelection);
+        var promptType = isCombinedType ? BacklogType.Type01 : backlogType;
+        var selectedPromptPath = _promptService.ResolvePromptFilePath(options.PromptFilePath, promptType);
+        var renderedPrompt = File.Exists(selectedPromptPath)
+            ? _promptService.LoadAndRenderPrompt(selectedPromptPath, rawData)
+            : File.Exists(options.PromptFilePath)
+                ? _promptService.LoadAndRenderPrompt(options.PromptFilePath, rawData)
+                : _promptService.RenderPromptFromTemplate("# Practical Process As-Is v1\nAnalyze the following raw notes:\n{{RAW_DATA}}", rawData);
 
         var modelName = options.ModelName;
         if (options.GeminiLive)
@@ -139,9 +164,9 @@ public sealed class AsIsV1Workflow
 
         // 3. Local: Validate outcome
         var generatedContent = options.GeminiLive
-            ? _geminiApiClient.GenerateContent(apiKey!, modelName!, BuildGeminiPrompt(renderedPrompt))
+            ? _geminiApiClient.GenerateContent(apiKey!, modelName!, BuildGeminiPrompt(renderedPrompt, promptType))
             : null;
-        var outcome = _orchestrator.Process(rawData, renderedPrompt, provider, apiKey, generatedContent, modelName);
+        var outcome = _orchestrator.Process(rawData, renderedPrompt, provider, apiKey, generatedContent, modelName, promptType);
         colorWriter.WriteMuted(outcome.GuidanceMessage);
         colorWriter.WriteSuccess("[3/5 Local -> Validate] Outcome validated successfully.");
 
@@ -156,23 +181,6 @@ public sealed class AsIsV1Workflow
             output.WriteLine($"  Scenario   : Given {scenario.Given} | When {scenario.When} | Then {scenario.Then}");
         }
 
-        var backlogTypeSelection = options.BacklogTypeInput;
-        if (string.IsNullOrWhiteSpace(backlogTypeSelection) && !options.NonInteractive)
-        {
-            output.WriteLine();
-            colorWriter.WriteHeader("[4/5 Review -> Decide Backlog Type]");
-            colorWriter.WriteMenuOption("1 / Type01", "complete", "Use Given / When / Then (default)");
-            colorWriter.WriteMenuOption("2 / Type02", "schedule", "Use Title + Description");
-            colorWriter.WriteColored("Select backlog type (01 or 02): ", ConsoleColor.Yellow);
-            backlogTypeSelection = input.ReadLine();
-        }
-
-        var isCombinedType = options.CombinedOutput ||
-                             string.Equals(backlogTypeSelection?.Trim(), "both", StringComparison.OrdinalIgnoreCase) ||
-                             string.Equals(backlogTypeSelection?.Trim(), "all", StringComparison.OrdinalIgnoreCase) ||
-                             string.Equals(backlogTypeSelection?.Trim(), "3", StringComparison.OrdinalIgnoreCase);
-
-        var backlogType = _formatter.ResolveBacklogType(backlogTypeSelection);
         IReadOnlyList<JiraBacklogTicket> tickets = isCombinedType
             ? [
                 _formatter.Format(outcome, BacklogType.Type01),
@@ -258,20 +266,14 @@ public sealed class AsIsV1Workflow
         return match.ModelId;
     }
 
-    private static string BuildGeminiPrompt(string renderedPrompt) => $$"""
-        {{renderedPrompt}}
-
-        Return only a JSON object with this shape, using the discovery notes above as the source of truth:
+        private static string BuildGeminiPrompt(string renderedPrompt, BacklogType backlogType)
         {
-          "title": "short backlog title",
-          "description": "clear description",
-          "userStory": "As a ..., I want ..., so that ...",
-          "scenarios": [
-            { "given": "initial context", "when": "action", "then": "observable result" }
-          ]
+                var responseContract = backlogType == BacklogType.Type02
+                        ? "Return only a JSON object with string properties `title` and `description`. Do not include a user story or acceptance criteria."
+                        : "Return only a JSON object with string properties `title`, `description`, `userStory`, and a `scenarios` array containing `given`, `when`, and `then`.";
+
+                return $"{renderedPrompt.Trim()}\n\n{responseContract} Do not include Markdown fences or commentary.";
         }
-        Do not include Markdown fences or text outside the JSON object.
-        """;
 
     public JiraBacklogTicket ExecuteQuickGoal(
         string goalOrTitle,
