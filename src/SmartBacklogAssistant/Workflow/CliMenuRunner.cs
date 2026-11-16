@@ -402,6 +402,16 @@ public sealed class CliMenuRunner
                     return MenuState.Main;
                 }
 
+                case "/verbose":
+                {
+                    var nextVerbose = args.Length == 0
+                        ? !sessionOptions.Verbose
+                        : ParseBooleanToggle(args[0], sessionOptions.Verbose);
+                    sessionOptions = sessionOptions with { Verbose = nextVerbose };
+                    color.WriteSuccess($"Verbose pipeline diagnostics are now {(nextVerbose ? "ON" : "OFF")}.");
+                    return MenuState.Main;
+                }
+
                 case "/models":
                     ListActiveProviderModels(sessionOptions, currentSettings, input, color);
                     return MenuState.Main;
@@ -490,6 +500,7 @@ public sealed class CliMenuRunner
     {
         var preview = args.Any(a => a.Equals("--preview", StringComparison.OrdinalIgnoreCase) || a.Equals("--dry-run", StringComparison.OrdinalIgnoreCase));
         var webSearch = args.Any(a => a.Equals("--search", StringComparison.OrdinalIgnoreCase) || a.Equals("--web", StringComparison.OrdinalIgnoreCase));
+        var showAlternatives = args.Any(a => a.Equals("--alternatives", StringComparison.OrdinalIgnoreCase) || a.Equals("--alts", StringComparison.OrdinalIgnoreCase));
         var jsonFlag = ParseOptionalJsonFlag(args);
         var typeInput = GetInlineFlagValue(args, "--type", "-t") ?? "Type01";
         var explicitDetails = GetInlineFlagValue(args, "--details", "-d", "--context", "-c");
@@ -532,7 +543,8 @@ public sealed class CliMenuRunner
                 JsonFileOut = jsonFlag ?? sessionOptions.JsonFileOut,
                 OutputDirectory = preview ? null : sessionOptions.OutputDirectory,
                 GoalContext = effectiveDetails,
-                WebSearchGrounding = effectiveSearch
+                WebSearchGrounding = effectiveSearch,
+                ShowAlternatives = showAlternatives || sessionOptions.ShowAlternatives
             },
             input: input,
             output: output);
@@ -940,14 +952,13 @@ public sealed class CliMenuRunner
     {
         color.WriteLine();
         color.WriteHeader("=== Draft Backlog Item ===");
-        color.WriteMenuOption("1", "Complete User Story (Type 01)", "User Story + Given/When/Then criteria");
-        color.WriteMenuOption("2", "Schedule Item (Type 02)", "Title + Description + Story synthesis");
+        color.WriteMenuOption("1", "Complete User Story (Type 01)", "User Story + Description + Given/When/Then");
+        color.WriteMenuOption("2", "Schedule Item (Type 02)", "Title + concise Description (<= 57w)");
         color.WriteMenuOption("3", "Combined Output (Both)", "Generate Type 01 & Type 02 together");
-        color.WriteMenuOption("4", "Preview Draft (No Files Saved)", "Dry-run Type 01, Type 02, or Both");
-        color.WriteMenuOption("5", "Guided Draft & Refine (Wizard)", "Step-by-step details, search, & refine");
+        color.WriteMenuOption("4", "Preview & Guided Wizard", "Preview, verbosity (Min/Bal/Det), copy, refine, or save");
         color.WriteMenuOption("0", "Back to Main Menu");
         color.WriteMuted("  Tip: Bare goals auto-expand (INVEST + 3 alternatives). Append '| details', '--search', or '@file'.");
-        color.WriteColored("Select an option (0-5, w=wizard, b=back, q=quit): ", ConsoleColor.Yellow);
+        color.WriteColored("Select an option (0-4, p/w=preview wizard, b=back, q=quit): ", ConsoleColor.Yellow);
 
         var choice = input.ReadLine();
         if (choice is null)
@@ -966,19 +977,14 @@ public sealed class CliMenuRunner
             return MenuState.Exit;
         }
 
-        if (normalizedChoice is "4" or "p" or "preview")
-        {
-            return ShowPreviewDraftSubMenu(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color);
-        }
-
-        if (normalizedChoice is "5" or "w" or "wizard")
+        if (normalizedChoice is "4" or "5" or "p" or "preview" or "w" or "wizard")
         {
             return RunGuidedDraftWizard(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color, returnState: MenuState.DraftItem);
         }
 
         if (normalizedChoice is not ("1" or "01" or "type01" or "2" or "02" or "type02" or "3" or "both" or "all"))
         {
-            return WarnAndStay(color, choice, "0-5, w=wizard, b=back, or q=quit", MenuState.DraftItem);
+            return WarnAndStay(color, choice, "0-4, p/w=preview wizard, b=back, or q=quit", MenuState.DraftItem);
         }
 
         var combinedOutput = normalizedChoice is "3" or "both" or "all";
@@ -998,79 +1004,6 @@ public sealed class CliMenuRunner
             color: color);
 
         return resultState == MenuState.Exit ? MenuState.Exit : MenuState.DraftItem;
-    }
-
-    private MenuState ShowPreviewDraftSubMenu(
-        WorkspaceDirectories workspace,
-        ref WorkflowOptions sessionOptions,
-        ref CliSettings currentSettings,
-        WorkspaceDirectories baseWorkspace,
-        TextReader input,
-        TextWriter output,
-        ConsoleColorWriter color)
-    {
-        while (true)
-        {
-            color.WriteLine();
-            color.WriteHeader("=== Preview Draft (No Files Saved) ===");
-            color.WriteMenuOption("1", "Complete User Story (Type 01)", "Preview Story + Given/When/Then");
-            color.WriteMenuOption("2", "Schedule Item (Type 02)", "Preview Title, Description, Story & 3 Alternatives");
-            color.WriteMenuOption("3", "Combined Output (Both)", "Preview Type 01 & Type 02 together");
-            color.WriteMenuOption("0", "Back to Draft Menu");
-            color.WriteMuted("  Goal Tips for Better Results:");
-            color.WriteMuted("    • Bare Goals  : <Verb> <Topic> for <Outcome> (auto-expands INVEST + 3 Alternatives)");
-            color.WriteMuted("    • Add Context : \"check Geocaching 2026 hiding movie theme | Verify official rules and dates\"");
-            color.WriteMuted("    • Live Lookup : Append '--search' for web grounding or '@file.txt' for notes");
-            color.WriteColored("Select preview type (0-3, b=back, q=quit): ", ConsoleColor.Yellow);
-
-            var choice = input.ReadLine();
-            if (choice is null)
-            {
-                return MenuState.Exit;
-            }
-
-            var normalized = choice.Trim().ToLowerInvariant();
-            if (normalized is "0" or "b" or "/back" or "back")
-            {
-                return MenuState.DraftItem;
-            }
-
-            if (normalized is "q" or "quit" or "/exit" or "/quit")
-            {
-                return MenuState.Exit;
-            }
-
-            var selection = normalized switch
-            {
-                "1" or "01" or "type01" or "type 01" or "complete" => (BacklogType: "Type01", CombinedOutput: false, Valid: true),
-                "2" or "02" or "type02" or "type 02" or "schedule" => (BacklogType: "Type02", CombinedOutput: false, Valid: true),
-                "3" or "both" or "all" => (BacklogType: "Type01", CombinedOutput: true, Valid: true),
-                _ => (BacklogType: "Type01", CombinedOutput: false, Valid: false)
-            };
-
-            if (!selection.Valid)
-            {
-                color.WriteWarning($"[!] Invalid option '{choice.Trim()}'. Choose 0, 1, 2, or 3.");
-                continue;
-            }
-
-            var runState = ExecuteGoalPromptDraft(
-                backlogType: selection.BacklogType,
-                combinedOutput: selection.CombinedOutput,
-                previewOnly: true,
-                workspace: workspace,
-                sessionOptions: ref sessionOptions,
-                currentSettings: ref currentSettings,
-                baseWorkspace: baseWorkspace,
-                input: input,
-                output: output,
-                color: color);
-
-            if (runState == MenuState.Exit)
-            {
-                return MenuState.Exit;
-            }
-        }
     }
 
     private MenuState ExecuteGoalPromptDraft(
@@ -1145,7 +1078,7 @@ public sealed class CliMenuRunner
         }
         else if (backlogType.Equals("Type02", StringComparison.OrdinalIgnoreCase))
         {
-            color.WriteMuted("  Tip [Type 02]: Bare goal OK (e.g. \"check Geocaching 2026 hiding movie theme\") — expands User Story framing, Description & 3 Alternatives.");
+            color.WriteMuted("  Tip [Type 02]: Bare goal OK (e.g. \"check Geocaching 2026 hiding movie theme\") — expands Title, concise Description & 3 Alternatives.");
         }
         else
         {
@@ -1164,8 +1097,9 @@ public sealed class CliMenuRunner
         MenuState returnState = MenuState.DraftItem)
     {
         color.WriteLine();
-        color.WriteSubHeader("--- Guided Draft & Refine Wizard ---");
-        color.WriteColored("Format ([1] Type01 Story, [2] Type02 Schedule, [3] Both) [default: 1]: ", ConsoleColor.Yellow);
+        color.WriteSubHeader("--- Guided Draft & Refine Wizard --- (Preview & Tweak)");
+        color.WriteMuted("  Outcome Verbosity: [1/min] Minimalistic (<=25w)  │  [2/bal] Balanced (<=57w, default)  │  [3/det] Detailed (<=95w)");
+        color.WriteColored("Format ([1] Type01 Story, [2] Type02 Schedule, [3] Both; optional 'min|bal|det') [default: 1]: ", ConsoleColor.Yellow);
         var formatChoice = input.ReadLine();
         if (formatChoice is null)
         {
@@ -1183,7 +1117,7 @@ public sealed class CliMenuRunner
             return MenuState.Exit;
         }
 
-        var (backlogType, combinedOutput) = ParseGuidedFormatChoice(formatChoice);
+        var (backlogType, combinedOutput, verbosity) = ParseGuidedFormatAndVerbosity(formatChoice, sessionOptions.Verbosity);
 
         WriteGoalTypingHint(color, backlogType, combinedOutput);
         color.WriteColored("Enter Goal or Title (or @filename context): ", ConsoleColor.Yellow);
@@ -1207,11 +1141,17 @@ public sealed class CliMenuRunner
             return returnState;
         }
 
-        color.WriteColored("Additional details / required info to include (Enter to skip): ", ConsoleColor.Yellow);
+        color.WriteColored("Additional details / required info to include (or 'min'/'bal'/'det' verbosity; Enter to skip): ", ConsoleColor.Yellow);
         var extraDetailsLine = input.ReadLine();
         if (extraDetailsLine is null)
         {
             return MenuState.Exit;
+        }
+
+        if (TryExtractStandaloneVerbosityToken(extraDetailsLine, out var extractedVerbosity))
+        {
+            verbosity = extractedVerbosity;
+            extraDetailsLine = string.Empty;
         }
 
         var details = MergeDetails(parsedGoal.InlineDetails, extraDetailsLine);
@@ -1234,6 +1174,7 @@ public sealed class CliMenuRunner
         string? previousDraft = null;
         string? refinementFeedback = null;
         string? preservedWebFindings = null;
+        string? baseFullDescription = null;
         var runWebSearchThisPass = webSearch;
         IReadOnlyList<JiraBacklogTicket>? latestTickets = null;
         ProcessedOutcome? latestOutcome = null;
@@ -1248,11 +1189,17 @@ public sealed class CliMenuRunner
                 GoalContext = details,
                 WebSearchGrounding = runWebSearchThisPass,
                 PreviousDraftContext = previousDraft,
-                RefinementFeedback = refinementFeedback
+                RefinementFeedback = refinementFeedback,
+                Verbosity = OutcomeVerbosity.Detailed
             };
 
-            latestTickets = _workflow.ExecuteDraftPreview(draftOptions, input, output, out var outcome);
-            latestOutcome = outcome;
+            _workflow.ExecuteDraftPreview(draftOptions with { Verbosity = verbosity }, input, output, out var outcome);
+            baseFullDescription = outcome.Description;
+            latestOutcome = outcome with
+            {
+                Description = DescriptionFormatter.FormatWithVerbosity(baseFullDescription, verbosity)
+            };
+            latestTickets = _workflow.ReformatOutcome(latestOutcome, backlogType, combinedOutput, verbosity);
             if (!string.IsNullOrWhiteSpace(_workflow.LastWebResearchFindings))
             {
                 preservedWebFindings = _workflow.LastWebResearchFindings;
@@ -1264,7 +1211,7 @@ public sealed class CliMenuRunner
             while (true)
             {
                 color.WriteLine();
-                color.WriteHeader("[4/5 Review Decision]");
+                color.WriteHeader($"[4/5 Review Decision] (Verbosity: {DescriptionFormatter.FormatVerbosityLabel(verbosity)})");
                 var hasAlternatives = latestOutcome?.Alternatives is { Count: > 0 };
                 if (hasAlternatives)
                 {
@@ -1272,16 +1219,18 @@ public sealed class CliMenuRunner
                 }
 
                 color.WriteMenuOption("A", $"Accept & Save to '{sessionOptions.OutputDirectory}' (default)");
+                color.WriteMenuOption("N", "Copy Simple Text (no format: Title / --- / Description)");
                 color.WriteMenuOption("M", "Copy Markdown to clipboard");
                 color.WriteMenuOption("W", "Copy Raw Text (table) to clipboard");
                 color.WriteMenuOption("S", "Select & Copy field / Clean Text (Title, Story, Desc, AC)");
+                color.WriteMenuOption("V", $"Outcome Verbosity [{DescriptionFormatter.FormatVerbosityLabel(verbosity)}: Minimalistic / Balanced / Detailed]");
                 color.WriteMenuOption("R", "Refine Title / Description with feedback");
                 color.WriteMenuOption("T", "Switch format (Type01 / Type02 / Both)");
                 color.WriteMenuOption("P", "Preview only (finish without writing files)");
                 color.WriteMenuOption("C", "Cancel draft");
                 var actionPrompt = hasAlternatives
-                    ? $"Choose action (1-{latestOutcome!.Alternatives!.Count}/A/M/W/S/R/T/P/C) [A]: "
-                    : "Choose action (A/M/W/S/R/T/P/C) [A]: ";
+                    ? $"Choose action (1-{latestOutcome!.Alternatives!.Count}/A/N/M/W/S/V/R/T/P/C) [A]: "
+                    : "Choose action (A/N/M/W/S/V/R/T/P/C) [A]: ";
                 color.WriteColored(actionPrompt, ConsoleColor.Yellow);
 
                 var action = input.ReadLine();
@@ -1302,11 +1251,24 @@ public sealed class CliMenuRunner
                     altChoice <= availableAlternatives.Count)
                 {
                     var chosenAlt = availableAlternatives[altChoice - 1];
-                    latestOutcome = ApplyAlternativeToOutcome(latestOutcome, chosenAlt);
-                    latestTickets = _workflow.ReformatOutcome(latestOutcome, backlogType, combinedOutput);
+                    latestOutcome = ApplyAlternativeToOutcome(latestOutcome, chosenAlt, verbosity);
+                    baseFullDescription = latestOutcome.Description;
+                    latestTickets = _workflow.ReformatOutcome(latestOutcome, backlogType, combinedOutput, verbosity);
                     color.WriteSuccess($"  ✓ Adopted Alternative #{altChoice} ({chosenAlt.Angle}): '{chosenAlt.Title}'");
-                    RenderAndCacheWizardTickets(latestOutcome, latestTickets, combinedOutput, color);
+                    RenderAndCacheWizardTickets(latestOutcome, latestTickets, combinedOutput, color, verbosity != OutcomeVerbosity.Minimalistic);
 
+                    continue;
+                }
+
+                if (normalizedAction is "n" or "simple" or "noformat" or "no-format")
+                {
+                    CacheWizardTickets(latestOutcome!, latestTickets!, combinedOutput);
+                    MarkdownOutcomeRenderer.CopySimpleUnformattedToClipboard(
+                        _clipboardService,
+                        _lastMarkdownDocuments,
+                        _lastSupplementalUserStory,
+                        _lastSupplementalDescription,
+                        color);
                     continue;
                 }
 
@@ -1331,6 +1293,48 @@ public sealed class CliMenuRunner
                         return MenuState.Exit;
                     }
 
+                    continue;
+                }
+
+                if (normalizedAction is "v" or "verbosity" or "min" or "minimal" or "minimalistic" or "bal" or "balanced" or "det" or "detailed")
+                {
+                    OutcomeVerbosity nextVerbosity;
+                    if (normalizedAction is "v" or "verbosity")
+                    {
+                        color.WriteLine();
+                        color.WriteSubHeader("Select Outcome Verbosity:");
+                        color.WriteMenuOption("1", "Minimalistic (<= 25 words)", "1-line objective + at most 2 action bullets (no extras)");
+                        color.WriteMenuOption("2", "Balanced (<= 57 words)", "Standard Objective + 3 action bullets (default)");
+                        color.WriteMenuOption("3", "Detailed (<= 95 words)", "Full Objective, Context/Web insights, bullets & 3 Alternatives");
+                        color.WriteColored("Choose verbosity (1=Minimalistic, 2=Balanced, 3=Detailed) [2]: ", ConsoleColor.Yellow);
+                        var vChoice = input.ReadLine();
+                        if (vChoice is null)
+                        {
+                            return MenuState.Exit;
+                        }
+
+                        nextVerbosity = DescriptionFormatter.ResolveVerbosity(vChoice, verbosity);
+                    }
+                    else
+                    {
+                        nextVerbosity = DescriptionFormatter.ResolveVerbosity(normalizedAction, verbosity);
+                    }
+
+                    verbosity = nextVerbosity;
+                    sessionOptions = sessionOptions with { Verbosity = verbosity };
+                    var sourceDesc = baseFullDescription ?? latestOutcome!.Description;
+                    latestOutcome = latestOutcome! with
+                    {
+                        Description = DescriptionFormatter.FormatWithVerbosity(sourceDesc, verbosity)
+                    };
+                    latestTickets = _workflow.ReformatOutcome(latestOutcome, backlogType, combinedOutput, verbosity);
+                    color.WriteSuccess($"  ✓ Outcome verbosity set to {DescriptionFormatter.FormatVerbosityLabel(verbosity)}.");
+                    RenderAndCacheWizardTickets(
+                        latestOutcome,
+                        latestTickets,
+                        combinedOutput,
+                        color,
+                        includeAlternatives: verbosity != OutcomeVerbosity.Minimalistic);
                     continue;
                 }
 
@@ -1408,18 +1412,21 @@ public sealed class CliMenuRunner
                         break;
                     }
 
-                    latestTickets = _workflow.ReformatOutcome(latestOutcome!, backlogType, combinedOutput);
-                    RenderAndCacheWizardTickets(latestOutcome!, latestTickets, combinedOutput, color);
+                    latestTickets = _workflow.ReformatOutcome(latestOutcome!, backlogType, combinedOutput, verbosity);
+                    RenderAndCacheWizardTickets(latestOutcome!, latestTickets, combinedOutput, color, verbosity != OutcomeVerbosity.Minimalistic);
 
                     continue;
                 }
 
-                color.WriteWarning($"  [!] Unknown decision '{action.Trim()}'. Choose 1-3, A, M, W, R, T, P, or C.");
+                color.WriteWarning($"  [!] Unknown decision '{action.Trim()}'. Choose 1-3, A, N, M, W, S, V, R, T, P, or C.");
             }
         }
     }
 
-    private static ProcessedOutcome ApplyAlternativeToOutcome(ProcessedOutcome outcome, DraftAlternative chosen)
+    private static ProcessedOutcome ApplyAlternativeToOutcome(
+        ProcessedOutcome outcome,
+        DraftAlternative chosen,
+        OutcomeVerbosity verbosity = OutcomeVerbosity.Balanced)
     {
         var currentDesc = outcome.Description?.Trim() ?? string.Empty;
         string updatedDescription;
@@ -1428,7 +1435,8 @@ public sealed class CliMenuRunner
         {
             updatedDescription = chosen.Description;
         }
-        else if (currentDesc.StartsWith("**Objective:**", StringComparison.OrdinalIgnoreCase))
+        else if (currentDesc.StartsWith("**Objective:**", StringComparison.OrdinalIgnoreCase) ||
+                 currentDesc.StartsWith("Objective:", StringComparison.OrdinalIgnoreCase))
         {
             var newlineIndex = currentDesc.IndexOf('\n');
             var rest = newlineIndex >= 0 ? currentDesc[(newlineIndex + 1)..] : string.Empty;
@@ -1444,7 +1452,7 @@ public sealed class CliMenuRunner
         return outcome with
         {
             Title = chosen.Title,
-            Description = DescriptionFormatter.Normalize(updatedDescription)
+            Description = DescriptionFormatter.FormatWithVerbosity(updatedDescription, verbosity)
         };
     }
 
@@ -1952,8 +1960,10 @@ public sealed class CliMenuRunner
         ConsoleColorWriter color)
     {
         var outputDir = sessionOptions.OutputDirectory ?? workspace.OutputDirectory;
-        var targetPath = ResolveSavedMarkdownTarget(args[0], outputDir);
-        PreviewMarkdownFilePath(targetPath, color);
+        var showAlts = args.Any(a => a.Equals("--alternatives", StringComparison.OrdinalIgnoreCase) || a.Equals("--alts", StringComparison.OrdinalIgnoreCase));
+        var targetArg = args.FirstOrDefault(a => !a.StartsWith('-'));
+        var targetPath = ResolveSavedMarkdownTarget(targetArg, outputDir);
+        PreviewMarkdownFilePath(targetPath, color, includeAlternatives: showAlts || sessionOptions.ShowAlternatives);
         color.WriteMuted("  Tip: Run '/copy raw', '/copy md', '/copy clean', or '/copy <field>' to copy to your clipboard.");
     }
 
@@ -2023,7 +2033,7 @@ public sealed class CliMenuRunner
             }
 
             color.WriteLine();
-            color.WriteColored("Copy [1] Raw  [2] Markdown  [3] Clean Text  [4..N/name] Field  [0/b] Back  [q] Quit: ", ConsoleColor.Yellow);
+            color.WriteColored("Copy [1] Raw  [2] Markdown  [3] Clean Text  [4/n] Simple (Title/---/Desc)  [5..N/name] Field  [0/b] Back  [q] Quit: ", ConsoleColor.Yellow);
             var copyChoice = input.ReadLine();
             if (copyChoice is null)
             {
@@ -2068,7 +2078,10 @@ public sealed class CliMenuRunner
         }
     }
 
-    private void PreviewMarkdownFilePath(string filePath, ConsoleColorWriter color)
+    private void PreviewMarkdownFilePath(
+        string filePath,
+        ConsoleColorWriter color,
+        bool includeAlternatives = false)
     {
         var markdown = File.ReadAllText(filePath);
         _lastMarkdownDocuments = [markdown];
@@ -2076,7 +2089,10 @@ public sealed class CliMenuRunner
         _lastSupplementalDescription = null;
 
         color.WriteMuted($"  Reading Markdown: {filePath}");
-        MarkdownOutcomeRenderer.WriteOutcomeTable(color, _lastMarkdownDocuments);
+        MarkdownOutcomeRenderer.WriteOutcomeTable(
+            color,
+            _lastMarkdownDocuments,
+            includeAlternatives: includeAlternatives);
     }
 
     private void CacheWizardTickets(
@@ -2094,14 +2110,16 @@ public sealed class CliMenuRunner
         ProcessedOutcome outcome,
         IReadOnlyList<JiraBacklogTicket> tickets,
         bool combinedOutput,
-        ConsoleColorWriter color)
+        ConsoleColorWriter color,
+        bool includeAlternatives = true)
     {
         CacheWizardTickets(outcome, tickets, combinedOutput);
         MarkdownOutcomeRenderer.WriteOutcomeTable(
             color,
             _lastMarkdownDocuments,
             _lastSupplementalUserStory,
-            _lastSupplementalDescription);
+            _lastSupplementalDescription,
+            includeAlternatives: includeAlternatives);
     }
 
     private void CopyCurrentOutcomeToClipboard(bool asMarkdown, ConsoleColorWriter color) =>
@@ -2288,6 +2306,59 @@ public sealed class CliMenuRunner
         color.WriteLine("  /live [on|off] Toggle live AI calls vs offline deterministic fallback");
         color.WriteLine("  @filename      Attach file context directly, e.g. '@raw-notes.txt' or '@raw-notes.txt Add auth story'");
         color.WriteLine("  /clear, /exit  Clear screen or exit session");
+    }
+
+    private static (string BacklogType, bool CombinedOutput, OutcomeVerbosity Verbosity) ParseGuidedFormatAndVerbosity(
+        string? rawChoice,
+        OutcomeVerbosity defaultVerbosity)
+    {
+        if (string.IsNullOrWhiteSpace(rawChoice))
+        {
+            return ("Type01", false, defaultVerbosity);
+        }
+
+        var parts = rawChoice.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var (backlogType, combinedOutput) = ParseGuidedFormatChoice(parts[0]);
+        var verbosity = defaultVerbosity;
+
+        for (var i = 1; i < parts.Length; i++)
+        {
+            if (TryExtractStandaloneVerbosityToken(parts[i], out var parsedVerbosity))
+            {
+                verbosity = parsedVerbosity;
+            }
+        }
+
+        if (parts.Length == 1 && TryExtractStandaloneVerbosityToken(parts[0], out var directVerbosity))
+        {
+            verbosity = directVerbosity;
+        }
+
+        return (backlogType, combinedOutput, verbosity);
+    }
+
+    private static bool TryExtractStandaloneVerbosityToken(string? input, out OutcomeVerbosity verbosity)
+    {
+        verbosity = OutcomeVerbosity.Balanced;
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+
+        switch (input.Trim().ToLowerInvariant())
+        {
+            case "min" or "minimal" or "minimalistic" or "--minimal" or "--minimalistic":
+                verbosity = OutcomeVerbosity.Minimalistic;
+                return true;
+            case "bal" or "balanced" or "--balanced":
+                verbosity = OutcomeVerbosity.Balanced;
+                return true;
+            case "det" or "detailed" or "--detailed":
+                verbosity = OutcomeVerbosity.Detailed;
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static (string BacklogType, bool CombinedOutput) ParseGuidedFormatChoice(string? rawChoice) =>

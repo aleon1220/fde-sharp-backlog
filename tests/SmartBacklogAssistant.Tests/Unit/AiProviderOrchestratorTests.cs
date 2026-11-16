@@ -236,7 +236,7 @@ public sealed class AiProviderOrchestratorTests
                 output);
 
             Assert.Equal("Copilot Generated SSO Story", ticket.Title);
-            Assert.Contains("Calling GitHub Copilot SDK", output.ToString());
+            Assert.Contains("✓ Generated structured Type01 draft via Copilot SDK", output.ToString());
             Assert.True(File.Exists(Path.Combine(outputDir, "type01-copilot-generated-sso-story.md")));
         }
         finally

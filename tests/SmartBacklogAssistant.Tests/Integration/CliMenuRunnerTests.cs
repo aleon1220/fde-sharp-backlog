@@ -235,7 +235,7 @@ public sealed class CliMenuRunnerTests : IDisposable
         var generationRequest = Assert.Single(requestBodies);
         Assert.Contains("Goal: Implement account recovery", generationRequest);
         Assert.DoesNotContain("Context: Backlog goal added", generationRequest);
-        Assert.Contains("[2/5 Local -> Process] Calling Google Gemini API", output.ToString());
+        Assert.Contains("✓ Generated structured Type01 draft via Google Gemini", output.ToString());
         Assert.Contains("Account recovery", File.ReadAllText(Path.Combine(dirs.OutputDirectory, "type01-account-recovery.md")));
     }
 
@@ -244,7 +244,8 @@ public sealed class CliMenuRunnerTests : IDisposable
     {
         var workspaceService = new WorkspacePathService(environmentReader: _ => null);
         var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
-        var menu = CreateMenuRunner(workspaceService);
+        var clipboard = new FakeClipboardService();
+        var menu = CreateMenuRunner(workspaceService, clipboardService: clipboard);
         var options = new WorkflowOptions(
             InputFilePath: dirs.InputDirectory,
             PromptFilePath: _promptFilePath,
@@ -252,19 +253,37 @@ public sealed class CliMenuRunnerTests : IDisposable
             GeminiLive: false);
         using var output = new StringWriter();
 
-        var exitCode = menu.Run(options, new StringReader("2\n4\n1\nImplement preview\n2\ncheck Geocaching 2026 hiding movie theme\n3\nMigrate Auth Sessions\n0\n0\n0\n"), output);
+        // [2] Draft -> [4] Unified Preview & Guided Wizard -> [2] Type02 -> Goal -> Skip details
+        // -> [v] Verbosity -> [1] Minimalistic (<=25w) -> [n] Copy Simple Text (Title / --- / Description)
+        // -> [p] Preview only (finish without writing files) -> [0] Back -> [0] Exit
+        var exitCode = menu.Run(
+            options,
+            new StringReader(
+                "2\n4\n" +
+                "2\n" +
+                "check Geocaching 2026 hiding movie theme\n" +
+                "\n" +
+                "v\n1\n" +
+                "n\n" +
+                "p\n" +
+                "0\n0\n"),
+            output);
 
         Assert.Equal(0, exitCode);
         Assert.Empty(Directory.GetFiles(dirs.OutputDirectory));
         var text = output.ToString();
-        Assert.Contains("=== Preview Draft (No Files Saved) ===", text);
-        Assert.Contains("Goal Tips for Better Results:", text);
-        Assert.Contains("[Preview] Type01 item 'Implement preview' generated. No files written.", text);
+        Assert.Contains("Preview & Guided Wizard", text);
+        Assert.Contains("Outcome Verbosity: [1/min] Minimalistic (<=25w)", text);
+        Assert.Contains("✓ Outcome verbosity set to Minimalistic (<=25w).", text);
+        Assert.Contains("✓ Copied Simple Unformatted Text to clipboard", text);
         Assert.Contains("[Preview] Type02 item 'Check Geocaching 2026 hiding movie theme' generated. No files written.", text);
-        Assert.Contains("[Preview] Type01 and Type02 items 'Migrate Auth Sessions' generated. No files written.", text);
-        Assert.Contains("Alternatives", text);
-        Assert.Contains("[Action & Delivery]", text);
         Assert.DoesNotContain("Not specified in discovery notes", text);
+
+        var simpleCopied = Assert.Single(clipboard.CopiedPayloads);
+        var simpleLines = simpleCopied.Replace("\r\n", "\n").Split('\n');
+        Assert.Equal("Check Geocaching 2026 hiding movie theme", simpleLines[0]);
+        Assert.Equal("---", simpleLines[1]);
+        Assert.Contains("Objective:", simpleLines[2]);
     }
 
     [Fact]
@@ -293,7 +312,7 @@ public sealed class CliMenuRunnerTests : IDisposable
 
         Assert.False(settingsService.Load(dirs).GeminiLive);
         Assert.Equal(0, apiRequestCount);
-        Assert.Contains("Live Gemini API is OFF", output.ToString());
+        Assert.Contains("✓ Generated deterministic Type01 draft", output.ToString());
         Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-implement-account-recovery.md")));
     }
 

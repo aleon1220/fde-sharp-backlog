@@ -40,6 +40,14 @@ public static class GoalExpansionSynthesizer
                 "platform engineer",
                 $"migrate and validate {LowerFirst(topicPhrase)}",
                 "systems transition smoothly without regressions or service disruption"),
+            IntentKind.Simplify => (
+                "CLI operator or developer",
+                $"identify friction and simplify {LowerFirst(topicPhrase)}",
+                "workflows stay scannable, purposeful, and enjoyable with zero visual clutter"),
+            IntentKind.HardenOrFix => (
+                "DevSecOps or reliability engineer",
+                $"diagnose the root cause and harden {LowerFirst(topicPhrase)}",
+                "security boundaries, resilience, and operational reliability are enforced"),
             _ => (
                 "delivery engineer or user",
                 $"{verb.ToLowerInvariant()} {topicPhrase}",
@@ -53,6 +61,8 @@ public static class GoalExpansionSynthesizer
         {
             IntentKind.Verify => $"**Objective:** Verify rules, dates, and criteria for {topicPhrase}.",
             IntentKind.Migrate => $"**Objective:** Plan and validate the migration of {topicPhrase}.",
+            IntentKind.Simplify => $"**Objective:** Identify root friction and simplify {topicPhrase} for clarity.",
+            IntentKind.HardenOrFix => $"**Objective:** Identify root cause and harden {topicPhrase} with safe guardrails.",
             _ => $"**Objective:** Deliver and validate {topicPhrase} with clear checks."
         });
 
@@ -80,6 +90,18 @@ public static class GoalExpansionSynthesizer
                 "List impacted components and dependencies",
                 "Define cutover and rollback steps",
                 "Validate behavior in staging first"
+            ],
+            IntentKind.Simplify =>
+            [
+                "Pinpoint redundant noise or friction first",
+                "Keep core workflow outputs crisp and consistent",
+                "Verify backward compatibility with automated tests"
+            ],
+            IntentKind.HardenOrFix =>
+            [
+                "Isolate root cause and blast radius first",
+                "Apply least-privilege or resilience guardrails",
+                "Verify fix with regression and negative tests"
             ],
             _ =>
             [
@@ -165,12 +187,16 @@ public static class GoalExpansionSynthesizer
         {
             IntentKind.Verify => $"Verify & Document {CapitalizeWords(topicPhrase)}",
             IntentKind.Migrate => $"Migrate & Validate {CapitalizeWords(topicPhrase)}",
+            IntentKind.Simplify => $"Streamline & Declutter {CapitalizeWords(topicPhrase)}",
+            IntentKind.HardenOrFix => $"Remediate & Harden {CapitalizeWords(topicPhrase)}",
             _ => $"Deliver {CapitalizeWords(topicPhrase)}"
         };
         var alt1Desc = intentKind switch
         {
             IntentKind.Verify => $"Audit official rules and dates for {topicPhrase} into an actionable brief.",
             IntentKind.Migrate => $"Plan phased migration for {topicPhrase} with compatibility checks.",
+            IntentKind.Simplify => $"Remove redundant noise and align {topicPhrase} across live and saved views.",
+            IntentKind.HardenOrFix => $"Identify root cause and enforce security or reliability guardrails for {topicPhrase}.",
             _ => $"Implement {topicPhrase} with clear validation steps and operational handoff."
         };
 
@@ -178,18 +204,31 @@ public static class GoalExpansionSynthesizer
         {
             IntentKind.Verify => $"Align Stakeholder Criteria for {CapitalizeWords(topicPhrase)}",
             IntentKind.Migrate => $"Transition {CapitalizeWords(topicPhrase)} Without Disruption",
+            IntentKind.Simplify => $"Make {CapitalizeWords(topicPhrase)} Scannable for Operators",
+            IntentKind.HardenOrFix => $"Protect Users & Operators via {CapitalizeWords(topicPhrase)}",
             _ => $"Enable {CapitalizeWords(topicPhrase)} for Target Users"
         };
-        var alt2Desc = intentKind == IntentKind.Migrate
-            ? $"Keep backwards compatibility and zero downtime while moving {topicPhrase}."
-            : $"Frame {topicPhrase} around user value and clear success criteria.";
+        var alt2Desc = intentKind switch
+        {
+            IntentKind.Migrate => $"Keep backwards compatibility and zero downtime while moving {topicPhrase}.",
+            IntentKind.Simplify => $"Focus {topicPhrase} on fast human comprehension and frictionless copy workflows.",
+            IntentKind.HardenOrFix => $"Ensure {topicPhrase} fails safely with clear actionable feedback for users.",
+            _ => $"Frame {topicPhrase} around user value and clear success criteria."
+        };
 
-        var alt3Title = intentKind == IntentKind.Migrate
-            ? $"Confirm Cutover, Rollback & Checks for {CapitalizeWords(topicPhrase)}"
-            : $"Confirm Scope, Timeline & Checks for {CapitalizeWords(topicPhrase)}";
-        var alt3Desc = intentKind == IntentKind.Migrate
-            ? $"Define staging checks, telemetry signals, and rollback triggers for {topicPhrase}."
-            : $"Set verification checks, open questions, and readiness gates for {topicPhrase}.";
+        var alt3Title = intentKind switch
+        {
+            IntentKind.Migrate => $"Confirm Cutover, Rollback & Checks for {CapitalizeWords(topicPhrase)}",
+            IntentKind.HardenOrFix => $"Verify Guardrails & Regression Checks for {CapitalizeWords(topicPhrase)}",
+            _ => $"Confirm Scope, Timeline & Checks for {CapitalizeWords(topicPhrase)}"
+        };
+        var alt3Desc = intentKind switch
+        {
+            IntentKind.Migrate => $"Define staging checks, telemetry signals, and rollback triggers for {topicPhrase}.",
+            IntentKind.Simplify => $"Validate word-budget caps, border alignment, and zero-regression test coverage for {topicPhrase}.",
+            IntentKind.HardenOrFix => $"Verify least-privilege controls, negative test cases, and audit telemetry for {topicPhrase}.",
+            _ => $"Set verification checks, open questions, and readiness gates for {topicPhrase}."
+        };
 
         if (string.Equals(alt1Title, cleanTitle, StringComparison.OrdinalIgnoreCase))
         {
@@ -251,18 +290,33 @@ public static class GoalExpansionSynthesizer
     {
         "check" or "verify" or "audit" or "review" or "investigate" or "evaluate" or "assess" or "research" or "confirm" or "validate" => IntentKind.Verify,
         "migrate" or "upgrade" or "transition" or "move" or "port" => IntentKind.Migrate,
+        "simplify" or "streamline" or "declutter" or "condense" or "clean" or "clarify" => IntentKind.Simplify,
+        "harden" or "secure" or "fix" or "resolve" or "remediate" or "protect" or "prevent" => IntentKind.HardenOrFix,
         _ => IntentKind.GeneralAction
     };
 
     private static bool IsCommonActionVerb(string word) => word.ToLowerInvariant() switch
     {
         "implement" or "add" or "build" or "create" or "configure" or "enable" or "support"
-            or "fix" or "optimize" or "refactor" or "draft" or "update" or "launch" or "design" => true,
+            or "fix" or "optimize" or "refactor" or "draft" or "update" or "launch" or "design"
+            or "simplify" or "streamline" or "harden" or "secure" or "resolve" => true,
         _ => false
     };
 
-    private static string LowerFirst(string text) =>
-        string.IsNullOrEmpty(text) ? text : char.ToLowerInvariant(text[0]) + text[1..];
+    private static string LowerFirst(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return text;
+        }
+
+        if (text.Length > 1 && char.IsUpper(text[0]) && char.IsUpper(text[1]))
+        {
+            return text;
+        }
+
+        return char.ToLowerInvariant(text[0]) + text[1..];
+    }
 
     private static string CapitalizeWords(string text)
     {
@@ -287,6 +341,8 @@ public static class GoalExpansionSynthesizer
     {
         GeneralAction,
         Verify,
-        Migrate
+        Migrate,
+        Simplify,
+        HardenOrFix
     }
 }

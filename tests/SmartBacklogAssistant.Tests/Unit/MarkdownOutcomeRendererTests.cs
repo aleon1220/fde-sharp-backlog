@@ -45,10 +45,47 @@ public sealed class MarkdownOutcomeRendererTests
         Assert.All(tableLines, line => Assert.Equal(width, line.Length));
         Assert.Contains("Stage / Type", rendered);
         Assert.Contains("schedule (Type02)", rendered);
+        Assert.Contains("Check Geocaching 2026 hiding movie theme", rendered);
+        Assert.DoesNotContain("# [Jira -", rendered);
+        Assert.DoesNotContain("**Objective:**", rendered);
+        Assert.Contains("Objective: Verify official rules and dates.", rendered);
         Assert.Contains("User Story", rendered);
         Assert.Contains("Description", rendered);
         Assert.Contains("* Gather official rules and dates", rendered);
         Assert.Contains("Alternatives", rendered);
+    }
+
+    [Fact]
+    public void BuildTableRows_WithType01AcceptanceCriteria_FormatsCleanScenarioAndGivenWhenThenLines()
+    {
+        var markdown = """
+            # [Jira - complete (Type01)] Simplify CLI output format
+
+            ## User Story
+            As an operator, I want a simpler CLI output format, so that tables are scannable.
+
+            ## Description
+            **Objective:** Simplify Type01 and Type02 output tables.
+            * Strip redundant Markdown syntax from cells
+
+            ## Acceptance Criteria (Given / When / Then)
+            ### Scenario 1
+            - **Given** A user runs draft with Type01
+            - **When** The table renders in the terminal
+            - **Then** Clean Scenario and Given/When/Then lines appear without raw markers
+            """;
+
+        var rows = MarkdownOutcomeRenderer.BuildTableRows([markdown]);
+
+        Assert.Equal("complete (Type01)", rows.Single(r => r.Section == "Stage / Type").Content);
+        Assert.Equal("Simplify CLI output format", rows.Single(r => r.Section == "Title").Content);
+        var acceptance = rows.Single(r => r.Section == "Acceptance").Content;
+        Assert.Contains("Scenario 1:", acceptance);
+        Assert.Contains("Given A user runs draft with Type01", acceptance);
+        Assert.Contains("When The table renders in the terminal", acceptance);
+        Assert.Contains("Then Clean Scenario and Given/When/Then lines appear without raw markers", acceptance);
+        Assert.DoesNotContain("###", acceptance);
+        Assert.DoesNotContain("**", acceptance);
     }
 
     [Fact]
@@ -153,6 +190,8 @@ public sealed class MarkdownOutcomeRendererTests
         Assert.Equal("raw", items[0].Id);
         Assert.Equal("md", items[1].Id);
         Assert.Equal("clean", items[2].Id);
+        Assert.Equal("simple", items[3].Id);
+        Assert.Equal("Enable OAuth2 PKCE Login\n---\nObjective: Replace implicit flow with PKCE.\n* Configure code_challenge verifier", items[3].Value);
         Assert.Equal("Enable OAuth2 PKCE Login", items.Single(i => i.Id == "title").Value);
         Assert.Equal("As a mobile user, I want PKCE login so that sessions stay secure.", items.Single(i => i.Id == "story").Value);
         Assert.Contains("Objective: Replace implicit flow with PKCE.", items.Single(i => i.Id == "desc").Value);

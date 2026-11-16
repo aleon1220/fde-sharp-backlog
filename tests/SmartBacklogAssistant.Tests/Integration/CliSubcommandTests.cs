@@ -209,8 +209,8 @@ public sealed class CliSubcommandTests : IDisposable
         Assert.Equal(0, exitCode);
         Assert.Empty(Directory.GetFiles(dirs.OutputDirectory));
         var text = output.ToString();
-        Assert.Contains("Jira - complete (Type01)", text);
-        Assert.Contains("Jira - schedule (Type02)", text);
+        Assert.Contains("complete (Type01) + schedule (Type02)", text);
+        Assert.DoesNotContain("# [Jira -", text);
         Assert.Contains("[Preview / Dry Run]", text);
         Assert.Empty(error.ToString());
     }
@@ -324,13 +324,33 @@ public sealed class CliSubcommandTests : IDisposable
 
         var consoleText = output.ToString();
         Assert.Contains("Smart Backlog Assistant — Markdown Outcome", consoleText);
-        Assert.Contains("**Objective:**", consoleText);
-        Assert.Contains("User Story", consoleText);
-        Assert.Contains("Alternatives", consoleText);
-        Assert.Contains("[Action & Delivery]", consoleText);
-        Assert.Contains("[User Value / Story]", consoleText);
-        Assert.Contains("[Verification & Scope]", consoleText);
+        Assert.Contains("Objective:", consoleText);
+        Assert.DoesNotContain("**Objective:**", consoleText);
+        Assert.DoesNotContain("# [Jira -", consoleText);
+        Assert.DoesNotContain("User Story", consoleText);
+        Assert.DoesNotContain("Acceptance", consoleText);
+        Assert.DoesNotContain("│ Alternatives", consoleText);
+        Assert.Contains("--alternatives", consoleText);
         Assert.DoesNotContain("Not specified in discovery notes", consoleText);
+
+        using var altOutput = new StringWriter();
+        using var altError = new StringWriter();
+        var altExit = Program.Execute(
+            [
+                "-w", _tempRoot,
+                "draft",
+                "check Geocaching 2026 hiding movie theme",
+                "-t", "02",
+                "--alternatives",
+                "--preview",
+                "--offline"
+            ],
+            new StringReader(string.Empty),
+            altOutput,
+            altError);
+        Assert.Equal(0, altExit);
+        Assert.Contains("Alternatives", altOutput.ToString());
+        Assert.Contains("[Action & Delivery]", altOutput.ToString());
 
         var tableLines = consoleText
             .Replace("\r\n", "\n")

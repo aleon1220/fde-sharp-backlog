@@ -63,4 +63,28 @@ public sealed class DescriptionFormatterTests
         Assert.Equal("**Objective:** Keep things simple.\n* Verify flow", actual);
         Assert.True(DescriptionFormatter.CountWords(actual) <= 57);
     }
+
+    [Fact]
+    public void FormatWithVerbosity_SupportsMinimalisticBalancedAndDetailedWordBudgets()
+    {
+        var input = """
+            **Objective:** Verify official rules, timelines, and campaign criteria for the 2026 release.
+            **Context:** Include regional submission windows and reviewer guidelines for participants across all tiers.
+            **Suggested Actions:**
+            * Gather official rules, references, and dates from the primary portal
+            * Note open questions, edge cases, and cross-team dependencies
+            * Summarize findings and next steps for stakeholder sign-off
+            * Validate backwards compatibility and operational handoff checks
+            """;
+
+        var minimal = DescriptionFormatter.FormatWithVerbosity(input, SmartBacklogAssistant.Domain.OutcomeVerbosity.Minimalistic);
+        var balanced = DescriptionFormatter.FormatWithVerbosity(input, SmartBacklogAssistant.Domain.OutcomeVerbosity.Balanced);
+        var detailed = DescriptionFormatter.FormatWithVerbosity(input, SmartBacklogAssistant.Domain.OutcomeVerbosity.Detailed);
+
+        Assert.True(DescriptionFormatter.CountWords(minimal) <= DescriptionFormatter.MaxMinimalisticWords);
+        Assert.DoesNotContain("**Suggested Actions:**", minimal);
+        Assert.True(DescriptionFormatter.CountWords(balanced) <= DescriptionFormatter.MaxDescriptionWords);
+        Assert.True(DescriptionFormatter.CountWords(detailed) <= DescriptionFormatter.MaxDetailedWords);
+        Assert.True(DescriptionFormatter.CountWords(detailed) >= DescriptionFormatter.CountWords(minimal));
+    }
 }

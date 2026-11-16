@@ -23,7 +23,8 @@ public static class Program
         "--theme",
         "--in",
         "--out",
-        "--copy"
+        "--copy",
+        "--verbosity"
     };
 
     private static readonly HashSet<string> OptionalBoolValueFlags = new(StringComparer.OrdinalIgnoreCase)
@@ -260,6 +261,14 @@ public static class Program
         var showVersion = HasFlag(args, "--version") ||
                           HasFlag(args, "-v") ||
                           subcommand == "version";
+        var verbose = HasFlag(args, "--verbose") || HasFlag(args, "-V");
+        var showAlternatives = HasAnyFlag(args, "--alternatives", "--alts");
+        var verbosityArg = GetArgValue(args, "--verbosity");
+        var verbosity = HasAnyFlag(args, "--minimal", "--minimalistic")
+            ? OutcomeVerbosity.Minimalistic
+            : HasFlag(args, "--detailed")
+                ? OutcomeVerbosity.Detailed
+                : DescriptionFormatter.ResolveVerbosity(verbosityArg);
         var cliTheme = GetArgValue(args, "--theme");
 
         return new WorkflowOptions(
@@ -284,7 +293,10 @@ public static class Program
             ShowVersion: showVersion,
             CliTheme: cliTheme,
             GoalContext: goalContext,
-            WebSearchGrounding: webSearch);
+            WebSearchGrounding: webSearch,
+            Verbose: verbose,
+            ShowAlternatives: showAlternatives,
+            Verbosity: verbosity);
     }
 
     public static bool ShouldLaunchMenu(string[] args, WorkflowOptions options)
@@ -453,7 +465,10 @@ public static class Program
 
         var color = new ConsoleColorWriter(output, theme: theme);
         color.WriteMuted($"  Reading Markdown: {resolvedPath}");
-        MarkdownOutcomeRenderer.WriteOutcomeTable(color, [markdown]);
+        MarkdownOutcomeRenderer.WriteOutcomeTable(
+            color,
+            [markdown],
+            includeAlternatives: options.ShowAlternatives);
 
         if (!string.IsNullOrWhiteSpace(copyMode))
         {

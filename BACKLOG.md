@@ -70,4 +70,11 @@ The following backlog items have been structured in Jira-ready `Type01` (`comple
 * **Acceptance Criteria (Given / When / Then):**
   * **Given** generated or saved Markdown outcomes exist in `./out`
   * **When** the user runs `preview --select`, `--copy <clean|title|story|desc|ac|alt1>`, `/copy <target>`, `[4] Preview & Copy`, or `[S]` in the Guided Wizard
-  * **Then** `InteractiveSelector` fuzzy-matches files and Jira fields (with `stderr` prompt routing in `--select` mode and graceful non-interactive exit), `MarkdownOutcomeRenderer` strips borders/Markdown markers cleanly, `OsClipboardService` falls back to OSC 52 (`tmux`-aware) when native tools are unavailable, and all 206 automated tests pass.
+  * **Then** `InteractiveSelector` fuzzy-matches files and Jira fields (with `stderr` prompt routing in `--select` mode and graceful non-interactive exit), `MarkdownOutcomeRenderer` strips borders/Markdown markers cleanly, `OsClipboardService` falls back to OSC 52 (`tmux`-aware) when native tools are unavailable, and all automated tests pass.
+
+### [SBA-108] Simpler `Type01` & `Type02` CLI/TUI Output Format (`Type01` — `complete` | Priority: P1 — Issue #8)
+* **User Story:** As a CLI/TUI operator, I want `Type01` (`complete`) and `Type02` (`schedule`) outputs to render with clean terminal cells, zero live-vs-saved drift, and quiet-by-default step chrome, so that reviewing and copying backlog items is immediate and scannable.
+* **Acceptance Criteria (Given / When / Then):**
+  * **Given** a user drafts or processes a `Type01`, `Type02`, or `Both` item via CLI or TUI
+  * **When** the outcome is rendered in the terminal and saved to `./out`
+  * **Then** `Type01` persists and renders `Title`, `User Story`, concise `Description` (`<= 57` words with `*` bullets), `Acceptance`, and `Alternatives`; `Type02` renders strictly `Title`, concise `Description` (`<= 57` words with `*` bullets), and `Alternatives` without injecting `User Story`; terminal cells strip `# [Jira - ...]`, `###`, and `**` clutter while preserving full Markdown in `.md` files and `md` copy; and pre-table output condenses to compact `✓ Collected`, `✓ Expanded`, and `✓ Generated` lines.

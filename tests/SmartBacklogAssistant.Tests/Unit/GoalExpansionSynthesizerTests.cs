@@ -62,4 +62,19 @@ public sealed class GoalExpansionSynthesizerTests
         Assert.Contains("Precondition:", withGwt);
         Assert.DoesNotContain("Precondition:", withoutGwt);
     }
+
+    [Theory]
+    [InlineData("Simplify CLI output format", "identify friction and simplify", "Streamline & Declutter")]
+    [InlineData("Harden root account IAM policy", "diagnose the root cause and harden", "Remediate & Harden")]
+    public void ExpandOffline_WithSimplifyAndHardenGoals_AppliesProblemFirstIntentFraming(
+        string goal,
+        string expectedStoryPhrase,
+        string expectedAltPrefix)
+    {
+        var expansion = GoalExpansionSynthesizer.ExpandOffline(goal);
+
+        Assert.Contains(expectedStoryPhrase, expansion.UserStory);
+        Assert.True(DescriptionFormatter.CountWords(expansion.DiscoverySummary) <= DescriptionFormatter.MaxDescriptionWords);
+        Assert.Contains(expectedAltPrefix, expansion.Alternatives[0].Title);
+    }
 }

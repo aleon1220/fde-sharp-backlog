@@ -90,6 +90,27 @@ public enum BacklogType
 }
 
 /// <summary>
+/// Controls how concise or detailed the generated backlog outcome is.
+/// </summary>
+public enum OutcomeVerbosity
+{
+    /// <summary>
+    /// Ultra-brief (&lt;= 25 words): 1-line objective and at most 2 action bullets.
+    /// </summary>
+    Minimalistic = 1,
+
+    /// <summary>
+    /// Standard practical balance (&lt;= 57 words): Objective + 3 action bullets.
+    /// </summary>
+    Balanced = 2,
+
+    /// <summary>
+    /// Comprehensive context (&lt;= 95 words): Full Objective, Context/Web insights, action bullets, and 3 alternatives.
+    /// </summary>
+    Detailed = 3
+}
+
+/// <summary>
 /// Represents a single Given / When / Then acceptance criterion.
 /// </summary>
 public sealed record GherkinScenario(

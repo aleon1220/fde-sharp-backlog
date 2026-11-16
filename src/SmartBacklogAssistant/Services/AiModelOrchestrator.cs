@@ -34,7 +34,8 @@ public sealed class AiModelOrchestrator
         string? apiKey = null,
         string? generatedContent = null,
         string? modelName = null,
-        BacklogType backlogType = BacklogType.Type01)
+        BacklogType backlogType = BacklogType.Type01,
+        OutcomeVerbosity verbosity = OutcomeVerbosity.Balanced)
     {
         if (string.IsNullOrWhiteSpace(rawData))
         {
@@ -51,7 +52,7 @@ public sealed class AiModelOrchestrator
             ? ToDraft(ExtractStructuredDraft(rawData))
             : ParseGeneratedDraft(generatedContent);
 
-        description = DescriptionFormatter.Normalize(description);
+        description = DescriptionFormatter.FormatWithVerbosity(description, verbosity);
 
         var outcome = new ProcessedOutcome(
             ProviderUsed: provider,
