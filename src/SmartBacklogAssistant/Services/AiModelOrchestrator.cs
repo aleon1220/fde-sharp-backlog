@@ -22,6 +22,7 @@ public sealed class AiModelOrchestrator
             "1" or "azure" or "azure-openai" or "azureopenai" => AiProviderType.AzureOpenAi,
             "2" or "gemini" or "google" or "google-gemini" or "googlegemini" => AiProviderType.GoogleGemini,
             "3" or "claude" or "anthropic" or "anthropic-claude" or "anthropicclaude" => AiProviderType.AnthropicClaude,
+            "4" or "copilot-sdk" or "github-copilot" or "gh-copilot" or "ghcp" or "copilot_sdk" => AiProviderType.GitHubCopilot,
             _ => AiProviderType.ManualPrompt
         };
     }
@@ -46,7 +47,7 @@ public sealed class AiModelOrchestrator
         }
 
         var guidanceMessage = BuildGuidanceMessage(provider, apiKey, generatedContent is not null, modelName);
-        var (title, description, userStory, scenarios) = generatedContent is null
+        var (title, description, userStory, scenarios, alternatives) = generatedContent is null
             ? ToDraft(ExtractStructuredDraft(rawData))
             : ParseGeneratedDraft(generatedContent);
 
@@ -57,10 +58,69 @@ public sealed class AiModelOrchestrator
             Title: title,
             Description: description,
             UserStory: userStory,
-            Scenarios: scenarios);
+            Scenarios: scenarios,
+            Alternatives: alternatives);
 
         ValidateOutcome(outcome, backlogType);
         return outcome;
+    }
+
+    public GoalExpansionResult ParseGoalExpansionResponse(string generatedContent, string fallbackGoalTitle)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(generatedContent);
+
+        var sanitizedJson = ExtractJsonPayload(generatedContent);
+        using var document = System.Text.Json.JsonDocument.Parse(sanitizedJson);
+        var root = document.RootElement;
+        if (root.ValueKind == System.Text.Json.JsonValueKind.Array && root.GetArrayLength() > 0)
+        {
+            root = root[0];
+        }
+
+        var fallback = GoalExpansionSynthesizer.ExpandOffline(fallbackGoalTitle);
+        var enhancedTitle = ReadFlexibleText(root, "enhancedTitle", "EnhancedTitle", "title", "Title", "headline", "summary");
+        if (string.IsNullOrWhiteSpace(enhancedTitle))
+        {
+            enhancedTitle = fallback.EnhancedTitle;
+        }
+
+        var userStory = ReadFlexibleText(root, "userStory", "UserStory", "user_story");
+        if (string.IsNullOrWhiteSpace(userStory))
+        {
+            userStory = fallback.UserStory;
+        }
+
+        var discoverySummary = ReadFlexibleText(root, "discoverySummary", "DiscoverySummary", "description", "Description", "details", "Details");
+        var checklist = new List<string>();
+        if (TryGetPropertyIgnoreCase(root, out var checklistProp, "keyChecklist", "KeyChecklist", "checklist", "Checklist") &&
+            checklistProp.ValueKind == System.Text.Json.JsonValueKind.Array)
+        {
+            foreach (var item in checklistProp.EnumerateArray())
+            {
+                var itemText = FormatJsonElementAsText(item);
+                if (!string.IsNullOrWhiteSpace(itemText))
+                {
+                    checklist.Add(itemText);
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(discoverySummary))
+        {
+            discoverySummary = checklist.Count > 0
+                ? $"**User Story Framing:** {userStory}\n**Verification / Action Checklist:**\n{string.Join('\n', checklist.Select(c => $"- {c}"))}"
+                : fallback.DiscoverySummary;
+        }
+
+        var alternatives = ParseAlternativesFromJson(root)
+            ?? GoalExpansionSynthesizer.BuildFallbackAlternatives(enhancedTitle, discoverySummary, userStory);
+
+        return new GoalExpansionResult(
+            EnhancedTitle: enhancedTitle,
+            UserStory: userStory,
+            DiscoverySummary: discoverySummary,
+            KeyChecklist: checklist.Count > 0 ? checklist : fallback.KeyChecklist,
+            Alternatives: alternatives);
     }
 
     public void ValidateOutcome(ProcessedOutcome outcome) => ValidateOutcome(outcome, BacklogType.Type01);
@@ -100,38 +160,48 @@ public sealed class AiModelOrchestrator
         }
     }
 
-    private static string BuildGuidanceMessage(AiProviderType provider, string? apiKey, bool liveGemini, string? modelName)
+    private static string BuildGuidanceMessage(AiProviderType provider, string? apiKey, bool liveGenerated, string? modelName)
     {
         var hasKey = !string.IsNullOrWhiteSpace(apiKey);
         var keyStatus = hasKey
             ? $"API key injected ({GeminiSecretProvider.MaskKey(apiKey)})"
-            : provider == AiProviderType.GoogleGemini && !liveGemini
+            : provider == AiProviderType.GoogleGemini && !liveGenerated
                 ? "API key not required (offline mode)"
-                : "no API key provided";
+                : provider == AiProviderType.GitHubCopilot
+                    ? "Copilot CLI auth / BYOK"
+                    : "no API key provided";
 
         return provider switch
         {
+            AiProviderType.GitHubCopilot =>
+                liveGenerated
+                    ? $"[GitHub Copilot SDK ({modelName ?? RuntimeEnvironmentService.DefaultCopilotModel}) | {keyStatus}] Generated backlog draft via Copilot agent runtime."
+                    : $"[Offline Copilot Draft ({modelName ?? RuntimeEnvironmentService.DefaultCopilotModel})] Processed prompt using local deterministic fallback.",
             AiProviderType.AzureOpenAi =>
-                $"[Mock Orchestrator -> Azure OpenAI ({keyStatus})] Processed prompt using mocked Azure OpenAI model.",
+                liveGenerated
+                    ? $"[Azure OpenAI / Copilot BYOK ({modelName ?? "gpt-4o"}) | {keyStatus}] Generated backlog draft via live endpoint."
+                    : $"[Mock Orchestrator -> Azure OpenAI ({keyStatus})] Processed prompt using mocked Azure OpenAI model.",
             AiProviderType.GoogleGemini =>
-                liveGemini
+                liveGenerated
                     ? $"[Live Gemini API -> Google Gemini ({modelName ?? RuntimeEnvironmentService.DefaultGeminiModel}) | {keyStatus}] Generated backlog draft using the Gemini API."
                     : $"[Offline Gemini Draft -> Google Gemini ({modelName ?? RuntimeEnvironmentService.DefaultGeminiModel}) | {keyStatus} | Keys: {GeminiSecretProvider.GeminiApiKeysUrl}] Processed prompt using local deterministic fallback (enable Live Gemini API to call generateContent).",
             AiProviderType.AnthropicClaude =>
-                $"[Mock Orchestrator -> Anthropic Claude ({keyStatus})] Processed prompt using mocked Claude model.",
+                liveGenerated
+                    ? $"[Anthropic Claude / Copilot BYOK ({modelName ?? "claude-sonnet-4.5"}) | {keyStatus}] Generated backlog draft via live endpoint."
+                    : $"[Mock Orchestrator -> Anthropic Claude ({keyStatus})] Processed prompt using mocked Claude model.",
             _ =>
                 "[Default Mode -> Prompt from Markdown] Copy the rendered prompt above and run it in your desired AI model (e.g., Microsoft Copilot, Azure OpenAI, Gemini, or Claude). Using baseline draft outcome for review."
         };
     }
 
-    private static (string Title, string Description, string UserStory, IReadOnlyList<GherkinScenario> Scenarios) ToDraft(
+    private static (string Title, string Description, string UserStory, IReadOnlyList<GherkinScenario> Scenarios, IReadOnlyList<DraftAlternative>? Alternatives) ToDraft(
         (string Title, string Description, string UserStory, GherkinScenario Scenario) draft) =>
-        (draft.Title, draft.Description, draft.UserStory, [draft.Scenario]);
+        (draft.Title, draft.Description, draft.UserStory, [draft.Scenario], null);
 
-    private static (string Title, string Description, string UserStory, IReadOnlyList<GherkinScenario> Scenarios) ParseGeneratedDraft(
+    private static (string Title, string Description, string UserStory, IReadOnlyList<GherkinScenario> Scenarios, IReadOnlyList<DraftAlternative>? Alternatives) ParseGeneratedDraft(
         string generatedContent)
     {
-        var sanitizedJson = StripMarkdownCodeFences(generatedContent);
+        var sanitizedJson = ExtractJsonPayload(generatedContent);
         using var document = System.Text.Json.JsonDocument.Parse(sanitizedJson);
         var root = document.RootElement;
         if (root.ValueKind == System.Text.Json.JsonValueKind.Array && root.GetArrayLength() > 0)
@@ -139,9 +209,9 @@ public sealed class AiModelOrchestrator
             root = root[0];
         }
 
-        var title = ReadJsonString(root, "title", "Title");
-        var description = ReadJsonString(root, "description", "Description");
-        var userStory = ReadJsonString(root, "userStory", "UserStory", "user_story");
+        var title = ReadFlexibleText(root, "title", "Title", "summary", "Summary", "headline");
+        var description = ReadFlexibleText(root, "description", "Description", "details", "Details", "body", "Body");
+        var userStory = ReadFlexibleText(root, "userStory", "UserStory", "user_story");
         var scenarios = new List<GherkinScenario>();
 
         if (TryGetPropertyIgnoreCase(root, out var scenarioElements, "scenarios", "Scenarios", "acceptanceCriteria", "AcceptanceCriteria") &&
@@ -150,9 +220,9 @@ public sealed class AiModelOrchestrator
             foreach (var scenario in scenarioElements.EnumerateArray())
             {
                 scenarios.Add(new GherkinScenario(
-                    ReadJsonString(scenario, "given", "Given"),
-                    ReadJsonString(scenario, "when", "When"),
-                    ReadJsonString(scenario, "then", "Then")));
+                    ReadFlexibleText(scenario, "given", "Given"),
+                    ReadFlexibleText(scenario, "when", "When"),
+                    ReadFlexibleText(scenario, "then", "Then")));
             }
         }
 
@@ -168,33 +238,111 @@ public sealed class AiModelOrchestrator
             }
         }
 
-        return (title, description, userStory, scenarios);
+        var alternatives = ParseAlternativesFromJson(root);
+        return (title, description, userStory, scenarios, alternatives);
     }
 
-    private static string StripMarkdownCodeFences(string text)
+    private static IReadOnlyList<DraftAlternative>? ParseAlternativesFromJson(System.Text.Json.JsonElement root)
+    {
+        if (!TryGetPropertyIgnoreCase(
+                root,
+                out var altElements,
+                "alternatives",
+                "Alternatives",
+                "alternativeTitles",
+                "titleAlternatives",
+                "options") ||
+            altElements.ValueKind != System.Text.Json.JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var alternatives = new List<DraftAlternative>();
+        foreach (var item in altElements.EnumerateArray())
+        {
+            if (item.ValueKind != System.Text.Json.JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var angle = ReadFlexibleText(item, "angle", "Angle", "focus", "Focus", "theme", "Theme");
+            var title = ReadFlexibleText(item, "title", "Title", "headline", "Headline", "name");
+            var description = ReadFlexibleText(item, "description", "Description", "summary", "Summary", "details", "Details");
+
+            if (string.IsNullOrWhiteSpace(title))
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(angle))
+            {
+                angle = $"Option {alternatives.Count + 1}";
+            }
+
+            if (string.IsNullOrWhiteSpace(description))
+            {
+                description = $"Alternative focused on {angle.ToLowerInvariant()}.";
+            }
+
+            alternatives.Add(new DraftAlternative(angle, title, description));
+            if (alternatives.Count == 3)
+            {
+                break;
+            }
+        }
+
+        return alternatives.Count == 0 ? null : alternatives;
+    }
+
+    private static string ExtractJsonPayload(string text)
     {
         var trimmed = text.Trim();
-        if (!trimmed.StartsWith("```", StringComparison.Ordinal))
+        if (trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            var firstNewline = trimmed.IndexOf('\n');
+            trimmed = firstNewline > 0
+                ? trimmed[(firstNewline + 1)..]
+                : trimmed.TrimStart('`');
+
+            var closingFence = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+            if (closingFence >= 0)
+            {
+                trimmed = trimmed[..closingFence];
+            }
+
+            return trimmed.Trim();
+        }
+
+        if (trimmed.StartsWith('{') || trimmed.StartsWith('['))
         {
             return trimmed;
         }
 
-        var firstNewline = trimmed.IndexOf('\n');
-        if (firstNewline > 0)
+        // Handle responses that include brief prose before a fenced JSON block or raw JSON object
+        var fenceStart = trimmed.IndexOf("```", StringComparison.Ordinal);
+        if (fenceStart >= 0)
         {
-            trimmed = trimmed[(firstNewline + 1)..];
-        }
-        else
-        {
-            trimmed = trimmed.TrimStart('`');
+            var afterFence = trimmed[(fenceStart + 3)..];
+            var lineEnd = afterFence.IndexOf('\n');
+            if (lineEnd >= 0)
+            {
+                var body = afterFence[(lineEnd + 1)..];
+                var fenceEnd = body.IndexOf("```", StringComparison.Ordinal);
+                if (fenceEnd >= 0)
+                {
+                    return body[..fenceEnd].Trim();
+                }
+            }
         }
 
-        if (trimmed.EndsWith("```", StringComparison.Ordinal))
+        var firstBrace = trimmed.IndexOf('{');
+        var lastBrace = trimmed.LastIndexOf('}');
+        if (firstBrace >= 0 && lastBrace > firstBrace)
         {
-            trimmed = trimmed[..^3];
+            return trimmed[firstBrace..(lastBrace + 1)].Trim();
         }
 
-        return trimmed.Trim();
+        return trimmed;
     }
 
     private static bool TryGetPropertyIgnoreCase(
@@ -229,49 +377,153 @@ public sealed class AiModelOrchestrator
         return false;
     }
 
-    private static string ReadJsonString(System.Text.Json.JsonElement element, params string[] propertyNames) =>
-        TryGetPropertyIgnoreCase(element, out var value, propertyNames) && value.ValueKind == System.Text.Json.JsonValueKind.String
-            ? value.GetString() ?? string.Empty
-            : string.Empty;
+    private static string ReadFlexibleText(System.Text.Json.JsonElement element, params string[] propertyNames)
+    {
+        if (!TryGetPropertyIgnoreCase(element, out var value, propertyNames))
+        {
+            return string.Empty;
+        }
+
+        return FormatJsonElementAsText(value);
+    }
+
+    private static string FormatJsonElementAsText(System.Text.Json.JsonElement value)
+    {
+        switch (value.ValueKind)
+        {
+            case System.Text.Json.JsonValueKind.String:
+                return (value.GetString() ?? string.Empty).Trim();
+
+            case System.Text.Json.JsonValueKind.Array:
+            {
+                var items = value.EnumerateArray()
+                    .Select(FormatJsonElementAsText)
+                    .Where(item => !string.IsNullOrWhiteSpace(item))
+                    .Select(item => item.StartsWith("- ", StringComparison.Ordinal) ? item : $"- {item}");
+                return string.Join("\n", items);
+            }
+
+            case System.Text.Json.JsonValueKind.Object:
+            {
+                var lines = new List<string>();
+                foreach (var prop in value.EnumerateObject())
+                {
+                    var propText = FormatJsonElementAsText(prop.Value);
+                    if (string.IsNullOrWhiteSpace(propText))
+                    {
+                        continue;
+                    }
+
+                    lines.Add(propText.Contains('\n')
+                        ? $"**{prop.Name}:**\n{propText}"
+                        : $"**{prop.Name}:** {propText}");
+                }
+
+                return string.Join("\n\n", lines);
+            }
+
+            default:
+                return value.ValueKind is System.Text.Json.JsonValueKind.Number
+                    or System.Text.Json.JsonValueKind.True
+                    or System.Text.Json.JsonValueKind.False
+                    ? value.ToString()
+                    : string.Empty;
+        }
+    }
 
     private static (string Title, string Description, string UserStory, GherkinScenario Scenario) ExtractStructuredDraft(string rawData)
     {
         var lines = rawData
             .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        var title = ExtractPrefixedLine(lines, "Discovery Note", "Title", "Subject", "Goal")
-            ?? lines.FirstOrDefault()
-            ?? "Backlog Requirement";
-
-        // Clean up leading prefixes if present in title
-        var dashIndex = title.IndexOf('-', StringComparison.Ordinal);
-        if (title.StartsWith("Discovery Note", StringComparison.OrdinalIgnoreCase) && dashIndex > 0 && dashIndex < title.Length - 1)
+        var enhancedTitle = ExtractPrefixedValue(lines, "Enhanced Title:");
+        string title;
+        if (!string.IsNullOrWhiteSpace(enhancedTitle))
         {
-            title = title[(dashIndex + 1)..].Trim();
+            title = enhancedTitle;
         }
         else
         {
-            foreach (var prefix in new[] { "Title:", "Subject:", "Goal:" })
-            {
-                if (title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                {
-                    var stripped = title[prefix.Length..].Trim();
-                    if (!string.IsNullOrWhiteSpace(stripped))
-                    {
-                        title = stripped;
-                    }
+            title = ExtractPrefixedLine(lines, "Discovery Note", "Title", "Subject", "Goal")
+                ?? lines.FirstOrDefault()
+                ?? "Backlog Requirement";
 
-                    break;
+            // Clean up leading prefixes if present in title
+            var dashIndex = title.IndexOf('-', StringComparison.Ordinal);
+            if (title.StartsWith("Discovery Note", StringComparison.OrdinalIgnoreCase) && dashIndex > 0 && dashIndex < title.Length - 1)
+            {
+                title = title[(dashIndex + 1)..].Trim();
+            }
+            else
+            {
+                foreach (var prefix in new[] { "Title:", "Subject:", "Goal:" })
+                {
+                    if (title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var stripped = title[prefix.Length..].Trim();
+                        if (!string.IsNullOrWhiteSpace(stripped))
+                        {
+                            title = stripped;
+                        }
+
+                        break;
+                    }
                 }
             }
         }
 
-        var context = ExtractPrefixedValue(lines, "Context:")
-            ?? (lines.Length == 1 && lines[0].StartsWith("Goal:", StringComparison.OrdinalIgnoreCase)
-                ? "Not specified in discovery notes."
-                : string.Join(" ", lines));
+        var expandedDescriptionSection = ExtractSectionText(lines, "Expanded Description:");
+        var contextSections = ExtractAllSectionTexts(lines, "Context:");
+        var attachedFileSections = ExtractAttachedContextBlocks(lines);
+        var webSection = ExtractSectionText(lines, "Web Research Findings:");
+        var refinementSection = ExtractSectionText(lines, "Refinement Instructions:");
 
-        var userStory = ExtractPrefixedValue(lines, "Requirement:")
+        string description;
+        if (lines.Length == 1 && lines[0].StartsWith("Goal:", StringComparison.OrdinalIgnoreCase))
+        {
+            description = "Not specified in discovery notes.";
+        }
+        else if (!string.IsNullOrWhiteSpace(expandedDescriptionSection))
+        {
+            description = expandedDescriptionSection;
+        }
+        else if (contextSections.Count > 0 ||
+                 attachedFileSections.Count > 0 ||
+                 !string.IsNullOrWhiteSpace(webSection) ||
+                 !string.IsNullOrWhiteSpace(refinementSection))
+        {
+            var segments = new List<string>();
+            foreach (var attached in attachedFileSections)
+            {
+                if (!contextSections.Any(c => attached.Contains(c, StringComparison.OrdinalIgnoreCase)))
+                {
+                    segments.Add(attached);
+                }
+            }
+
+            foreach (var ctx in contextSections)
+            {
+                segments.Add(ctx);
+            }
+
+            if (!string.IsNullOrWhiteSpace(webSection))
+            {
+                segments.Add($"Web Research Findings:\n{webSection}");
+            }
+
+            if (!string.IsNullOrWhiteSpace(refinementSection))
+            {
+                segments.Add($"Refinement Notes: {refinementSection}");
+            }
+
+            description = string.Join("\n\n", segments);
+        }
+        else
+        {
+            description = string.Join(" ", lines);
+        }
+
+        var userStory = ExtractPrefixedValue(lines, "Requirement:", "User Story:")
             ?? ExtractLineContaining(lines, "As a ")
             ?? ExtractLineContaining(lines, "As an ")
             ?? "Not specified in discovery notes.";
@@ -283,10 +535,107 @@ public sealed class AiModelOrchestrator
         var then = ExtractPrefixedValue(lines, "Expected Outcome:", "Then:")
             ?? "Not specified in discovery notes.";
 
-        var description = context.Trim();
-
-        return (title, description, userStory, new GherkinScenario(given, when, then));
+        return (title, description.Trim(), userStory, new GherkinScenario(given, when, then));
     }
+
+    private static List<string> ExtractAllSectionTexts(string[] lines, string headerPrefix)
+    {
+        var results = new List<string>();
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!lines[i].StartsWith(headerPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var collected = new List<string>();
+            var inline = lines[i][headerPrefix.Length..].Trim();
+            if (!string.IsNullOrWhiteSpace(inline))
+            {
+                collected.Add(inline);
+            }
+
+            for (var j = i + 1; j < lines.Length; j++)
+            {
+                if (IsKnownSectionHeader(lines[j]))
+                {
+                    break;
+                }
+
+                collected.Add(lines[j]);
+                i = j;
+            }
+
+            if (collected.Count > 0)
+            {
+                results.Add(string.Join("\n", collected));
+            }
+        }
+
+        return results;
+    }
+
+    private static List<string> ExtractAttachedContextBlocks(string[] lines)
+    {
+        var results = new List<string>();
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!lines[i].StartsWith("--- Context", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var collected = new List<string>();
+            for (var j = i + 1; j < lines.Length; j++)
+            {
+                var line = lines[j];
+                if (line.StartsWith("--- Context", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("Context:", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("Web Research Findings:", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("Previous Draft:", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("Refinement Instructions:", StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                collected.Add(line);
+                i = j;
+            }
+
+            if (collected.Count > 0)
+            {
+                results.Add(string.Join("\n", collected));
+            }
+        }
+
+        return results;
+    }
+
+    private static string? ExtractSectionText(string[] lines, string headerPrefix) =>
+        ExtractAllSectionTexts(lines, headerPrefix).FirstOrDefault();
+
+    private static bool IsKnownSectionHeader(string line) =>
+        line.StartsWith("Goal:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Title:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Subject:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Discovery Note", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Synthesized Goal Brief", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Enhanced Title:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("User Story:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Expanded Description:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Expanded Checklist:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Context:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("--- Context", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Requirement:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Precondition:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Given:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Action:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("When:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Expected Outcome:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Then:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Web Research Findings:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Previous Draft:", StringComparison.OrdinalIgnoreCase) ||
+        line.StartsWith("Refinement Instructions:", StringComparison.OrdinalIgnoreCase);
 
     private static string? ExtractPrefixedLine(string[] lines, params string[] prefixes)
     {

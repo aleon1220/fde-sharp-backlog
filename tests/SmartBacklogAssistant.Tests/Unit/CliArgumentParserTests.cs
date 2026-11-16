@@ -154,4 +154,108 @@ public sealed class CliArgumentParserTests
         Assert.Equal("02", options.BacklogTypeInput);
         Assert.False(Program.ShouldLaunchMenu(args, options));
     }
+
+    [Fact]
+    public void ParseArgs_WithProcessSubcommandAndFlagsBeforeOrAfterPositional_ParsesTargetDryRunAndJson()
+    {
+        string[] args = ["process", "--dry-run", "all", "--json"];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("run", options.Subcommand);
+        Assert.Equal("all", options.InputFilePath);
+        Assert.True(options.DryRun);
+        Assert.True(options.JsonFileOut);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
+
+    [Fact]
+    public void ParseArgs_WithDraftFlagsBeforeGoalAndPreviewFlag_ParsesGoalAndPreview()
+    {
+        string[] args = ["draft", "--type", "02", "Add Redis Cache", "--preview"];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("draft", options.Subcommand);
+        Assert.Equal("Add Redis Cache", options.GoalTitle);
+        Assert.Equal("02", options.BacklogTypeInput);
+        Assert.True(options.DryRun);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
+
+    [Fact]
+    public void ParseArgs_WithConfigSubcommand_SkipsInteractiveMenu()
+    {
+        string[] args = ["config", "--json", "on", "--in", "./in", "--out", "./out"];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("config", options.Subcommand);
+        Assert.True(options.JsonFileOut);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
+
+    [Fact]
+    public void ParseArgs_WithGlobalFlagsBeforeSubcommand_ParsesSubcommandCorrectly()
+    {
+        string[] args = ["--workspace", "/tmp/ws", "--theme", "uv", "status"];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("doctor", options.Subcommand);
+        Assert.Equal("/tmp/ws", options.WorkspaceRoot);
+        Assert.Equal("uv", options.CliTheme);
+        Assert.True(options.ShowDoctorStatus);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
+
+    [Fact]
+    public void ParseArgs_WithModelsSubcommandAndCopilotProvider_EnablesModelListing()
+    {
+        string[] args = ["models", "--provider", "copilot-sdk"];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("models", options.Subcommand);
+        Assert.True(options.ListGeminiModels);
+        Assert.Equal("copilot-sdk", options.ProviderInput);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
+
+    [Fact]
+    public void ParseArgs_WithDraftDetailsAndSearchFlags_ParsesContextAndWebSearchGrounding()
+    {
+        string[] args =
+        [
+            "draft",
+            "Check Geocaching 2026 hiding movie theme",
+            "-t", "02",
+            "-d", "Include hiding rules and dates",
+            "--search",
+            "--preview"
+        ];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("draft", options.Subcommand);
+        Assert.Equal("Check Geocaching 2026 hiding movie theme", options.GoalTitle);
+        Assert.Equal("02", options.BacklogTypeInput);
+        Assert.Equal("Include hiding rules and dates", options.GoalContext);
+        Assert.True(options.WebSearchGrounding);
+        Assert.True(options.DryRun);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
+
+    [Fact]
+    public void ParseArgs_WithContextAndWebAliases_ParsesGoalContextAndSearch()
+    {
+        string[] args = ["draft", "Verify release dates", "-c", "Focus on Q3 deadlines", "--web"];
+
+        var options = Program.ParseArgs(args);
+
+        Assert.Equal("Verify release dates", options.GoalTitle);
+        Assert.Equal("Focus on Q3 deadlines", options.GoalContext);
+        Assert.True(options.WebSearchGrounding);
+        Assert.False(Program.ShouldLaunchMenu(args, options));
+    }
 }

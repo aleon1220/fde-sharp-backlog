@@ -76,5 +76,30 @@ public sealed class JiraBacklogFormatterTests
         Assert.Empty(ticket.AcceptanceCriteria);
         Assert.Contains("# [Jira - schedule (Type02)] Export Audit Logs", ticket.FormattedMarkdown);
         Assert.Contains("Support async CSV export for over 5,000 rows.", ticket.FormattedMarkdown);
+        Assert.DoesNotContain("## Title & Description Alternatives", ticket.FormattedMarkdown);
+    }
+
+    [Fact]
+    public void Format_WhenOutcomeHasAlternatives_RendersAlternativesSectionInBothTypes()
+    {
+        var outcome = CreateSampleOutcome() with
+        {
+            Alternatives =
+            [
+                new DraftAlternative("Action & Delivery", "Deliver Async Audit Export", "Implement queued CSV export."),
+                new DraftAlternative("User Value / Story", "Enable Self-Service Audit Downloads", "Allow admins to download large logs cleanly."),
+                new DraftAlternative("Verification & Scope", "Validate Export SLAs & Access Rules", "Verify 30s SLA and RBAC enforcement.")
+            ]
+        };
+
+        var type01 = _sut.Format(outcome, BacklogType.Type01);
+        var type02 = _sut.Format(outcome, BacklogType.Type02);
+
+        Assert.Equal(3, type01.Alternatives?.Count);
+        Assert.Equal(3, type02.Alternatives?.Count);
+        Assert.Contains("## Title & Description Alternatives", type01.FormattedMarkdown);
+        Assert.Contains("**[Action & Delivery] Deliver Async Audit Export** — Implement queued CSV export.", type01.FormattedMarkdown);
+        Assert.Contains("## Title & Description Alternatives", type02.FormattedMarkdown);
+        Assert.Contains("**[Verification & Scope] Validate Export SLAs & Access Rules** — Verify 30s SLA and RBAC enforcement.", type02.FormattedMarkdown);
     }
 }

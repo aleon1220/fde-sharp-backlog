@@ -1,131 +1,88 @@
 # fde-sharp-backlog (`SmartBacklogAssistant`)
 
-.NET 10 CLI & TUI assistant for transforming unstructured engineering discovery notes into standardized Jira backlog items using an **AI-First SDLC** workflow.
+.NET 10 hybrid CLI & interactive REPL/TUI assistant for transforming unstructured engineering discovery notes into standardized Jira backlog items using an **AI-First SDLC** workflow.
 
 ## Executive Summary
 
-**Smart Backlog Assistant** (`fde-sharp-backlog`) combines deterministic .NET 10 ingestion, schema validation, and cross-platform Windows/WSL workspace management with Google Gemini (`generateContent`) reasoning to eliminate backlog grooming overhead. Designed around ergonomic terminal standards inspired by **Gemini CLI (`agy`)**, **Astral `uv`**, and **`kubectl`**, it supports both a zero-config interactive colored TUI and composable single-shot CLI subcommands (`run`, `draft`, `models`, `doctor`).
+**Smart Backlog Assistant** (`fde-sharp-backlog`) combines deterministic .NET 10 ingestion, schema validation, and cross-platform Windows/WSL workspace management with a multi-provider AI orchestrator (**Google Gemini REST** and **`GitHub.Copilot.SDK`** with native Copilot CLI or BYOK providers). Modeled after two gold-standard terminal paradigms:
+
+1. **Astral `uv` (Frictionless One-Shot Subcommand CLI):** Deterministic, verb-driven subcommands (`process`, `draft`, `status`, `config`, `models`) with elapsed step timers (`✓ Resolved ... in 1ms`), non-intrusive Braille progress spinners during async AI calls, actionable error + `hint:` diagnostics, and scannable `--help` output.
+2. **Gemini CLI / Agy (Interactive REPL & Branching 3-Option TUI):** Launching with zero arguments opens an interactive session with a boxed status bar (`In: ./in | Out: ./out | Export: .md`), `/slash` commands, `@filename` context mentions, and our streamlined 3-option menu state machine.
 
 * **GitHub Repository & Project**: [aleon1220/fde-sharp-backlog](https://github.com/aleon1220/fde-sharp-backlog) · [Project Backlog & Issues](https://github.com/aleon1220/fde-sharp-backlog/issues)
 * **Active Release Milestone**: [Milestone #1 — `release-fde-version`](https://github.com/aleon1220/fde-sharp-backlog/milestone/1)
-* **CLI & TUI Ergonomics Track**: [Issue #3 — Evaluate Contemporary CLI and TUI Tools & Implement Ergonomic Standards](https://github.com/aleon1220/fde-sharp-backlog/issues/3) · [Issue #5 — CLI in the style of `agy`, `uv`, and `kubectl`](https://github.com/aleon1220/fde-sharp-backlog/issues/5)
+* **CLI & TUI Ergonomics Track**: [Issue #3](https://github.com/aleon1220/fde-sharp-backlog/issues/3) · [Issue #5](https://github.com/aleon1220/fde-sharp-backlog/issues/5) · [Issue #7](https://github.com/aleon1220/fde-sharp-backlog/issues/7)
 
-## Ergonomic CLI Subcommands (`agy` / `uv` / `kubectl` Style)
+## Ergonomic CLI Subcommands (`uv` Style — Headless Execution)
 
 ```bash
-# Launch interactive colored TUI (default when run with no arguments)
+# Launch interactive Gemini Agy REPL & TUI (default when run with no arguments)
 dotnet run --project src/SmartBacklogAssistant
 
-# Quick-draft through Gemini (set GEMINI_API_KEY first)
-dotnet run --project src/SmartBacklogAssistant -- draft "Implement OAuth2 PKCE Login" -t 01 --non-interactive
+# Process all queued files in ./in or a single file (dry-run preview + optional JSON export)
+dotnet run --project src/SmartBacklogAssistant -- process all --dry-run --offline
+dotnet run --project src/SmartBacklogAssistant -- process raw-notes.txt -t 01 --json
 
-# Process discovery notes offline with dry-run preview or combined (Type01 + Type02) output
-dotnet run --project src/SmartBacklogAssistant -- run -i samples/raw-notes.txt -t both --dry-run --offline --non-interactive
+# Quick-draft a Type 01 (User Story + GWT), Type 02 (Schedule Item), or both without disk writes
+dotnet run --project src/SmartBacklogAssistant -- draft "Implement OAuth2 PKCE Login" --type 01 --preview
+dotnet run --project src/SmartBacklogAssistant -- draft "Check Geocaching 2026 hiding movie theme" -t 02 -d "Include rules and dates" --search
+dotnet run --project src/SmartBacklogAssistant -- draft "Add Redis Distributed Cache" --type both --json
 
-# Pre-flight environment, workspace, & Gemini API key readiness check
-dotnet run --project src/SmartBacklogAssistant -- doctor
+# Non-interactively configure persisted settings (stored in smart-backlog-assistant/settings.json)
+dotnet run --project src/SmartBacklogAssistant -- config --json on --in ./in --out ./out --theme uv --provider copilot-sdk
+
+# Crisp diagnostic table: WSL2/Windows paths, ./in count, export format, & AI provider matrix
+dotnet run --project src/SmartBacklogAssistant -- status
 ```
 
-## Workflow Overview
+Subcommand aliases preserved for backward compatibility: `run` (`process`), `add` (`draft`), `doctor` (`status`), `menu`/`tui`. Pass `<command> --help` (e.g. `process --help`, `config --help`) for command-specific help.
 
-1. **Runtime Telemetry**: Displays active OS, build info (`v1.1.0-gemini-runtime`), .NET runtime, and Gemini live/offline mode. In live mode the model is selected from the models available to the configured API key.
-2. **Gemini Secret Injection**: Resolves the API key. Obtained from [Google AI studio](https://aistudio.google.com/api-keys) in order:
-   * CLI flag: `--api-key <key>`
-   * OS environment variable: `GEMINI_API_KEY` (or `GOOGLE_API_KEY` / `AI_API_KEY`)
-   * Interactive CLI prompt: Requests the key before proceeding if none is registered.
-3. **Interactive Colored CLI Menu & Workspace Compatibility (`Windows` & `WSL`)**:
-   * **Windows Default Workspace**: `c:\workspace\smart-backlog-assistant\in` -> `c:\workspace\smart-backlog-assistant\out`
-   * **WSL Compatible Workspace**: `/mnt/c/workspace/smart-backlog-assistant/in` -> `/mnt/c/workspace/smart-backlog-assistant/out`
-   * **Menu `[1]` Process Input Files**: Reads discovery files from `smart-backlog-assistant/in` (all files, single file, or dry-run preview) and outputs formatted Jira items to `smart-backlog-assistant/out`.
-   * **Menu `[2]` Draft Backlog Item**: Enter a Goal or Title and select **`Type 01`** (`complete` — Given/When/Then), **`Type 02`** (`schedule` — Title + Description), or **Combined Output (Both)** ready to be added into `smart-backlog-assistant/out`.
-   * **Menu `[3]` Workspace & Settings**:
-     * `[1]` Toggle **JSON Export** (`.md` only by default, or `.md + .json`).
-     * `[2]` **Inspect Directories** (`in` and `out` file listings & byte sizes).
-     * `[3]` **Runtime & AI Diagnostics** (OS, Windows/WSL path mappings, and Gemini env vars).
-     * `[4]` **Select CLI Theme**: Switch between **`agy` style (default)**, **`uv` style**, and **`kubectl` style** in the configuration sub-menu (persisted to `smart-backlog-assistant/settings.json` and configurable via `--theme <agy|uv|kubectl>`).
-     * `[5]` Toggle live Gemini API generation (enabled by default) or local offline drafting.
-     * `[6]` Fetch and select a Gemini model supported by the configured API key.
-4. **Local Processing (`collect` -> `process` -> `validate`)**: Ingests raw discovery notes (`smart-backlog-assistant/in` or `samples/raw-notes.txt`), renders the Type01 or Type02 prompt, and validates the structured draft.
-5. **Review & Jira Output (`Type01` | `Type02`)**: Formats `Type01` (`complete` — Given/When/Then) or `Type02` (`schedule` — Title + Description) to console and `smart-backlog-assistant/out` (or `output/`).
+## Interactive REPL & Menu (Gemini CLI / Agy Style)
 
-## Gemini API Options
+Running with zero arguments displays the compact boxed workspace header and supports three interaction styles seamlessly from `backlog > `:
 
-Interactive and non-interactive workflows use the same prompt, Gemini model discovery, response validation, output formatting, and file-writing pipeline. Live Gemini generation is enabled by default; the first interactive draft asks for a key if needed, lists models that support `generateContent`, then sends the selected type-specific prompt to Gemini. The goal is passed as a single `Goal:` input rather than being expanded into invented context, requirements, and acceptance criteria. Use `--offline` or the interactive settings toggle to opt into deterministic local drafting without an API call. `prompts/prompt-goal-type01.md` and `prompts/prompt-goal-type02.md` define the response contracts; a custom `--prompt` path overrides the selected template.
+* **Numeric Menu `[0-3]`:**
+  * `[1] Process Input Files` — Queue inspection, process all, single file, or dry-run preview.
+  * `[2] Draft Backlog Item` — Draft `Type01` (`complete` — Given/When/Then), `Type02` (`schedule` — Title + Description), `Both`, **`[4] Preview Draft (No Files Saved)` sub-menu** (`Type 01`, `Type 02`, or `Both` with interactive typing tips), or `[5] Guided Draft & Refine (Wizard)` with `[1-3]` Alternative selection, optional Google Search grounding, and `[A]ccept / [R]efine / [T]ype / [P]review / [C]ancel`. Bare Goals automatically trigger two-step INVEST Goal Expansion (`prompts/prompt-goal-expand.md`) to enhance the Title, synthesize User Story framing + structured Description, and present **3 Title & Description alternatives**.
+  * `[3] Workspace & Settings` — Toggle JSON export, inspect `./in` & `./out`, run diagnostics, select CLI theme (`agy`, `uv`, `kubectl`), toggle Live AI, select model, `[7]` view `settings.json`, and `[8]` select active AI provider.
+* **`/slash` Commands:**
+  * `/process [all|<file>] [--dry-run] [--json]`, `/draft "<goal>" [-t 01|02|both] [--details "..."] [--search] [--preview]`, `/settings`, `/status`, `/config [--json on|off] [--in <dir>] [--out <dir>]`, `/provider <name>`, `/models`, `/theme <agy|uv|kubectl>`, `/json [on|off]`, `/live [on|off]`, `/help`, `/clear`, `/exit`.
+* **`@filename` Context Mentions:**
+  * Reference queued `./in` or `./samples` files directly in the REPL: `@raw-notes.txt` (processes file) or `@raw-notes.txt Implement OAuth2 PKCE` (attaches discovery context cleanly without hallucination). Type `@` or `@?` to list available context files.
 
-```bash
-# List models compatible with content generation for this API key
-dotnet run --project src/SmartBacklogAssistant -- --list-models --api-key "$GEMINI_API_KEY"
+## Multi-Provider AI Orchestration (`Gemini` & `GitHub.Copilot.SDK`)
 
-# Generate with a selected model
-dotnet run --project src/SmartBacklogAssistant -- \
-  --gemini-live \
-  --model gemini-3.8-flash \
-  --api-key "$GEMINI_API_KEY" \
-  --type Type01 \
-  --non-interactive
-```
+Preserves strict **Zero Hallucination** prompt rules and Type `01`/`02` formatting across all providers (`--provider`):
 
-For an offline draft that does not require an API key:
+1. **`gemini` (Default — Google Gemini REST):**
+   * Resolves API key from `--api-key`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `AI_API_KEY`, or interactive CLI prompt ([Google AI Studio](https://aistudio.google.com/api-keys)).
+   * Use `--offline` or `/live off` for zero-API deterministic drafting.
+2. **`copilot-sdk` (`GitHub.Copilot.SDK`):**
+   * Uses the official `.NET` `GitHub.Copilot.SDK` (`CopilotClient` / `CopilotSession`) with `COPILOT_CLI_PATH`, `COPILOT_CLI_URL`, or `copilot` on `PATH` and `GITHUB_TOKEN`/`COPILOT_GITHUB_TOKEN` (or `copilot login`).
+   * Build skips downloading the ~300 MB Copilot CLI binary by default (`CopilotSkipCliDownload=true`); pass `-p:CopilotSkipCliDownload=false` at build time if you want MSBuild to bundle it automatically.
+3. **`azure` / `claude` (BYOK Live or Deterministic Mock):**
+   * Routes live requests through `GitHub.Copilot.SDK` BYOK when `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_API_KEY` (or `OLLAMA_HOST` / `ANTHROPIC_API_KEY`) and Copilot runtime are available; falls back cleanly to deterministic mock mode otherwise.
+4. **`manual`:**
+   * Renders the selected Type 01/02 Markdown prompt to console alongside a deterministic baseline draft.
 
-```bash
-dotnet run --project src/SmartBacklogAssistant -- draft "Implement OAuth2 PKCE Login" -t 01 --offline
-```
+## Workspace Directory Mapping (Windows & WSL2)
 
-Model IDs and availability are determined at runtime from the Gemini API, and may vary by API key. See the [AI Studio model catalog](https://aistudio.google.com/docs/models) and [Gemini API model listing reference](https://aistudio.google.com/api-reference/models).
+* **Windows Default Root**: `c:\workspace\smart-backlog-assistant\{in,out}`
+* **WSL2 Default Root**: `/mnt/c/workspace/smart-backlog-assistant/{in,out}`
+* Custom `./in` and `./out` overrides set via `backlog config --in ... --out ...` or `/config` persist in `smart-backlog-assistant/settings.json` alongside CLI theme, export mode, active provider, live toggle, and model choice.
 
 ## Quick Start (.NET 10 SDK)
 
-* [get dotnet](https://dotnet.microsoft.com/en-us/download/dotnet/10.0)
-
-```powershell
-winget install Microsoft.DotNet.SDK.10
-```
-
-* 1. Set an OS Environment Variable for live Gemini generation (or choose offline mode)
-
-* Windows
-
-```powershell
-# Windows PowerShell
-$env:GEMINI_API_KEY = "useYourGeminiAPI_Key"
-```
-
-* Linux / macOS / WSL
-
 ```bash
-export GEMINI_API_KEY="useYourGeminiAPI_Key"
-```
-
-* 2. Run Interactively (Launches Colored CLI Menu & Prompts for Key if Unset)
-
-```bash
-dotnet run --project src/SmartBacklogAssistant
-```
-
-* 3. Quick-Add a Goal or Title (`Type 01` or `Type 02`)
-
-```bash
-dotnet run --project src/SmartBacklogAssistant -- \
-  --workspace "/mnt/c/workspace" \
-  --goal "Implement OAuth2 PKCE Login" \
-  --type 01 \
-  --api-key "$GEMINI_API_KEY" \
-  --non-interactive
-```
-
-* 4. Run Non-Interactively
-
-```bash
-dotnet run --project src/SmartBacklogAssistant -- \
-  --api-key "$GEMINI_API_KEY" \
-  --type Type01 \
-  --non-interactive
-```
-
-* Run Tests
-
-```bash
+# Restore, build, and run full test suite (180 tests)
 dotnet test
+
+# Optional: configure Gemini or Copilot credentials
+export GEMINI_API_KEY="useYourGeminiAPI_Key"
+# or: export GITHUB_TOKEN="ghp_..."
+
+# Run interactive REPL or headless CLI
+dotnet run --project src/SmartBacklogAssistant
 ```
 
 ## Containers & Podman Kubernetes
@@ -139,4 +96,4 @@ podman kube down k8s/smart-backlog-pod.yaml
 
 ## Findings & Iteration Backlog
 
-See [BACKLOG.md](BACKLOG.md) for runtime findings and prioritized iteration items (`SBA-101`–`SBA-105`).
+See [BACKLOG.md](BACKLOG.md) and [PLAN.md](PLAN.md) for architecture notes, runtime findings (`SBA-101`–`SBA-105`), and CLI/TUI UX standards.

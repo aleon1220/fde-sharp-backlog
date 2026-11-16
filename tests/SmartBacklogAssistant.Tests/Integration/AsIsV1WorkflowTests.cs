@@ -299,6 +299,215 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.False(Directory.Exists(_outputDir));
     }
 
+    [Fact]
+    public void Execute_WithWebSearchGrounding_InjectsSearchFindingsAndSourcesIntoGeminiDraft()
+    {
+        var capturedPosts = new List<string>();
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get)
+            {
+                return JsonResponse("""
+                    {
+                      "models": [{
+                        "name": "models/gemini-2.5-flash",
+                        "baseModelId": "gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                      }]
+                    }
+                    """);
+            }
+
+            var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            capturedPosts.Add(body);
+
+            if (body.Contains("google_search", StringComparison.Ordinal))
+            {
+                return JsonResponse("""
+                    {
+                      "candidates": [{
+                        "content": { "parts": [{ "text": "- Official Geocaching HQ 2026 hiding movie theme invites cinema-inspired caches." }] },
+                        "groundingMetadata": {
+                          "groundingChunks": [{ "web": { "title": "Geocaching HQ", "uri": "https://www.geocaching.com/blog/" } }]
+                        }
+                      }]
+                    }
+                    """);
+            }
+
+            if (body.Contains("Goal-to-Notes Expansion", StringComparison.Ordinal))
+            {
+                return JsonResponse("""
+                    {
+                      "candidates": [{
+                        "content": {
+                          "parts": [{
+                            "text": "{\"enhancedTitle\":\"Verify & Document Geocaching 2026 Hiding Movie Theme Rules\",\"userStory\":\"As a cache organizer, I want to verify official 2026 movie hiding rules so that our submission qualifies for the campaign.\",\"discoverySummary\":\"**Objective:** Verify official 2026 cinema-inspired hide criteria and dates.\",\"keyChecklist\":[\"Verify Geocaching HQ blog dates\"],\"alternatives\":[{\"angle\":\"Action & Delivery\",\"title\":\"Verify & Document 2026 Movie Theme\",\"description\":\"Audit official campaign guidelines and dates.\"},{\"angle\":\"User Value / Story\",\"title\":\"Guide Hiders on 2026 Movie Theme\",\"description\":\"Help cache owners craft qualifying themed submissions.\"},{\"angle\":\"Verification & Scope\",\"title\":\"Confirm 2026 Movie Souvenir Criteria\",\"description\":\"Review eligibility dates and rule constraints.\"}]}"
+                          }]
+                        }
+                      }]
+                    }
+                    """);
+            }
+
+            return JsonResponse("""
+                {
+                  "candidates": [{
+                    "content": {
+                      "parts": [{
+                        "text": "{\"title\":\"Verify Geocaching 2026 Hiding Movie Theme Campaign\",\"description\":\"Objective: Confirm official 2026 cinema-inspired hide criteria.\\nChecklist:\\n- Verify Geocaching HQ blog dates\",\"alternatives\":[{\"angle\":\"Action & Delivery\",\"title\":\"Verify & Document 2026 Movie Theme\",\"description\":\"Audit official campaign guidelines and dates.\"},{\"angle\":\"User Value / Story\",\"title\":\"Guide Hiders on 2026 Movie Theme\",\"description\":\"Help cache owners craft qualifying themed submissions.\"},{\"angle\":\"Verification & Scope\",\"title\":\"Confirm 2026 Movie Souvenir Criteria\",\"description\":\"Review eligibility dates and rule constraints.\"}]}"
+                      }]
+                    }
+                  }]
+                }
+                """);
+        }));
+
+        var workflow = CreateWorkflow(geminiApiClient: new GeminiApiClient(httpClient));
+        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
+        using var output = new StringWriter();
+
+        var ticket = workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _tempDir,
+                PromptFilePath: Path.Combine(repositoryRoot, PromptTemplateService.DefaultPromptFilePath),
+                ApiKey: "AIzaSyLiveSearchTest1234",
+                ModelName: "gemini-2.5-flash",
+                BacklogTypeInput: "Type02",
+                GoalTitle: "check Geocaching 2026 hiding movie theme",
+                GoalContext: "Verify hiding criteria and dates",
+                WebSearchGrounding: true,
+                OutputDirectory: _outputDir,
+                NonInteractive: true,
+                GeminiLive: true),
+            new StringReader(string.Empty),
+            output);
+
+        Assert.Equal(3, capturedPosts.Count);
+        Assert.Contains("google_search", capturedPosts[0]);
+        Assert.Contains("Goal-to-Notes Expansion", capturedPosts[1]);
+        Assert.Contains("Web Research Findings:", capturedPosts[1]);
+        Assert.Contains("Synthesized Goal Brief (Goal Expansion):", capturedPosts[2]);
+        Assert.Contains("Web Research Findings:", capturedPosts[2]);
+        Assert.Contains("cinema-inspired caches", capturedPosts[2]);
+        Assert.Contains("https://www.geocaching.com/blog/", capturedPosts[2]);
+        Assert.Contains("Goal: check Geocaching 2026 hiding movie theme", capturedPosts[2]);
+        Assert.Contains("Context: Verify hiding criteria and dates", capturedPosts[2]);
+
+        Assert.Equal("Verify Geocaching 2026 Hiding Movie Theme Campaign", ticket.Title);
+        Assert.Contains("cinema-inspired hide criteria", ticket.Description);
+        Assert.Equal(3, ticket.Alternatives?.Count);
+        Assert.Contains("Suggested Title & Description Alternatives", output.ToString());
+        Assert.Contains("User Story :", output.ToString());
+        Assert.Contains("web research from 1 source(s)", output.ToString());
+    }
+
+    [Fact]
+    public void Execute_WhenWebSearchGroundingReturnsHttp400_LogsWarningAndCompletesDraft()
+    {
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get)
+            {
+                return JsonResponse("""
+                    {
+                      "models": [{
+                        "name": "models/gemini-2.5-flash",
+                        "baseModelId": "gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                      }]
+                    }
+                    """);
+            }
+
+            var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            if (body.Contains("google_search", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.BadRequest)
+                {
+                    ReasonPhrase = "Bad Request",
+                    Content = new StringContent("""{"error":"Search grounding unavailable"}""", System.Text.Encoding.UTF8, "application/json")
+                };
+            }
+
+            if (body.Contains("Goal-to-Notes Expansion", StringComparison.Ordinal))
+            {
+                return JsonResponse("""
+                    {
+                      "candidates": [{
+                        "content": { "parts": [{ "text": "{\"enhancedTitle\":\"Verify Theme Draft\",\"userStory\":\"As a PM, I want to verify theme rules so that requirements are clear.\",\"discoverySummary\":\"**Objective:** Verify theme criteria.\",\"keyChecklist\":[\"Check announcement\"],\"alternatives\":[{\"angle\":\"Action & Delivery\",\"title\":\"Verify Theme Draft\",\"description\":\"Confirm rules.\"},{\"angle\":\"User Value / Story\",\"title\":\"Support Theme Participation\",\"description\":\"Clarify user criteria.\"},{\"angle\":\"Verification & Scope\",\"title\":\"Audit Theme Dates\",\"description\":\"Verify campaign timeline.\"}]}" }] }
+                      }]
+                    }
+                    """);
+            }
+
+            return JsonResponse("""
+                {
+                  "candidates": [{
+                    "content": { "parts": [{ "text": "{\"title\":\"Verify Theme Draft\",\"description\":\"Standard fallback description without web grounding.\"}" }] }
+                  }]
+                }
+                """);
+        }));
+
+        var workflow = CreateWorkflow(geminiApiClient: new GeminiApiClient(httpClient));
+        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
+        using var output = new StringWriter();
+
+        var ticket = workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _tempDir,
+                PromptFilePath: Path.Combine(repositoryRoot, PromptTemplateService.DefaultPromptFilePath),
+                ApiKey: "AIzaSyLiveSearchWarn1234",
+                ModelName: "gemini-2.5-flash",
+                BacklogTypeInput: "Type02",
+                GoalTitle: "check Geocaching 2026 hiding movie theme",
+                WebSearchGrounding: true,
+                OutputDirectory: _outputDir,
+                NonInteractive: true,
+                GeminiLive: true),
+            new StringReader(string.Empty),
+            output);
+
+        Assert.Equal("Verify Theme Draft", ticket.Title);
+        Assert.Contains("Google Search grounding skipped (HTTP 400 (Bad Request))", output.ToString());
+    }
+
+    [Fact]
+    public void Execute_BareType02GoalOffline_CreativelySynthesizesUserStoryDescriptionAndThreeAlternatives()
+    {
+        var workflow = CreateWorkflow();
+        using var output = new StringWriter();
+
+        var ticket = workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _tempDir,
+                PromptFilePath: _promptFilePath,
+                BacklogTypeInput: "Type02",
+                GoalTitle: "check Geocaching 2026 hiding movie theme",
+                DryRun: true,
+                NonInteractive: true,
+                GeminiLive: false),
+            new StringReader(string.Empty),
+            output);
+
+        Assert.Equal(BacklogType.Type02, ticket.BacklogType);
+        Assert.Equal("Check Geocaching 2026 hiding movie theme", ticket.Title);
+        Assert.NotNull(ticket.Description);
+        Assert.Contains("**Objective:**", ticket.Description);
+        Assert.Contains("**User Story Framing:**", ticket.Description);
+        Assert.DoesNotContain("Not specified in discovery notes", ticket.Description);
+        Assert.Equal(3, ticket.Alternatives?.Count);
+        Assert.Contains("## Title & Description Alternatives", ticket.FormattedMarkdown);
+
+        var consoleText = output.ToString();
+        Assert.Contains("User Story :", consoleText);
+        Assert.Contains("Suggested Title & Description Alternatives", consoleText);
+        Assert.Contains("[1] Action & Delivery", consoleText);
+    }
+
     private static AsIsV1Workflow CreateWorkflow(
         GeminiSecretProvider? secretProvider = null,
         GeminiApiClient? geminiApiClient = null) =>

@@ -17,8 +17,22 @@ public enum AiProviderType
     GoogleGemini = 2,
 
     [Description("Mocked Anthropic Claude API")]
-    AnthropicClaude = 3
+    AnthropicClaude = 3,
+
+    [Description("GitHub Copilot SDK (Agentic Runtime / BYOK)")]
+    GitHubCopilot = 4
 }
+
+/// <summary>
+/// Captures runtime readiness and connection diagnostics for an AI provider.
+/// </summary>
+public sealed record ProviderAvailability(
+    AiProviderType Provider,
+    string Code,
+    string DisplayName,
+    bool IsReady,
+    string Mode,
+    string Detail);
 
 /// <summary>
 /// Indicates how the runtime AI secret key was supplied.
@@ -84,6 +98,14 @@ public sealed record GherkinScenario(
     string Then);
 
 /// <summary>
+/// Represents an alternative enhanced Title &amp; concise Description angle generated from a Goal.
+/// </summary>
+public sealed record DraftAlternative(
+    string Angle,
+    string Title,
+    string Description);
+
+/// <summary>
 /// Outcome produced after collecting raw data, applying the prompt, and validating the result.
 /// </summary>
 public sealed record ProcessedOutcome(
@@ -93,7 +115,8 @@ public sealed record ProcessedOutcome(
     string Title,
     string Description,
     string UserStory,
-    IReadOnlyList<GherkinScenario> Scenarios);
+    IReadOnlyList<GherkinScenario> Scenarios,
+    IReadOnlyList<DraftAlternative>? Alternatives = null);
 
 /// <summary>
 /// Final Jira-ready artifact after human review and backlog type decision.
@@ -105,7 +128,8 @@ public sealed record JiraBacklogTicket(
     string? Description,
     string? UserStory,
     IReadOnlyList<GherkinScenario> AcceptanceCriteria,
-    string FormattedMarkdown);
+    string FormattedMarkdown,
+    IReadOnlyList<DraftAlternative>? Alternatives = null);
 
 /// <summary>
 /// Ergonomic terminal theme styles inspired by contemporary CLI tools (Issue #3 &amp; Issue #5).
@@ -129,4 +153,7 @@ public sealed record CliSettings(
     bool JsonFileOut = false,
     CliThemeStyle Theme = CliThemeStyle.Agy,
     string? ModelName = null,
-    bool? GeminiLive = null);
+    bool? GeminiLive = null,
+    string? CustomInputDirectory = null,
+    string? CustomOutputDirectory = null,
+    AiProviderType? PreferredProvider = null);

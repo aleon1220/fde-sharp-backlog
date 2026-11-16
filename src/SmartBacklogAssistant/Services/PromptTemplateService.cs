@@ -11,6 +11,14 @@ public sealed class PromptTemplateService
     public const string DefaultPromptFilePath = "prompts/as-is-v1-prompt.md";
     public const string Type01PromptFilePath = "prompts/prompt-goal-type01.md";
     public const string Type02PromptFilePath = "prompts/prompt-goal-type02.md";
+    public const string GoalExpandPromptFilePath = "prompts/prompt-goal-expand.md";
+
+    public bool IsBuiltInPromptPath(string? promptFilePath) =>
+        !string.IsNullOrWhiteSpace(promptFilePath) &&
+        (MatchesBuiltInPath(promptFilePath, DefaultPromptFilePath) ||
+         MatchesBuiltInPath(promptFilePath, Type01PromptFilePath) ||
+         MatchesBuiltInPath(promptFilePath, Type02PromptFilePath) ||
+         MatchesBuiltInPath(promptFilePath, GoalExpandPromptFilePath));
 
     public string ResolvePromptFilePath(string promptFilePath, BacklogType backlogType)
     {
@@ -119,5 +127,17 @@ public sealed class PromptTemplateService
         var normalizedFirst = firstPath.Replace('\\', '/').TrimStart('.', '/');
         var normalizedSecond = secondPath.Replace('\\', '/').TrimStart('.', '/');
         return string.Equals(normalizedFirst, normalizedSecond, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MatchesBuiltInPath(string candidatePath, string builtInRelativePath)
+    {
+        if (PathsMatch(candidatePath, builtInRelativePath))
+        {
+            return true;
+        }
+
+        var normalizedCandidate = candidatePath.Replace('\\', '/');
+        var normalizedBuiltIn = builtInRelativePath.Replace('\\', '/').TrimStart('.', '/');
+        return normalizedCandidate.EndsWith("/" + normalizedBuiltIn, StringComparison.OrdinalIgnoreCase);
     }
 }

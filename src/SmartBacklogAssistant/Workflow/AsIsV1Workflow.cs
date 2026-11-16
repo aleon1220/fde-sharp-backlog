@@ -25,10 +25,21 @@ public sealed record WorkflowOptions(
     bool DryRun = false,
     bool ShowDoctorStatus = false,
     bool ShowVersion = false,
-    string? CliTheme = null);
+    string? CliTheme = null,
+    string? GoalContext = null,
+    bool WebSearchGrounding = false,
+    string? RefinementFeedback = null,
+    string? PreviousDraftContext = null,
+    bool? ExpandGoalContext = null);
 
 public sealed class AsIsV1Workflow
 {
+    private const string DefaultGoalExpandFallbackTemplate = """
+        # As-Is v1 — Creative Goal-to-Notes Expansion (Step 1)
+        Apply User Story creation principles (INVEST) and domain creativity to turn this Goal into structured discovery context, an enhanced title, a User Story, a checklist, and 3 intuitive Title & Description alternatives.
+        {{RAW_DATA}}
+        """;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -42,6 +53,7 @@ public sealed class AsIsV1Workflow
     private readonly RuntimeEnvironmentService _runtimeEnvService;
     private readonly GeminiSecretProvider _secretProvider;
     private readonly GeminiApiClient _geminiApiClient;
+    private readonly AiProviderOrchestrator _providerOrchestrator;
 
     public AsIsV1Workflow(
         RawDataCollector collector,
@@ -50,7 +62,8 @@ public sealed class AsIsV1Workflow
         JiraBacklogFormatter formatter,
         RuntimeEnvironmentService? runtimeEnvService = null,
         GeminiSecretProvider? secretProvider = null,
-        GeminiApiClient? geminiApiClient = null)
+        GeminiApiClient? geminiApiClient = null,
+        AiProviderOrchestrator? providerOrchestrator = null)
     {
         _collector = collector ?? throw new ArgumentNullException(nameof(collector));
         _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
@@ -59,16 +72,124 @@ public sealed class AsIsV1Workflow
         _runtimeEnvService = runtimeEnvService ?? new RuntimeEnvironmentService();
         _secretProvider = secretProvider ?? new GeminiSecretProvider();
         _geminiApiClient = geminiApiClient ?? new GeminiApiClient();
+        _providerOrchestrator = providerOrchestrator ?? new AiProviderOrchestrator(_geminiApiClient);
     }
 
     public string? LastSelectedModel { get; private set; }
 
     public string? LastResolvedApiKey { get; private set; }
 
+    public string? LastWebResearchFindings { get; private set; }
+
+    public ProcessedOutcome? LastOutcome { get; private set; }
+
+    public IReadOnlyList<JiraBacklogTicket> LastGeneratedTickets { get; private set; } = [];
+
+    public AiProviderOrchestrator ProviderOrchestrator => _providerOrchestrator;
+
     public IReadOnlyList<GeminiModel> ListGeminiModels(string apiKey) =>
         _geminiApiClient.ListGenerateContentModels(apiKey);
 
+    public IReadOnlyList<CopilotModelDescriptor> ListCopilotModels(string? gitHubToken = null) =>
+        _providerOrchestrator.CopilotGateway.ListModelsAsync(gitHubToken).GetAwaiter().GetResult();
+
     public JiraBacklogTicket Execute(WorkflowOptions options, TextReader input, TextWriter output)
+    {
+        var tickets = ExecuteCore(options, input, output, out _);
+        return tickets[0];
+    }
+
+    public IReadOnlyList<JiraBacklogTicket> ExecuteDraftPreview(
+        WorkflowOptions options,
+        TextReader input,
+        TextWriter output,
+        out ProcessedOutcome outcome)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        return ExecuteCore(
+            options with { DryRun = true, OutputDirectory = null },
+            input,
+            output,
+            out outcome);
+    }
+
+    public IReadOnlyList<JiraBacklogTicket> ReformatOutcome(
+        ProcessedOutcome outcome,
+        string? backlogTypeInput,
+        bool combinedOutput)
+    {
+        ArgumentNullException.ThrowIfNull(outcome);
+
+        var isCombinedType = combinedOutput ||
+                             string.Equals(backlogTypeInput?.Trim(), "both", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(backlogTypeInput?.Trim(), "all", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(backlogTypeInput?.Trim(), "3", StringComparison.OrdinalIgnoreCase);
+
+        if (isCombinedType)
+        {
+            return
+            [
+                _formatter.Format(outcome, BacklogType.Type01),
+                _formatter.Format(outcome, BacklogType.Type02)
+            ];
+        }
+
+        var resolvedType = _formatter.ResolveBacklogType(backlogTypeInput);
+        return [_formatter.Format(outcome, resolvedType)];
+    }
+
+    public void PersistTickets(
+        IReadOnlyList<JiraBacklogTicket> tickets,
+        string outputDirectory,
+        bool jsonFileOut,
+        TextWriter output,
+        string? cliTheme = null)
+    {
+        ArgumentNullException.ThrowIfNull(tickets);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        ArgumentNullException.ThrowIfNull(output);
+
+        var colorWriter = new ConsoleColorWriter(output, theme: ConsoleColorWriter.ResolveTheme(cliTheme));
+        foreach (var ticket in tickets)
+        {
+            SaveTicketArtifacts(ticket, outputDirectory, jsonFileOut, colorWriter);
+        }
+    }
+
+    public static string FormatOutcomeContext(ProcessedOutcome outcome, string? webResearchFindings = null)
+    {
+        ArgumentNullException.ThrowIfNull(outcome);
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"Title: {outcome.Title}");
+        sb.AppendLine($"Description: {outcome.Description}");
+        if (!string.IsNullOrWhiteSpace(outcome.UserStory) &&
+            !outcome.UserStory.Equals("Not specified in discovery notes.", StringComparison.OrdinalIgnoreCase))
+        {
+            sb.AppendLine($"User Story: {outcome.UserStory}");
+        }
+
+        for (var i = 0; i < outcome.Scenarios.Count; i++)
+        {
+            var s = outcome.Scenarios[i];
+            sb.AppendLine($"Scenario {i + 1}: Given {s.Given} | When {s.When} | Then {s.Then}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(webResearchFindings))
+        {
+            sb.AppendLine();
+            sb.AppendLine("Web Research Findings:");
+            sb.AppendLine(webResearchFindings.Trim());
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private IReadOnlyList<JiraBacklogTicket> ExecuteCore(
+        WorkflowOptions options,
+        TextReader input,
+        TextWriter output,
+        out ProcessedOutcome outcome)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(input);
@@ -76,13 +197,33 @@ public sealed class AsIsV1Workflow
 
         if (string.IsNullOrWhiteSpace(options.GoalTitle) && Directory.Exists(options.InputFilePath))
         {
+            var resolveSw = System.Diagnostics.Stopwatch.StartNew();
             var directoryFiles = _collector.GetInputFilesFromDirectory(options.InputFilePath);
-            if (directoryFiles.Count > 1)
+            resolveSw.Stop();
+
+            if (directoryFiles.Count == 0)
             {
-                return ExecuteDirectoryBatch(directoryFiles, options, input, output);
+                throw new FileNotFoundException($"No raw input files (.txt or .md) found in directory '{options.InputFilePath}'.", options.InputFilePath);
+            }
+
+            var batchColor = new ConsoleColorWriter(
+                output,
+                theme: ConsoleColorWriter.ResolveTheme(options.CliTheme));
+
+            if (directoryFiles.Count == 1)
+            {
+                TerminalUx.WriteStepDone(batchColor, "Resolved", $"1 queued input file ({Path.GetFileName(directoryFiles[0])})", resolveSw.Elapsed);
+            }
+            else
+            {
+                TerminalUx.WriteStepDone(batchColor, "Resolved", $"{directoryFiles.Count} queued input files", resolveSw.Elapsed);
+                var batchTicket = ExecuteDirectoryBatch(directoryFiles, options, input, output);
+                outcome = LastOutcome!;
+                return LastGeneratedTickets.Count > 0 ? LastGeneratedTickets : [batchTicket];
             }
         }
 
+        var executionStopwatch = System.Diagnostics.Stopwatch.StartNew();
         var colorWriter = new ConsoleColorWriter(
             output,
             theme: ConsoleColorWriter.ResolveTheme(options.CliTheme));
@@ -99,17 +240,30 @@ public sealed class AsIsV1Workflow
         colorWriter.WriteMuted(_runtimeEnvService.FormatRuntimeBanner(runtimeInfo, initialSecret));
 
         // 1. Local: Collect raw data (either from Goal/Title or from InputFilePath)
+        var collectSw = System.Diagnostics.Stopwatch.StartNew();
         string rawData;
         if (!string.IsNullOrWhiteSpace(options.GoalTitle))
         {
             colorWriter.WriteSubHeader($"[1/5 Local -> Collect] Preparing backlog goal '{options.GoalTitle}'...");
-            rawData = _collector.CollectFromGoal(options.GoalTitle);
+            var hasExtendedGoalContext = !string.IsNullOrWhiteSpace(options.GoalContext) ||
+                                         !string.IsNullOrWhiteSpace(options.PreviousDraftContext) ||
+                                         !string.IsNullOrWhiteSpace(options.RefinementFeedback);
+            rawData = hasExtendedGoalContext
+                ? _collector.CollectFromGoalWithContext(
+                    options.GoalTitle,
+                    details: options.GoalContext,
+                    previousDraftSummary: options.PreviousDraftContext,
+                    refinementInstructions: options.RefinementFeedback)
+                : _collector.CollectFromGoal(options.GoalTitle);
         }
         else
         {
             colorWriter.WriteSubHeader($"[1/5 Local -> Collect] Reading raw data from '{options.InputFilePath}'...");
             rawData = _collector.CollectFromFile(options.InputFilePath);
         }
+
+        collectSw.Stop();
+        TerminalUx.WriteStepDone(colorWriter, "Collected", "raw discovery context", collectSw.Elapsed);
 
         // 2. Local: Process & Inject Secret API Key at Runtime
         var apiKey = initialSecret.ApiKey;
@@ -127,6 +281,10 @@ public sealed class AsIsV1Workflow
         else if (provider == AiProviderType.GoogleGemini)
         {
             apiKey = initialSecret.ApiKey;
+        }
+        else if (provider == AiProviderType.GitHubCopilot)
+        {
+            apiKey = options.ApiKey;
         }
         else if (provider != AiProviderType.ManualPrompt && string.IsNullOrWhiteSpace(apiKey) && !options.NonInteractive)
         {
@@ -160,25 +318,160 @@ public sealed class AsIsV1Workflow
         var selectedPromptPath = _promptService.ResolvePromptFilePath(options.PromptFilePath, promptType);
         var existingSelectedPrompt = _promptService.TryFindExistingPromptPath(selectedPromptPath);
         var existingFallbackPrompt = _promptService.TryFindExistingPromptPath(options.PromptFilePath);
+
+        var modelName = options.ModelName;
+        if (provider == AiProviderType.GoogleGemini && options.GeminiLive == true)
+        {
+            colorWriter.WriteSubHeader("[2/5 Local -> Process] Calling Gemini API to list models supporting generateContent...");
+            var availableModels = TerminalUx.RunWithSpinner(
+                "Discovering compatible Gemini models...",
+                () => _geminiApiClient.ListGenerateContentModels(apiKey!),
+                colorWriter);
+            modelName = SelectGeminiModel(availableModels, modelName, input, output, options.NonInteractive);
+            LastSelectedModel = modelName;
+        }
+        else if (options.GeminiLive == true && provider != AiProviderType.GoogleGemini && provider != AiProviderType.GitHubCopilot && provider != AiProviderType.AzureOpenAi && provider != AiProviderType.AnthropicClaude)
+        {
+            throw new InvalidOperationException("--gemini-live can only be used with live AI providers.");
+        }
+
+        // Optional live Google Search grounding before structured prompt rendering
+        LastWebResearchFindings = null;
+        if (options.WebSearchGrounding)
+        {
+            var searchTopic = BuildWebSearchTopic(options.GoalTitle, options.GoalContext, rawData);
+            if (provider == AiProviderType.GoogleGemini && options.GeminiLive == true)
+            {
+                colorWriter.WriteSubHeader($"[2/5 Local -> Search] Running live Google Search grounding ({modelName})...");
+                var searchSw = System.Diagnostics.Stopwatch.StartNew();
+                var grounding = TerminalUx.RunWithSpinner(
+                    $"Searching web context via Google Search ({modelName})...",
+                    () => _geminiApiClient.GatherWebGrounding(apiKey!, modelName!, searchTopic),
+                    colorWriter);
+                searchSw.Stop();
+
+                if (grounding.Succeeded && !string.IsNullOrWhiteSpace(grounding.Summary))
+                {
+                    var formattedFindings = FormatWebGroundingFindings(grounding);
+                    LastWebResearchFindings = formattedFindings;
+                    rawData = $"{rawData.TrimEnd()}\n\nWeb Research Findings:\n{formattedFindings}";
+                    TerminalUx.WriteStepDone(
+                        colorWriter,
+                        "Grounded",
+                        grounding.Sources.Count > 0
+                            ? $"web research from {grounding.Sources.Count} source(s)"
+                            : "web research summary",
+                        searchSw.Elapsed);
+                }
+                else if (!string.IsNullOrWhiteSpace(grounding.Warning))
+                {
+                    colorWriter.WriteWarning($"  [!] Google Search grounding skipped ({grounding.Warning}); continuing with standard draft.");
+                }
+            }
+            else if (options.GeminiLive == true)
+            {
+                colorWriter.WriteMuted($"  [i] Google Search grounding (--search) runs with Google Gemini Live mode; continuing with {provider}.");
+            }
+        }
+
+        var liveEnabled = options.GeminiLive ?? (provider == AiProviderType.GitHubCopilot);
+        var isProviderLiveForGeneration = provider switch
+        {
+            AiProviderType.GoogleGemini => options.GeminiLive == true,
+            AiProviderType.GitHubCopilot => liveEnabled,
+            AiProviderType.AzureOpenAi or AiProviderType.AnthropicClaude => liveEnabled,
+            _ => false
+        };
+
+        GoalExpansionResult? capturedExpansion = null;
+        var isBareGoalDraft = GoalExpansionSynthesizer.IsBareGoalWithoutDiscoveryNotes(options.GoalTitle, rawData);
+        var hasNoPreviousDraft = string.IsNullOrWhiteSpace(options.PreviousDraftContext);
+        var shouldExpandLive = isBareGoalDraft &&
+                               hasNoPreviousDraft &&
+                               isProviderLiveForGeneration &&
+                               (options.ExpandGoalContext ?? _promptService.IsBuiltInPromptPath(options.PromptFilePath));
+
+        if (shouldExpandLive)
+        {
+            var expandPromptPath = _promptService.TryFindExistingPromptPath(PromptTemplateService.GoalExpandPromptFilePath);
+            var renderedExpandPrompt = expandPromptPath is not null
+                ? _promptService.LoadAndRenderPrompt(expandPromptPath, rawData)
+                : _promptService.RenderPromptFromTemplate(DefaultGoalExpandFallbackTemplate, rawData);
+
+            var expandModelLabel = provider switch
+            {
+                AiProviderType.GoogleGemini => modelName ?? RuntimeEnvironmentService.DefaultGeminiModel,
+                AiProviderType.GitHubCopilot => modelName ?? RuntimeEnvironmentService.DefaultCopilotModel,
+                _ => modelName ?? provider.ToString()
+            };
+
+            if (provider is AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot)
+            {
+                colorWriter.WriteSubHeader($"[2/5 Local -> Expand] Expanding goal with INVEST User Story principles ({expandModelLabel})...");
+            }
+
+            var expandSw = System.Diagnostics.Stopwatch.StartNew();
+            var expansionGen = provider is AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot
+                ? TerminalUx.RunWithSpinner(
+                    $"Synthesizing User Story framing & 3 title alternatives ({expandModelLabel})...",
+                    () => _providerOrchestrator.GenerateGoalExpansion(new MultiProviderGenerationRequest(
+                        Provider: provider,
+                        RenderedPrompt: renderedExpandPrompt,
+                        BacklogType: promptType,
+                        ApiKey: apiKey,
+                        ModelName: modelName,
+                        LiveEnabled: true,
+                        WorkingDirectory: options.WorkspaceRoot)),
+                    colorWriter)
+                : _providerOrchestrator.GenerateGoalExpansion(new MultiProviderGenerationRequest(
+                    Provider: provider,
+                    RenderedPrompt: renderedExpandPrompt,
+                    BacklogType: promptType,
+                    ApiKey: apiKey,
+                    ModelName: modelName,
+                    LiveEnabled: liveEnabled,
+                    WorkingDirectory: options.WorkspaceRoot));
+            expandSw.Stop();
+
+            if (expansionGen.UsedLiveProvider && !string.IsNullOrWhiteSpace(expansionGen.GeneratedContent))
+            {
+                try
+                {
+                    capturedExpansion = _orchestrator.ParseGoalExpansionResponse(expansionGen.GeneratedContent, options.GoalTitle!);
+                    rawData = GoalExpansionSynthesizer.MergeExpansionIntoRawData(rawData, capturedExpansion, includeSyntheticGwt: false);
+                    TerminalUx.WriteStepDone(
+                        colorWriter,
+                        "Expanded",
+                        $"goal brief & {capturedExpansion.Alternatives.Count} alternatives ({expansionGen.ResolvedModel ?? expandModelLabel})",
+                        expandSw.Elapsed);
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    colorWriter.WriteWarning("  [!] Goal expansion response was not valid JSON; using deterministic creative synthesis.");
+                    capturedExpansion = GoalExpansionSynthesizer.ExpandOffline(options.GoalTitle!, options.GoalContext, LastWebResearchFindings);
+                    rawData = GoalExpansionSynthesizer.MergeExpansionIntoRawData(rawData, capturedExpansion, includeSyntheticGwt: false);
+                }
+            }
+            else if (!expansionGen.UsedLiveProvider)
+            {
+                capturedExpansion = GoalExpansionSynthesizer.ExpandOffline(options.GoalTitle!, options.GoalContext, LastWebResearchFindings);
+                rawData = GoalExpansionSynthesizer.MergeExpansionIntoRawData(rawData, capturedExpansion, includeSyntheticGwt: true);
+            }
+        }
+        else if (isBareGoalDraft &&
+                 hasNoPreviousDraft &&
+                 !isProviderLiveForGeneration &&
+                 (options.ExpandGoalContext ?? true))
+        {
+            capturedExpansion = GoalExpansionSynthesizer.ExpandOffline(options.GoalTitle!, options.GoalContext, LastWebResearchFindings);
+            rawData = GoalExpansionSynthesizer.MergeExpansionIntoRawData(rawData, capturedExpansion, includeSyntheticGwt: true);
+        }
+
         var renderedPrompt = existingSelectedPrompt is not null
             ? _promptService.LoadAndRenderPrompt(existingSelectedPrompt, rawData)
             : existingFallbackPrompt is not null
                 ? _promptService.LoadAndRenderPrompt(existingFallbackPrompt, rawData)
                 : _promptService.RenderPromptFromTemplate("# Practical Process As-Is v1\nAnalyze the following raw notes:\n{{RAW_DATA}}", rawData);
-
-        var modelName = options.ModelName;
-        if (options.GeminiLive == true)
-        {
-            if (provider != AiProviderType.GoogleGemini)
-            {
-                throw new InvalidOperationException("--gemini-live can only be used with the Gemini provider.");
-            }
-
-            colorWriter.WriteSubHeader("[2/5 Local -> Process] Calling Gemini API to list models supporting generateContent...");
-            var availableModels = _geminiApiClient.ListGenerateContentModels(apiKey!);
-            modelName = SelectGeminiModel(availableModels, modelName, input, output, options.NonInteractive);
-            LastSelectedModel = modelName;
-        }
 
         if (provider == AiProviderType.ManualPrompt)
         {
@@ -190,17 +483,115 @@ public sealed class AsIsV1Workflow
 
         // 3. Local: Generate & Validate outcome
         string? generatedContent = null;
-        if (options.GeminiLive == true)
+
+        if (provider == AiProviderType.GoogleGemini && options.GeminiLive == true)
         {
             colorWriter.WriteSubHeader($"[2/5 Local -> Process] Calling Google Gemini API ({modelName}) with '{Path.GetFileName(existingSelectedPrompt ?? selectedPromptPath)}'...");
-            generatedContent = _geminiApiClient.GenerateContent(apiKey!, modelName!, BuildGeminiPrompt(renderedPrompt, promptType));
+            var aiSw = System.Diagnostics.Stopwatch.StartNew();
+            var generationResult = TerminalUx.RunWithSpinner(
+                $"Generating {promptType} draft via Google Gemini ({modelName})...",
+                () => _providerOrchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+                    Provider: provider,
+                    RenderedPrompt: renderedPrompt,
+                    BacklogType: promptType,
+                    ApiKey: apiKey,
+                    ModelName: modelName,
+                    LiveEnabled: true,
+                    WorkingDirectory: options.WorkspaceRoot)),
+                colorWriter);
+            aiSw.Stop();
+            generatedContent = generationResult.GeneratedContent;
+            modelName = generationResult.ResolvedModel ?? modelName;
+            TerminalUx.WriteStepDone(colorWriter, "Generated", $"structured {promptType} draft via {modelName}", aiSw.Elapsed);
         }
         else if (provider == AiProviderType.GoogleGemini)
         {
             colorWriter.WriteMuted("[2/5 Local -> Process] Live Gemini API is OFF; using the local deterministic draft.");
         }
+        else if (provider == AiProviderType.GitHubCopilot)
+        {
+            var effectiveModel = modelName ?? RuntimeEnvironmentService.DefaultCopilotModel;
+            if (liveEnabled)
+            {
+                colorWriter.WriteSubHeader($"[2/5 Local -> Process] Calling GitHub Copilot SDK ({effectiveModel}) with '{Path.GetFileName(existingSelectedPrompt ?? selectedPromptPath)}'...");
+                var aiSw = System.Diagnostics.Stopwatch.StartNew();
+                var generationResult = TerminalUx.RunWithSpinner(
+                    $"Generating {promptType} draft via GitHub Copilot SDK ({effectiveModel})...",
+                    () => _providerOrchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+                        Provider: AiProviderType.GitHubCopilot,
+                        RenderedPrompt: renderedPrompt,
+                        BacklogType: promptType,
+                        ApiKey: apiKey,
+                        ModelName: effectiveModel,
+                        LiveEnabled: true,
+                        WorkingDirectory: options.WorkspaceRoot)),
+                    colorWriter);
+                aiSw.Stop();
+                generatedContent = generationResult.GeneratedContent;
+                modelName = generationResult.ResolvedModel ?? effectiveModel;
+                LastSelectedModel = modelName;
+                TerminalUx.WriteStepDone(colorWriter, "Generated", $"structured {promptType} draft via Copilot SDK ({modelName})", aiSw.Elapsed);
+            }
+            else
+            {
+                colorWriter.WriteMuted("[2/5 Local -> Process] Offline mode active; using local deterministic draft.");
+            }
+        }
+        else if (provider is AiProviderType.AzureOpenAi or AiProviderType.AnthropicClaude)
+        {
+            var byokSw = System.Diagnostics.Stopwatch.StartNew();
+            var generationResult = _providerOrchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+                Provider: provider,
+                RenderedPrompt: renderedPrompt,
+                BacklogType: promptType,
+                ApiKey: apiKey,
+                ModelName: modelName,
+                LiveEnabled: liveEnabled,
+                WorkingDirectory: options.WorkspaceRoot));
+            byokSw.Stop();
+            generatedContent = generationResult.GeneratedContent;
+            modelName = generationResult.ResolvedModel ?? modelName;
+            if (generationResult.UsedLiveProvider)
+            {
+                TerminalUx.WriteStepDone(colorWriter, "Generated", $"structured {promptType} draft via {provider} ({modelName})", byokSw.Elapsed);
+            }
+        }
 
-        var outcome = _orchestrator.Process(rawData, renderedPrompt, provider, apiKey, generatedContent, modelName, promptType);
+        if (generatedContent is null &&
+            capturedExpansion is null &&
+            isBareGoalDraft &&
+            hasNoPreviousDraft &&
+            (options.ExpandGoalContext ?? true))
+        {
+            capturedExpansion = GoalExpansionSynthesizer.ExpandOffline(options.GoalTitle!, options.GoalContext, LastWebResearchFindings);
+            rawData = GoalExpansionSynthesizer.MergeExpansionIntoRawData(rawData, capturedExpansion, includeSyntheticGwt: true);
+        }
+
+        outcome = _orchestrator.Process(rawData, renderedPrompt, provider, apiKey, generatedContent, modelName, promptType);
+        if (capturedExpansion is not null)
+        {
+            var resolvedAlternatives = outcome.Alternatives is { Count: > 0 }
+                ? outcome.Alternatives
+                : capturedExpansion.Alternatives;
+            var resolvedUserStory = string.IsNullOrWhiteSpace(outcome.UserStory) ||
+                                    outcome.UserStory.Equals("Not specified in discovery notes.", StringComparison.OrdinalIgnoreCase)
+                ? capturedExpansion.UserStory
+                : outcome.UserStory;
+
+            outcome = outcome with
+            {
+                Alternatives = resolvedAlternatives,
+                UserStory = resolvedUserStory
+            };
+        }
+        else if (isBareGoalDraft && outcome.Alternatives is not { Count: > 0 })
+        {
+            outcome = outcome with
+            {
+                Alternatives = GoalExpansionSynthesizer.BuildFallbackAlternatives(outcome.Title, outcome.Description, outcome.UserStory)
+            };
+        }
+
         colorWriter.WriteMuted(outcome.GuidanceMessage);
         colorWriter.WriteSuccess("[3/5 Local -> Validate] Outcome validated successfully.");
 
@@ -208,16 +599,22 @@ public sealed class AsIsV1Workflow
         output.WriteLine();
         colorWriter.WriteHeader("[4/5 Review -> Review Outcome]");
         output.WriteLine($"  Title      : {outcome.Title}");
-        output.WriteLine($"  Description: {outcome.Description}");
-        if (!string.IsNullOrWhiteSpace(outcome.UserStory))
+        WriteIndentedField(output, "  Description: ", outcome.Description);
+        if (!string.IsNullOrWhiteSpace(outcome.UserStory) &&
+            (isCombinedType || backlogType != BacklogType.Type02 || !outcome.UserStory.Equals("Not specified in discovery notes.", StringComparison.OrdinalIgnoreCase)))
         {
-            output.WriteLine($"  User Story : {outcome.UserStory}");
+            WriteIndentedField(output, "  User Story : ", outcome.UserStory);
         }
 
-        foreach (var scenario in outcome.Scenarios)
+        if (isCombinedType || backlogType != BacklogType.Type02)
         {
-            output.WriteLine($"  Scenario   : Given {scenario.Given} | When {scenario.When} | Then {scenario.Then}");
+            foreach (var scenario in outcome.Scenarios)
+            {
+                output.WriteLine($"  Scenario   : Given {scenario.Given} | When {scenario.When} | Then {scenario.Then}");
+            }
         }
+
+        RenderAlternativesBox(colorWriter, outcome.Alternatives);
 
         IReadOnlyList<JiraBacklogTicket> tickets = isCombinedType
             ? [
@@ -247,7 +644,75 @@ public sealed class AsIsV1Workflow
             }
         }
 
-        return tickets[0];
+        LastOutcome = outcome;
+        LastGeneratedTickets = tickets;
+
+        executionStopwatch.Stop();
+        TerminalUx.WriteStepDone(
+            colorWriter,
+            options.DryRun ? "Previewed" : "Completed",
+            $"{tickets.Count} Jira item(s) ('{tickets[0].Title}')",
+            executionStopwatch.Elapsed);
+
+        return tickets;
+    }
+
+    private static string BuildWebSearchTopic(string? goalTitle, string? goalContext, string rawData)
+    {
+        var baseLine = !string.IsNullOrWhiteSpace(goalTitle)
+            ? goalTitle.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? goalTitle
+            : rawData.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? rawData;
+
+        if (baseLine.StartsWith("Goal:", StringComparison.OrdinalIgnoreCase))
+        {
+            baseLine = baseLine["Goal:".Length..].Trim();
+        }
+        else if (baseLine.StartsWith("Title:", StringComparison.OrdinalIgnoreCase))
+        {
+            baseLine = baseLine["Title:".Length..].Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(goalContext))
+        {
+            return $"{baseLine}\nFocus / Scope: {goalContext.Trim()}";
+        }
+
+        return baseLine;
+    }
+
+    private static string FormatWebGroundingFindings(GeminiWebGroundingResult grounding)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine(grounding.Summary.Trim());
+        if (grounding.Sources.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Verified Web Sources:");
+            foreach (var source in grounding.Sources.Take(5))
+            {
+                sb.AppendLine($"- {source.Title}: {source.Uri}");
+            }
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private static void WriteIndentedField(TextWriter output, string labelPrefix, string value)
+    {
+        var normalized = value.Replace("\r\n", "\n");
+        if (!normalized.Contains('\n'))
+        {
+            output.WriteLine($"{labelPrefix}{normalized}");
+            return;
+        }
+
+        var lines = normalized.Split('\n');
+        var indent = new string(' ', labelPrefix.Length);
+        output.WriteLine($"{labelPrefix}{lines[0]}");
+        for (var i = 1; i < lines.Length; i++)
+        {
+            output.WriteLine(string.IsNullOrWhiteSpace(lines[i]) ? string.Empty : $"{indent}{lines[i]}");
+        }
     }
 
     private JiraBacklogTicket ExecuteDirectoryBatch(
@@ -258,6 +723,7 @@ public sealed class AsIsV1Workflow
     {
         var currentOptions = baseOptions;
         JiraBacklogTicket? lastTicket = null;
+        var batchStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         foreach (var filePath in files)
         {
@@ -270,6 +736,10 @@ public sealed class AsIsV1Workflow
                 BacklogTypeInput = currentOptions.BacklogTypeInput ?? (lastTicket.BacklogType == BacklogType.Type02 ? "Type02" : "Type01")
             };
         }
+
+        batchStopwatch.Stop();
+        var colorWriter = new ConsoleColorWriter(output, theme: ConsoleColorWriter.ResolveTheme(baseOptions.CliTheme));
+        TerminalUx.WriteStepDone(colorWriter, "Processed", $"{files.Count} file(s)", batchStopwatch.Elapsed);
 
         return lastTicket!;
     }
@@ -368,15 +838,6 @@ public sealed class AsIsV1Workflow
         return (flashModel ?? availableModels[0]).ModelId;
     }
 
-    private static string BuildGeminiPrompt(string renderedPrompt, BacklogType backlogType)
-    {
-        var responseContract = backlogType == BacklogType.Type02
-            ? "Return only a JSON object with string properties `title` and `description`. Do not include a user story or acceptance criteria."
-            : "Return only a JSON object with string properties `title`, `description`, `userStory`, and a `scenarios` array containing `given`, `when`, and `then`.";
-
-        return $"{renderedPrompt.Trim()}\n\n{responseContract} Do not include Markdown fences or commentary.";
-    }
-
     public JiraBacklogTicket ExecuteQuickGoal(
         string goalOrTitle,
         string? backlogTypeInput,
@@ -429,5 +890,29 @@ public sealed class AsIsV1Workflow
             colorWriter.WriteSuccess($"Saved Jira JSON to    : {jsonPath}");
             colorWriter.WriteMuted($"Ready-to-add JSON     : {slugJsonPath}");
         }
+    }
+
+    internal static void RenderAlternativesBox(ConsoleColorWriter colorWriter, IReadOnlyList<DraftAlternative>? alternatives)
+    {
+        if (alternatives is not { Count: > 0 })
+        {
+            return;
+        }
+
+        var borderColor = colorWriter.GetSubHeaderColor();
+        var keyColor = colorWriter.GetOptionKeyColor();
+        colorWriter.WriteLine();
+        colorWriter.WriteLineColored("  ╭─ Suggested Title & Description Alternatives (User Story Framing) ────────", borderColor);
+        for (var i = 0; i < alternatives.Count; i++)
+        {
+            var alt = alternatives[i];
+            colorWriter.WriteColored("  │  ", borderColor);
+            colorWriter.WriteColored($"[{i + 1}] {alt.Angle}", keyColor);
+            colorWriter.WriteLineColored($": {alt.Title}", ConsoleColor.White);
+            colorWriter.WriteColored("  │      ", borderColor);
+            colorWriter.WriteMuted(alt.Description);
+        }
+
+        colorWriter.WriteLineColored("  ╰──────────────────────────────────────────────────────────────────────────", borderColor);
     }
 }

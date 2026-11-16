@@ -27,6 +27,8 @@ public sealed class ConsoleColorWriter
 
     public TextWriter InnerWriter => _output;
 
+    public bool IsColorEnabled => _useConsoleColor;
+
     public CliThemeStyle Theme { get; set; }
 
     public static CliThemeStyle ResolveTheme(string? themeInput, CliThemeStyle fallback = CliThemeStyle.Agy)
@@ -122,21 +124,44 @@ public sealed class ConsoleColorWriter
         _output.WriteLine();
     }
 
-    private ConsoleColor GetHeaderColor() => Theme switch
+    public void WriteMenuOptionWithSlash(
+        string key,
+        string label,
+        string? description,
+        string slashCommand,
+        int labelWidth = 22,
+        int descWidth = 49)
+    {
+        WriteColored($"  [{key}] ", GetOptionKeyColor());
+        WriteColored(label.PadRight(labelWidth), ConsoleColor.White);
+        if (!string.IsNullOrWhiteSpace(description))
+        {
+            WriteColored($"— {description}".PadRight(descWidth), ConsoleColor.DarkGray);
+        }
+        else
+        {
+            WriteColored(string.Empty.PadRight(descWidth), ConsoleColor.DarkGray);
+        }
+
+        WriteColored($" ({slashCommand})", GetSubHeaderColor());
+        _output.WriteLine();
+    }
+
+    public ConsoleColor GetHeaderColor() => Theme switch
     {
         CliThemeStyle.Uv => ConsoleColor.Magenta,
         CliThemeStyle.Kubectl => ConsoleColor.Blue,
         _ => ConsoleColor.Cyan
     };
 
-    private ConsoleColor GetSubHeaderColor() => Theme switch
+    public ConsoleColor GetSubHeaderColor() => Theme switch
     {
         CliThemeStyle.Uv => ConsoleColor.Cyan,
         CliThemeStyle.Kubectl => ConsoleColor.DarkCyan,
         _ => ConsoleColor.Blue
     };
 
-    private ConsoleColor GetOptionKeyColor() => Theme switch
+    public ConsoleColor GetOptionKeyColor() => Theme switch
     {
         CliThemeStyle.Uv => ConsoleColor.Green,
         CliThemeStyle.Kubectl => ConsoleColor.Cyan,

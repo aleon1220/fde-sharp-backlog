@@ -83,6 +83,47 @@ public sealed class WorkspacePathServiceTests : IDisposable
         Assert.Equal(expected, WorkspacePathService.CreateSlug(input));
     }
 
+    [Fact]
+    public void ApplySettings_WithCustomDirectories_OverridesInputAndOutputPaths()
+    {
+        var sut = new WorkspacePathService(environmentReader: _ => null);
+        var baseDirs = sut.Resolve(customWorkspaceRoot: _tempRoot);
+        var customIn = Path.Combine(_tempRoot, "custom-in");
+        var customOut = Path.Combine(_tempRoot, "custom-out");
+        var settings = new SmartBacklogAssistant.Domain.CliSettings(
+            CustomInputDirectory: customIn,
+            CustomOutputDirectory: customOut);
+
+        var applied = sut.ApplySettings(baseDirs, settings);
+
+        Assert.Equal(WorkspacePathService.NormalizePathForOs(customIn, baseDirs.IsWindows), applied.InputDirectory);
+        Assert.Equal(WorkspacePathService.NormalizePathForOs(customOut, baseDirs.IsWindows), applied.OutputDirectory);
+    }
+
+    [Fact]
+    public void ResolveInputTarget_ResolvesAllSingleFileAndMention_AndThrowsOnMissing()
+    {
+        var sut = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = sut.Resolve(customWorkspaceRoot: _tempRoot);
+        Directory.CreateDirectory(dirs.InputDirectory);
+        var notePath = Path.Combine(dirs.InputDirectory, "Sprint-Notes.md");
+        File.WriteAllText(notePath, "Title: Sprint Notes");
+
+        Assert.Equal(dirs.InputDirectory, sut.ResolveInputTarget("all", dirs));
+        Assert.Equal(notePath, sut.ResolveInputTarget("sprint-notes.md", dirs));
+        Assert.Equal(notePath, sut.ResolveInputTarget("@Sprint-Notes.md", dirs));
+        Assert.Equal(notePath, sut.ResolveInputTarget("./in/Sprint-Notes.md", dirs));
+        Assert.Null(sut.TryResolveContextFile("@does-not-exist.md", dirs));
+        Assert.Throws<FileNotFoundException>(() => sut.ResolveInputTarget("missing-note.txt", dirs));
+    }
+
+    [Fact]
+    public void FormatCompactLabel_ReturnsDefaultWhenUnchangedAndCompactSuffixWhenOverridden()
+    {
+        Assert.Equal("./in", WorkspacePathService.FormatCompactLabel("/mnt/c/workspace/smart-backlog-assistant/in", "/mnt/c/workspace/smart-backlog-assistant/in", "./in"));
+        Assert.Equal(".../project/custom-in", WorkspacePathService.FormatCompactLabel("/home/user/project/custom-in", "/mnt/c/workspace/smart-backlog-assistant/in", "./in"));
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_tempRoot))

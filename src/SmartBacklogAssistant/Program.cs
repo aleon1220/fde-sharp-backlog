@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using SmartBacklogAssistant.Domain;
 using SmartBacklogAssistant.Services;
 using SmartBacklogAssistant.Workflow;
 
@@ -5,47 +7,119 @@ namespace SmartBacklogAssistant;
 
 public static class Program
 {
-    public static int Main(string[] args)
+    private static readonly HashSet<string> ValueFlags = new(StringComparer.OrdinalIgnoreCase)
     {
+        "--workspace", "-w",
+        "--input", "-i",
+        "--prompt", "-p",
+        "--provider",
+        "--api-key",
+        "--type", "-t",
+        "--output-dir",
+        "--output", "-o",
+        "--model", "-m",
+        "--goal", "--title",
+        "--details", "-d", "--context", "-c",
+        "--theme",
+        "--in",
+        "--out"
+    };
+
+    private static readonly HashSet<string> OptionalBoolValueFlags = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "--json",
+        "--json-out",
+        "--json-file-out",
+        "--live"
+    };
+
+    public static int Main(string[] args) =>
+        Execute(args, Console.In, Console.Out, Console.Error);
+
+    public static int Execute(
+        string[] args,
+        TextReader input,
+        TextWriter output,
+        TextWriter error)
+    {
+        ArgumentNullException.ThrowIfNull(args);
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(output);
+        ArgumentNullException.ThrowIfNull(error);
+
         try
         {
-            if (args.Contains("--help", StringComparer.OrdinalIgnoreCase) ||
-                args.Contains("-h", StringComparer.OrdinalIgnoreCase))
+            var options = ParseArgs(args);
+
+            if (HasAnyFlag(args, "--help", "-h") || options.Subcommand == "help")
             {
-                PrintHelp(Console.Out);
+                var helpTarget = options.Subcommand == "help"
+                    ? ExtractSubcommandHelpTarget(args)
+                    : options.Subcommand;
+                PrintHelp(output, helpTarget);
                 return 0;
             }
 
-            var options = ParseArgs(args);
             var runtimeEnvService = new RuntimeEnvironmentService();
             var secretProvider = new GeminiSecretProvider();
             var geminiApiClient = new GeminiApiClient();
             var workspaceService = new WorkspacePathService();
             var settingsService = new CliSettingsService();
-            var orchestrator = new AiModelOrchestrator();
+            var modelOrchestrator = new AiModelOrchestrator();
+            var providerOrchestrator = new AiProviderOrchestrator(geminiApiClient);
+            var diagnosticService = new WorkspaceDiagnosticService(
+                workspaceService,
+                runtimeEnvService,
+                secretProvider,
+                settingsService,
+                modelOrchestrator,
+                providerOrchestrator);
 
             if (options.ShowVersion)
             {
                 var info = runtimeEnvService.Inspect();
-                Console.WriteLine($"SmartBacklogAssistant v{info.BuildVersion} ({info.BuildConfiguration}) | {info.FrameworkDescription} | {info.OsPlatform} ({info.ProcessArchitecture})");
+                output.WriteLine($"SmartBacklogAssistant v{info.BuildVersion} ({info.BuildConfiguration}) | {info.FrameworkDescription} | {info.OsPlatform} ({info.ProcessArchitecture})");
                 return 0;
+            }
+
+            if (options.Subcommand == "config")
+            {
+                return RunConfigCommand(
+                    args,
+                    options,
+                    workspaceService,
+                    settingsService,
+                    diagnosticService,
+                    modelOrchestrator,
+                    output);
             }
 
             if (options.ShowDoctorStatus)
             {
-                return RunDoctorStatus(options, runtimeEnvService, secretProvider, workspaceService, settingsService, orchestrator, Console.Out);
+                return RunDoctorStatus(
+                    options,
+                    runtimeEnvService,
+                    secretProvider,
+                    workspaceService,
+                    settingsService,
+                    modelOrchestrator,
+                    output,
+                    providerOrchestrator);
             }
 
             if (options.ListGeminiModels)
             {
-                var secret = secretProvider.ResolveOrPrompt(options.ApiKey, Console.In, Console.Out, options.NonInteractive);
-                var models = geminiApiClient.ListGenerateContentModels(secret.ApiKey!);
-                foreach (var model in models)
-                {
-                    Console.WriteLine($"{model.ModelId}\t{model.DisplayName}\t{model.Description}");
-                }
-
-                return 0;
+                return RunModelsCommand(
+                    options,
+                    workspaceService,
+                    settingsService,
+                    modelOrchestrator,
+                    providerOrchestrator,
+                    secretProvider,
+                    geminiApiClient,
+                    diagnosticService,
+                    input,
+                    output);
             }
 
             var collector = new RawDataCollector();
@@ -55,11 +129,12 @@ public static class Program
             var workflow = new AsIsV1Workflow(
                 collector,
                 promptService,
-                orchestrator,
+                modelOrchestrator,
                 formatter,
                 runtimeEnvService,
                 secretProvider,
-                geminiApiClient);
+                geminiApiClient,
+                providerOrchestrator);
 
             if (ShouldLaunchMenu(args, options))
             {
@@ -68,21 +143,23 @@ public static class Program
                     workspaceService,
                     runtimeEnvService,
                     secretProvider,
-                    orchestrator,
-                    settingsService);
+                    modelOrchestrator,
+                    settingsService,
+                    diagnosticService);
 
-                return menuRunner.Run(options, Console.In, Console.Out);
+                return menuRunner.Run(options, input, output);
             }
 
-            // Direct / headless execution: resolve workspace in/out directories and persisted settings
-            var resolvedOptions = ResolveDirectExecutionOptions(args, options, workspaceService, settingsService);
-            workflow.Execute(resolvedOptions, Console.In, Console.Out);
+            // Direct / headless execution (uv-style one-shot subcommands or explicit flags)
+            var resolvedOptions = ResolveDirectExecutionOptions(args, options, workspaceService, settingsService, collector);
+            workflow.Execute(resolvedOptions, input, output);
             return 0;
         }
         catch (Exception ex)
         {
-            var errorWriter = new ConsoleColorWriter(Console.Error);
-            errorWriter.WriteError($"Error: {ex.Message}");
+            var theme = ConsoleColorWriter.ResolveTheme(GetArgValue(args, "--theme"));
+            var errorWriter = new ConsoleColorWriter(error, theme: theme);
+            TerminalUx.WriteActionableError(errorWriter, ex);
             return 1;
         }
     }
@@ -101,33 +178,37 @@ public static class Program
         var workspaceRoot = GetArgValue(args, "--workspace", "-w");
         var goalTitle = GetArgValue(args, "--goal")
             ?? GetArgValue(args, "--title")
-            ?? (subcommand is "draft" or "add" ? subcommandArg : null);
-        if (subcommand is "run" or "process" && !string.IsNullOrWhiteSpace(subcommandArg) && !HasAnyFlag(args, "--input", "-i"))
+            ?? (subcommand == "draft" ? subcommandArg : null);
+        var goalContext = GetArgValue(args, "--details", "-d", "--context", "-c");
+        var webSearch = HasAnyFlag(args, "--search", "--web");
+
+        if (subcommand == "run" && !string.IsNullOrWhiteSpace(subcommandArg) && !HasAnyFlag(args, "--input", "-i"))
         {
             inputPath = subcommandArg;
         }
 
-        var nonInteractive = args.Contains("--non-interactive", StringComparer.OrdinalIgnoreCase);
-        var forceMenu = args.Contains("--menu", StringComparer.OrdinalIgnoreCase) || subcommand is "menu" or "tui";
+        var nonInteractive = HasFlag(args, "--non-interactive");
+        var forceMenu = HasFlag(args, "--menu") || subcommand == "menu";
         var (jsonFileOut, outputFormatCombined) = ParseOutputAndJsonFlags(args);
         var combinedOutput = outputFormatCombined ||
-                             args.Contains("--combined", StringComparer.OrdinalIgnoreCase) ||
+                             HasFlag(args, "--combined") ||
                              string.Equals(backlogType?.Trim(), "both", StringComparison.OrdinalIgnoreCase) ||
                              string.Equals(backlogType?.Trim(), "all", StringComparison.OrdinalIgnoreCase);
-        bool? geminiLive = args.Contains("--offline", StringComparer.OrdinalIgnoreCase)
+
+        bool? geminiLive = HasFlag(args, "--offline")
             ? false
-            : args.Contains("--gemini-live", StringComparer.OrdinalIgnoreCase) ||
-              args.Contains("--live", StringComparer.OrdinalIgnoreCase)
+            : HasFlag(args, "--gemini-live")
                 ? true
-                : null;
-        var listGeminiModels = args.Contains("--list-models", StringComparer.OrdinalIgnoreCase) || subcommand is "models";
-        var dryRun = args.Contains("--dry-run", StringComparer.OrdinalIgnoreCase);
-        var showDoctorStatus = args.Contains("--doctor", StringComparer.OrdinalIgnoreCase) ||
-                               args.Contains("--status", StringComparer.OrdinalIgnoreCase) ||
-                               subcommand is "doctor" or "status";
-        var showVersion = args.Contains("--version", StringComparer.OrdinalIgnoreCase) ||
-                          args.Contains("-v", StringComparer.OrdinalIgnoreCase) ||
-                          subcommand is "version";
+                : ParseOptionalBoolFlag(args, "--live");
+
+        var listGeminiModels = HasFlag(args, "--list-models") || subcommand == "models";
+        var dryRun = HasFlag(args, "--dry-run") || HasFlag(args, "--preview");
+        var showDoctorStatus = HasFlag(args, "--doctor") ||
+                               HasFlag(args, "--status") ||
+                               subcommand == "doctor";
+        var showVersion = HasFlag(args, "--version") ||
+                          HasFlag(args, "-v") ||
+                          subcommand == "version";
         var cliTheme = GetArgValue(args, "--theme");
 
         return new WorkflowOptions(
@@ -150,7 +231,9 @@ public static class Program
             DryRun: dryRun,
             ShowDoctorStatus: showDoctorStatus,
             ShowVersion: showVersion,
-            CliTheme: cliTheme);
+            CliTheme: cliTheme,
+            GoalContext: goalContext,
+            WebSearchGrounding: webSearch);
     }
 
     public static bool ShouldLaunchMenu(string[] args, WorkflowOptions options)
@@ -160,7 +243,11 @@ public static class Program
             return true;
         }
 
-        if (options.NonInteractive || options.ShowDoctorStatus || options.ShowVersion || options.ListGeminiModels)
+        if (options.NonInteractive ||
+            options.ShowDoctorStatus ||
+            options.ShowVersion ||
+            options.ListGeminiModels ||
+            options.Subcommand is "config" or "help")
         {
             return false;
         }
@@ -175,8 +262,10 @@ public static class Program
             HasAnyFlag(args, "--output-dir", "-o", "--output") ||
             HasAnyFlag(args, "--type", "-t") ||
             HasAnyFlag(args, "--goal", "--title") ||
+            HasAnyFlag(args, "--details", "-d", "--context", "-c", "--search", "--web") ||
             HasAnyFlag(args, "--gemini-live", "--live", "--offline") ||
-            HasAnyFlag(args, "--list-models", "--dry-run", "--combined");
+            HasAnyFlag(args, "--list-models", "--dry-run", "--preview", "--combined") ||
+            HasAnyFlag(args, "--json", "--json-out", "--no-json", "--no-json-out");
 
         return !hasDirectWorkflowFlag;
     }
@@ -188,111 +277,502 @@ public static class Program
         WorkspacePathService workspaceService,
         CliSettingsService settingsService,
         AiModelOrchestrator orchestrator,
+        TextWriter output,
+        AiProviderOrchestrator? providerOrchestrator = null)
+    {
+        var diagnosticService = new WorkspaceDiagnosticService(
+            workspaceService,
+            runtimeEnvService,
+            secretProvider,
+            settingsService,
+            orchestrator,
+            providerOrchestrator);
+
+        return diagnosticService.RenderStatusTable(options, output);
+    }
+
+    public static int RunConfigCommand(
+        string[] args,
+        WorkflowOptions options,
+        WorkspacePathService workspaceService,
+        CliSettingsService settingsService,
+        WorkspaceDiagnosticService diagnosticService,
+        AiModelOrchestrator orchestrator,
+        TextWriter output)
+    {
+        var sw = Stopwatch.StartNew();
+        var baseWorkspace = workspaceService.Resolve(options.WorkspaceRoot);
+        var currentSettings = settingsService.Load(baseWorkspace);
+        var color = new ConsoleColorWriter(
+            output,
+            theme: ConsoleColorWriter.ResolveTheme(options.CliTheme, currentSettings.Theme));
+
+        var hasResetFlag = HasFlag(args, "--reset");
+        var updated = currentSettings;
+        var changed = false;
+
+        if (hasResetFlag)
+        {
+            updated = new CliSettings();
+            changed = true;
+        }
+        else
+        {
+            if (TryParseStrictConfigBoolFlag(args, "--json", "--json-out", "--json-file-out", "--no-json", "--no-json-out", out var jsonSetting))
+            {
+                updated = updated with { JsonFileOut = jsonSetting };
+                changed = true;
+            }
+
+            if (TryGetRequiredFlagValue(args, out var inValue, "--in"))
+            {
+                updated = updated with
+                {
+                    CustomInputDirectory = inValue.Equals("default", StringComparison.OrdinalIgnoreCase) ||
+                                           inValue.Equals("reset", StringComparison.OrdinalIgnoreCase)
+                        ? null
+                        : workspaceService.ResolveCustomOrRelativePath(inValue, baseWorkspace.IsWindows)
+                };
+                changed = true;
+            }
+
+            if (TryGetRequiredFlagValue(args, out var outValue, "--out"))
+            {
+                updated = updated with
+                {
+                    CustomOutputDirectory = outValue.Equals("default", StringComparison.OrdinalIgnoreCase) ||
+                                            outValue.Equals("reset", StringComparison.OrdinalIgnoreCase)
+                        ? null
+                        : workspaceService.ResolveCustomOrRelativePath(outValue, baseWorkspace.IsWindows)
+                };
+                changed = true;
+            }
+
+            if (TryGetRequiredFlagValue(args, out var themeValue, "--theme"))
+            {
+                if (!IsValidThemeToken(themeValue))
+                {
+                    throw new ArgumentException($"Invalid CLI theme '{themeValue}'. Valid values: agy, uv, kubectl.");
+                }
+
+                updated = updated with { Theme = ConsoleColorWriter.ResolveTheme(themeValue, updated.Theme) };
+                color.Theme = updated.Theme;
+                changed = true;
+            }
+
+            if (TryParseStrictConfigBoolFlag(args, "--live", "--gemini-live", null, "--offline", null, out var liveSetting))
+            {
+                updated = updated with { GeminiLive = liveSetting };
+                changed = true;
+            }
+
+            if (TryGetRequiredFlagValue(args, out var providerValue, "--provider"))
+            {
+                updated = updated with { PreferredProvider = orchestrator.ResolveProvider(providerValue) };
+                changed = true;
+            }
+
+            if (TryGetRequiredFlagValue(args, out var modelValue, "--model", "-m"))
+            {
+                updated = updated with
+                {
+                    ModelName = modelValue.Equals("auto", StringComparison.OrdinalIgnoreCase) ||
+                                modelValue.Equals("default", StringComparison.OrdinalIgnoreCase)
+                        ? null
+                        : modelValue.Trim()
+                };
+                changed = true;
+            }
+        }
+
+        if (!changed)
+        {
+            var currentActiveWorkspace = workspaceService.ApplySettings(baseWorkspace, currentSettings);
+            diagnosticService.RenderConfigSummary(baseWorkspace, currentActiveWorkspace, currentSettings, color);
+            return 0;
+        }
+
+        var savedPath = settingsService.Save(baseWorkspace, updated);
+        var activeWorkspace = workspaceService.ApplySettings(baseWorkspace, updated);
+        Directory.CreateDirectory(activeWorkspace.InputDirectory);
+        Directory.CreateDirectory(activeWorkspace.OutputDirectory);
+
+        sw.Stop();
+        TerminalUx.WriteStepDone(color, "Saved", $"workspace settings to '{savedPath}'", sw.Elapsed);
+        diagnosticService.RenderConfigSummary(baseWorkspace, activeWorkspace, updated, color);
+        return 0;
+    }
+
+    private static int RunModelsCommand(
+        WorkflowOptions options,
+        WorkspacePathService workspaceService,
+        CliSettingsService settingsService,
+        AiModelOrchestrator modelOrchestrator,
+        AiProviderOrchestrator providerOrchestrator,
+        GeminiSecretProvider secretProvider,
+        GeminiApiClient geminiApiClient,
+        WorkspaceDiagnosticService diagnosticService,
+        TextReader input,
         TextWriter output)
     {
         var workspace = workspaceService.Resolve(options.WorkspaceRoot);
         var settings = settingsService.Load(workspace);
-        var resolvedTheme = ConsoleColorWriter.ResolveTheme(options.CliTheme, settings.Theme);
-        var color = new ConsoleColorWriter(output, theme: resolvedTheme);
-        var provider = string.IsNullOrWhiteSpace(options.ProviderInput)
-            ? Domain.AiProviderType.GoogleGemini
-            : orchestrator.ResolveProvider(options.ProviderInput);
-        var runtimeInfo = runtimeEnvService.Inspect(provider, options.ModelName);
-        var secret = secretProvider.Resolve(options.ApiKey);
+        var color = new ConsoleColorWriter(output, theme: ConsoleColorWriter.ResolveTheme(options.CliTheme, settings.Theme));
+        var activeProvider = diagnosticService.ResolveEffectiveProvider(options, settings);
 
-        color.WriteHeader("Smart Backlog Assistant — Environment & Workspace Readiness (doctor)");
-        color.WriteMuted(runtimeEnvService.FormatRuntimeBanner(runtimeInfo, secret));
-        color.WriteLine();
-
-        var promptExists = File.Exists(options.PromptFilePath);
-        var inputFiles = workspaceService.GetInputFiles(workspace.InputDirectory);
-        var effectiveJsonOut = options.JsonFileOut ?? settings.JsonFileOut;
-
-        color.WriteSuccess($"  [✓] Runtime         : {runtimeInfo.FrameworkDescription} on {runtimeInfo.OsPlatform} ({runtimeInfo.ProcessArchitecture})");
-        color.WriteSuccess($"  [✓] CLI Theme       : {ConsoleColorWriter.FormatThemeDisplay(resolvedTheme)}");
-        color.WriteSuccess($"  [✓] Active Model    : {runtimeInfo.EnabledAiModel}");
-        if (secret.IsConfigured)
+        if (activeProvider == AiProviderType.GitHubCopilot)
         {
-            color.WriteSuccess($"  [✓] Gemini API Key  : {secret.SourceDetail} [{secret.MaskedKey}]");
-        }
-        else
-        {
-            color.WriteWarning($"  [!] Gemini API Key  : Not set in OS/CLI (obtain from {secret.KeyPortalUrl})");
+            var sw = Stopwatch.StartNew();
+            var copilotModels = TerminalUx.RunWithSpinner(
+                "Discovering GitHub Copilot SDK models...",
+                () => providerOrchestrator.CopilotGateway.ListModelsAsync(options.ApiKey).GetAwaiter().GetResult(),
+                color);
+            sw.Stop();
+            TerminalUx.WriteStepDone(color, "Listed", $"{copilotModels.Count} GitHub Copilot SDK model(s)", sw.Elapsed);
+            foreach (var model in copilotModels)
+            {
+                output.WriteLine($"{model.Id}\t{model.Name}");
+            }
+
+            return 0;
         }
 
-        if (promptExists)
+        var gemSw = Stopwatch.StartNew();
+        var secret = secretProvider.ResolveOrPrompt(options.ApiKey, input, output, options.NonInteractive);
+        var models = TerminalUx.RunWithSpinner(
+            "Discovering compatible Gemini models...",
+            () => geminiApiClient.ListGenerateContentModels(secret.ApiKey!),
+            color);
+        gemSw.Stop();
+        TerminalUx.WriteStepDone(color, "Listed", $"{models.Count} Gemini model(s)", gemSw.Elapsed);
+
+        foreach (var model in models)
         {
-            color.WriteSuccess($"  [✓] Prompt Template : {options.PromptFilePath}");
-        }
-        else
-        {
-            color.WriteWarning($"  [!] Prompt Template : '{options.PromptFilePath}' not found (will use built-in fallback)");
+            output.WriteLine($"{model.ModelId}\t{model.DisplayName}\t{model.Description}");
         }
 
-        color.WriteSuccess($"  [✓] Workspace Root  : {workspace.WorkspaceRoot}");
-        color.WriteSuccess($"  [✓] Input Directory : {workspace.InputDirectory} ({inputFiles.Count} queued file(s))");
-        color.WriteSuccess($"  [✓] Output Directory: {workspace.OutputDirectory} (Export: {(effectiveJsonOut ? ".md + .json" : ".md only")})");
         return 0;
+    }
+
+    public static void PrintHelp(TextWriter output, string? subcommand = null)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        var color = new ConsoleColorWriter(output);
+
+        switch (subcommand?.ToLowerInvariant())
+        {
+            case "run" or "process":
+                color.WriteHeader("Process Discovery Files (uv-style headless runner)");
+                color.WriteMuted("USAGE: backlog process [all | <filename>] [OPTIONS]");
+                output.WriteLine();
+                output.WriteLine("ARGUMENTS:");
+                output.WriteLine("  all | <filename>      Process all queued files in ./in (default), or a specific file / @mention");
+                output.WriteLine();
+                output.WriteLine("OPTIONS:");
+                output.WriteLine("  -t, --type <01|02|both> Jira format: Type01 (Given/When/Then), Type02 (Title+Desc), or both (default: 01)");
+                output.WriteLine("  --dry-run, --preview    Preview extracted Jira items without writing to disk");
+                output.WriteLine("  --json [on|off]         Enable .json + .md dual export for this run");
+                output.WriteLine("  --no-json               Write .md artifacts only for this run");
+                output.WriteLine("  -i, --input <path>      Explicit input file or directory override");
+                output.WriteLine("  --output-dir <path>     Explicit output directory override");
+                output.WriteLine("  --provider <name>       AI provider: gemini, copilot-sdk, azure, claude, manual");
+                output.WriteLine("  -m, --model <name>      Target model ID override");
+                output.WriteLine("  --offline               Use local deterministic draft without live API calls");
+                output.WriteLine("  -w, --workspace <path>  Workspace root override");
+                output.WriteLine();
+                output.WriteLine("EXAMPLES:");
+                output.WriteLine("  backlog process all --dry-run");
+                output.WriteLine("  backlog process notes.txt --type both --json");
+                output.WriteLine("  backlog process all --provider copilot-sdk --offline");
+                return;
+
+            case "draft":
+                color.WriteHeader("Draft Backlog Item from Goal or Title");
+                color.WriteMuted("USAGE: backlog draft \"<Goal or Title>\" [OPTIONS]");
+                output.WriteLine();
+                output.WriteLine("BEHAVIOR:");
+                output.WriteLine("  When given only a Goal/Title (without @file notes), automatically expands via User Story");
+                output.WriteLine("  principles (prompts/prompt-goal-expand.md) to enhance Title, synthesize Description/Story,");
+                output.WriteLine("  and suggest 3 concise Title & Description alternatives.");
+                output.WriteLine();
+                output.WriteLine("OPTIONS:");
+                output.WriteLine("  -t, --type <01|02|both>    Type01 (User Story + GWT), Type02 (Schedule Item), or both (default: 01)");
+                output.WriteLine("  -d, --details <text>       Additional context, scope constraints, or information to include");
+                output.WriteLine("  --search, --web            Run live Google Search grounding first (Gemini Live mode)");
+                output.WriteLine("  --preview, --dry-run       Preview generated Jira draft in terminal without writing files");
+                output.WriteLine("  --json [on|off]            Write .json alongside .md output");
+                output.WriteLine("  --provider <name>          AI provider: gemini, copilot-sdk, azure, claude, manual");
+                output.WriteLine("  -m, --model <name>         Target model ID override");
+                output.WriteLine("  --offline                  Draft deterministically without live API calls");
+                output.WriteLine();
+                output.WriteLine("EXAMPLES:");
+                output.WriteLine("  backlog draft \"Implement OAuth2 PKCE Login\" --type 01 --preview");
+                output.WriteLine("  backlog draft \"Check Geocaching 2026 hiding movie theme\" -t 02 -d \"Include rules and dates\" --search");
+                output.WriteLine("  backlog draft \"Migrate Redis Cache\" --type both --json");
+                return;
+
+            case "config":
+                color.WriteHeader("View or Persist Workspace Configuration");
+                color.WriteMuted("USAGE: backlog config [OPTIONS]");
+                output.WriteLine();
+                output.WriteLine("OPTIONS:");
+                output.WriteLine("  --json <on|off>         Enable/disable persistent .json + .md dual export");
+                output.WriteLine("  --in <path|default>     Set custom input directory (./in) or reset to default");
+                output.WriteLine("  --out <path|default>    Set custom output directory (./out) or reset to default");
+                output.WriteLine("  --provider <name>       Set default AI provider (gemini, copilot-sdk, azure, claude, manual)");
+                output.WriteLine("  -m, --model <name|auto> Pin a model ID or reset to automatic selection");
+                output.WriteLine("  --live <on|off>         Enable/disable live AI generation by default");
+                output.WriteLine("  --theme <agy|uv|kubectl> Set interactive CLI theme palette");
+                output.WriteLine("  --show                  Display current settings summary");
+                output.WriteLine("  --reset                 Reset settings.json back to defaults");
+                output.WriteLine();
+                output.WriteLine("EXAMPLES:");
+                output.WriteLine("  backlog config --json on --in ./in --out ./out");
+                output.WriteLine("  backlog config --provider copilot-sdk --theme uv");
+                return;
+
+            case "doctor":
+                color.WriteHeader("Workspace & AI Diagnostics");
+                color.WriteMuted("USAGE: backlog status [OPTIONS]");
+                output.WriteLine();
+                output.WriteLine("Displays a diagnostic table of WSL2/Windows resolved paths, queued ./in file count,");
+                output.WriteLine("export mode (.md / .json), active AI model, Gemini API key status, and Copilot SDK runtime readiness.");
+                output.WriteLine();
+                output.WriteLine("OPTIONS:");
+                output.WriteLine("  -w, --workspace <path>  Inspect a custom workspace root");
+                output.WriteLine("  --provider <name>       Inspect readiness with a specific provider selected");
+                output.WriteLine("  --theme <agy|uv|kubectl> Override table color palette");
+                return;
+
+            case "models":
+                color.WriteHeader("List Supported AI Models");
+                color.WriteMuted("USAGE: backlog models [--provider <gemini|copilot-sdk>]");
+                output.WriteLine();
+                output.WriteLine("Lists models available to your active provider (Google Gemini or GitHub Copilot SDK).");
+                return;
+        }
+
+        color.WriteHeader("Smart Backlog Assistant — Hybrid Ergonomic CLI & Interactive REPL");
+        color.WriteMuted("Astral uv subcommands for headless speed + Gemini CLI / Agy REPL for interactive workflows");
+        output.WriteLine();
+        output.WriteLine("USAGE:");
+        output.WriteLine("  backlog [command] [options]");
+        output.WriteLine("  dotnet run --project src/SmartBacklogAssistant -- [command] [options]");
+        output.WriteLine();
+        output.WriteLine("SUBCOMMANDS (Astral uv style):");
+        output.WriteLine("  process [all | <file>]   Process queued ./in files or a specific file (alias: run)");
+        output.WriteLine("  draft \"<Goal or Title>\"  Draft a Type01 User Story and/or Type02 Schedule Item (alias: add)");
+        output.WriteLine("  status                   Show WSL2/Windows paths, queued files, & AI readiness table (alias: doctor)");
+        output.WriteLine("  config                   Configure persisted settings (--json, --in, --out, --provider, --theme)");
+        output.WriteLine("  models                   List available models for the active AI provider");
+        output.WriteLine("  menu | tui               Launch interactive Gemini Agy REPL/TUI (default when no args given)");
+        output.WriteLine("  version                  Print build, .NET runtime, and architecture information");
+        output.WriteLine();
+        output.WriteLine("INTERACTIVE REPL (run with zero arguments):");
+        output.WriteLine("  Supports numbers [0-3], /slash commands (/process, /draft, /settings, /status, /config,");
+        output.WriteLine("  /provider, /models, /theme, /json, /live, /help, /exit), and @filename context mentions.");
+        output.WriteLine();
+        output.WriteLine("AI PROVIDERS (--provider):");
+        output.WriteLine("  gemini (default) | copilot-sdk (GitHub.Copilot.SDK) | azure | claude | manual");
+        output.WriteLine();
+        output.WriteLine("GLOBAL OPTIONS:");
+        output.WriteLine("  -w, --workspace <path>       Workspace root override (c:\\workspace on Win, /mnt/c/workspace on WSL)");
+        output.WriteLine("  -p, --prompt <path>          Markdown prompt template path override");
+        output.WriteLine("  --api-key <key>              Provider API key or GitHub token");
+        output.WriteLine("  -m, --model <name>           Model ID override");
+        output.WriteLine("  -d, --details <text>         Additional context/requirements for goal drafts");
+        output.WriteLine("  --search, --web              Run Google Search grounding on goal drafts (Gemini Live)");
+        output.WriteLine("  --offline / --live           Toggle live AI generation vs local deterministic drafting");
+        output.WriteLine("  --non-interactive            Disable stdin prompts");
+        output.WriteLine("  --theme <agy|uv|kubectl>     CLI color palette");
+        output.WriteLine("  -h, --help                   Show help (run '<command> --help' for command options)");
+        output.WriteLine();
+        output.WriteLine("EXAMPLES:");
+        output.WriteLine("  backlog                                              # Launch Gemini/Agy interactive REPL");
+        output.WriteLine("  backlog process all --dry-run                        # Preview all queued ./in files");
+        output.WriteLine("  backlog draft \"OAuth2 PKCE Login\" -t 01 --preview    # Quick-draft without disk write");
+        output.WriteLine("  backlog config --json on --in ./in --out ./out       # Persist workspace overrides");
+        output.WriteLine("  backlog status                                       # Crisp WSL2/Windows & AI table");
     }
 
     private static (string? Subcommand, string? PositionalArg) ParseSubcommand(string[] args)
     {
-        if (args.Length == 0 || args[0].StartsWith('-'))
+        var positional = new List<string>();
+
+        for (var i = 0; i < args.Length; i++)
+        {
+            var token = args[i];
+            if (ValueFlags.Contains(token))
+            {
+                i++;
+                continue;
+            }
+
+            if (OptionalBoolValueFlags.Contains(token))
+            {
+                if (i + 1 < args.Length && IsBooleanToken(args[i + 1]))
+                {
+                    i++;
+                }
+
+                continue;
+            }
+
+            if (token.StartsWith('-'))
+            {
+                continue;
+            }
+
+            positional.Add(token);
+        }
+
+        if (positional.Count == 0)
         {
             return (null, null);
         }
 
-        var token = args[0].Trim().ToLowerInvariant();
-        var canonical = token switch
-        {
-            "run" or "process" => "run",
-            "draft" or "add" => "draft",
-            "models" => "models",
-            "doctor" or "status" => "doctor",
-            "menu" or "tui" => "menu",
-            "version" => "version",
-            _ => null
-        };
-
+        var canonical = MapSubcommand(positional[0]);
         if (canonical is null)
         {
             return (null, null);
         }
 
-        string? positionalArg = null;
-        if (args.Length > 1 && !args[1].StartsWith('-'))
-        {
-            positionalArg = args[1].Trim();
-        }
+        var remaining = positional.Skip(1).Select(t => t.Trim()).Where(t => t.Length > 0).ToArray();
+        var positionalArg = remaining.Length == 0
+            ? null
+            : string.Join(" ", remaining);
 
         return (canonical, positionalArg);
+    }
+
+    private static string? MapSubcommand(string token) => token.Trim().ToLowerInvariant() switch
+    {
+        "run" or "process" => "run",
+        "draft" or "add" => "draft",
+        "config" => "config",
+        "models" => "models",
+        "doctor" or "status" => "doctor",
+        "menu" or "tui" => "menu",
+        "version" => "version",
+        "help" => "help",
+        _ => null
+    };
+
+    private static string? ExtractSubcommandHelpTarget(string[] args)
+    {
+        foreach (var token in args)
+        {
+            if (token.StartsWith('-') || string.Equals(token, "help", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var mapped = MapSubcommand(token);
+            if (mapped is not null)
+            {
+                return mapped;
+            }
+        }
+
+        return null;
     }
 
     private static WorkflowOptions ResolveDirectExecutionOptions(
         string[] args,
         WorkflowOptions options,
         WorkspacePathService workspaceService,
-        CliSettingsService settingsService)
+        CliSettingsService settingsService,
+        RawDataCollector collector)
     {
-        var workspace = workspaceService.Resolve(options.WorkspaceRoot);
-        var persistedSettings = settingsService.Load(workspace);
+        var baseWorkspace = workspaceService.Resolve(options.WorkspaceRoot);
+        var persistedSettings = settingsService.Load(baseWorkspace);
+        var workspace = workspaceService.ApplySettings(baseWorkspace, persistedSettings);
+
+        if (string.Equals(
+            workspace.InputDirectory.TrimEnd('\\', '/'),
+            baseWorkspace.InputDirectory.TrimEnd('\\', '/'),
+            StringComparison.OrdinalIgnoreCase))
+        {
+            workspaceService.EnsureDirectoriesExist(baseWorkspace);
+        }
+        else
+        {
+            Directory.CreateDirectory(workspace.InputDirectory);
+            Directory.CreateDirectory(workspace.OutputDirectory);
+        }
+
         var effectiveJsonOut = options.JsonFileOut ?? persistedSettings.JsonFileOut;
         var effectiveTheme = options.CliTheme ?? ConsoleColorWriter.GetThemeCode(persistedSettings.Theme);
-        workspaceService.EnsureDirectoriesExist(workspace);
+        var effectiveProvider = options.ProviderInput ??
+            (persistedSettings.PreferredProvider is { } preferred
+                ? RuntimeEnvironmentService.FormatProviderCode(preferred)
+                : null);
 
-        var hasExplicitInput = HasAnyFlag(args, "--input", "-i") ||
-                               options.Subcommand == "run" && !string.IsNullOrWhiteSpace(GetSubcommandInput(args));
-        var inputPath = hasExplicitInput
-            ? WorkspacePathService.NormalizePathForOs(options.InputFilePath, workspace.IsWindows)
-            : workspace.InputDirectory;
+        string inputPath;
+        if (HasAnyFlag(args, "--input", "-i"))
+        {
+            inputPath = workspaceService.TryResolveContextFile(options.InputFilePath, workspace)
+                ?? WorkspacePathService.NormalizePathForOs(options.InputFilePath, workspace.IsWindows);
+        }
+        else if (options.Subcommand == "run")
+        {
+            var positionalTarget = GetPositionalTargetForSubcommand(args);
+            inputPath = workspaceService.ResolveInputTarget(positionalTarget ?? "all", workspace);
+        }
+        else
+        {
+            inputPath = workspace.InputDirectory;
+        }
+
         var outputDir = HasFlag(args, "--output-dir") && !string.IsNullOrWhiteSpace(options.OutputDirectory)
             ? workspaceService.ResolveCustomOrRelativePath(options.OutputDirectory, workspace.IsWindows)
             : workspace.OutputDirectory;
+
+        var goalTitle = options.GoalTitle;
+        var goalContext = options.GoalContext;
+        var webSearch = options.WebSearchGrounding;
+
+        if (!string.IsNullOrWhiteSpace(goalTitle))
+        {
+            var parsedGoal = RawDataCollector.ParseInlineGoalModifiers(goalTitle);
+            goalTitle = parsedGoal.GoalExpression;
+            if (!string.IsNullOrWhiteSpace(parsedGoal.InlineDetails))
+            {
+                goalContext = string.IsNullOrWhiteSpace(goalContext)
+                    ? parsedGoal.InlineDetails
+                    : $"{parsedGoal.InlineDetails}\n{goalContext.Trim()}";
+            }
+
+            webSearch = webSearch || parsedGoal.EnableWebSearch;
+        }
+
+        if (options.Subcommand == "draft" && string.IsNullOrWhiteSpace(goalTitle))
+        {
+            throw new ArgumentException("Missing goal or title for 'draft'. Usage: backlog draft \"<Goal or Title>\" [--type <01|02|both>] [--details <text>] [--search] [--preview]");
+        }
+
+        if (!string.IsNullOrWhiteSpace(goalTitle) && goalTitle.Contains('@'))
+        {
+            goalTitle = ResolveGoalMentions(goalTitle, workspace, workspaceService, collector);
+        }
+
+        // One-shot uv-style subcommands default to Type01 when -t/--type is omitted so they never block stdin.
+        var effectiveBacklogType = options.BacklogTypeInput;
+        if (string.IsNullOrWhiteSpace(effectiveBacklogType) &&
+            options.Subcommand is "run" or "draft")
+        {
+            effectiveBacklogType = "Type01";
+        }
 
         return options with
         {
             InputFilePath = inputPath,
             OutputDirectory = outputDir,
+            GoalTitle = goalTitle,
+            GoalContext = goalContext,
+            WebSearchGrounding = webSearch,
+            BacklogTypeInput = effectiveBacklogType,
+            ProviderInput = effectiveProvider,
             JsonFileOut = effectiveJsonOut,
             CliTheme = effectiveTheme,
             ModelName = options.ModelName ?? persistedSettings.ModelName,
@@ -300,9 +780,56 @@ public static class Program
         };
     }
 
-    private static string? GetSubcommandInput(string[] args)
+    private static string ResolveGoalMentions(
+        string goalTitle,
+        WorkspaceDirectories workspace,
+        WorkspacePathService workspaceService,
+        RawDataCollector collector)
     {
-        return args.Length > 1 && !args[1].StartsWith('-') ? args[1] : null;
+        var tokens = goalTitle.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var attached = new List<string>();
+        var remaining = new List<string>();
+
+        foreach (var token in tokens)
+        {
+            if (token.StartsWith('@') && token.Length > 1)
+            {
+                var file = workspaceService.TryResolveContextFile(token, workspace);
+                if (file is not null)
+                {
+                    attached.Add(file);
+                    continue;
+                }
+            }
+
+            remaining.Add(token);
+        }
+
+        if (attached.Count == 0)
+        {
+            return goalTitle;
+        }
+
+        var headline = remaining.Count > 0
+            ? string.Join(" ", remaining)
+            : Path.GetFileNameWithoutExtension(attached[0]);
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"Goal: {headline}");
+        foreach (var file in attached)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"--- Context (@{Path.GetFileName(file)}) ---");
+            sb.AppendLine(collector.CollectFromFile(file));
+        }
+
+        return sb.ToString().TrimEnd();
+    }
+
+    private static string? GetPositionalTargetForSubcommand(string[] args)
+    {
+        var (_, arg) = ParseSubcommand(args);
+        return arg;
     }
 
     private static (bool? JsonFileOut, bool CombinedTypes) ParseOutputAndJsonFlags(string[] args)
@@ -334,27 +861,20 @@ public static class Program
     {
         for (var i = 0; i < args.Length; i++)
         {
-            if (string.Equals(args[i], "--no-json-out", StringComparison.OrdinalIgnoreCase) ||
+            if (string.Equals(args[i], "--no-json", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(args[i], "--no-json-out", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(args[i], "--no-json-file-out", StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }
 
-            if (string.Equals(args[i], "--json-out", StringComparison.OrdinalIgnoreCase) ||
+            if (string.Equals(args[i], "--json", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(args[i], "--json-out", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(args[i], "--json-file-out", StringComparison.OrdinalIgnoreCase))
             {
-                if (i + 1 < args.Length && !args[i + 1].StartsWith('-'))
+                if (i + 1 < args.Length && TryParseBooleanToken(args[i + 1], out var parsed))
                 {
-                    var nextVal = args[i + 1].Trim().ToLowerInvariant();
-                    if (nextVal is "true" or "on" or "1" or "yes")
-                    {
-                        return true;
-                    }
-
-                    if (nextVal is "false" or "off" or "0" or "no")
-                    {
-                        return false;
-                    }
+                    return parsed;
                 }
 
                 return true;
@@ -364,10 +884,115 @@ public static class Program
         return null;
     }
 
-    private static bool HasFlag(string[] args, string flag)
+    private static bool? ParseOptionalBoolFlag(string[] args, string flag)
     {
-        return args.Contains(flag, StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < args.Length; i++)
+        {
+            if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase))
+            {
+                if (i + 1 < args.Length && TryParseBooleanToken(args[i + 1], out var parsed))
+                {
+                    return parsed;
+                }
+
+                return true;
+            }
+        }
+
+        return null;
     }
+
+    private static bool TryParseStrictConfigBoolFlag(
+        string[] args,
+        string primaryFlag,
+        string? aliasFlag1,
+        string? aliasFlag2,
+        string? negativeFlag1,
+        string? negativeFlag2,
+        out bool result)
+    {
+        for (var i = 0; i < args.Length; i++)
+        {
+            var token = args[i];
+            if ((negativeFlag1 is not null && token.Equals(negativeFlag1, StringComparison.OrdinalIgnoreCase)) ||
+                (negativeFlag2 is not null && token.Equals(negativeFlag2, StringComparison.OrdinalIgnoreCase)))
+            {
+                result = false;
+                return true;
+            }
+
+            if (token.Equals(primaryFlag, StringComparison.OrdinalIgnoreCase) ||
+                (aliasFlag1 is not null && token.Equals(aliasFlag1, StringComparison.OrdinalIgnoreCase)) ||
+                (aliasFlag2 is not null && token.Equals(aliasFlag2, StringComparison.OrdinalIgnoreCase)))
+            {
+                if (i + 1 < args.Length && !args[i + 1].StartsWith('-'))
+                {
+                    if (!TryParseBooleanToken(args[i + 1], out result))
+                    {
+                        throw new ArgumentException($"Invalid boolean value '{args[i + 1]}' for '{token}'. Use 'on' or 'off'.");
+                    }
+
+                    return true;
+                }
+
+                result = true;
+                return true;
+            }
+        }
+
+        result = false;
+        return false;
+    }
+
+    private static bool TryGetRequiredFlagValue(string[] args, out string value, params string[] flags)
+    {
+        for (var i = 0; i < args.Length; i++)
+        {
+            foreach (var flag in flags)
+            {
+                if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (i + 1 >= args.Length || string.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1].StartsWith('-'))
+                    {
+                        throw new ArgumentException($"Missing value for '{flag}'.");
+                    }
+
+                    value = args[i + 1];
+                    return true;
+                }
+            }
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static bool IsBooleanToken(string token) =>
+        TryParseBooleanToken(token, out _);
+
+    private static bool TryParseBooleanToken(string token, out bool value)
+    {
+        switch (token.Trim().ToLowerInvariant())
+        {
+            case "on" or "true" or "1" or "yes":
+                value = true;
+                return true;
+            case "off" or "false" or "0" or "no":
+                value = false;
+                return true;
+            default:
+                value = false;
+                return false;
+        }
+    }
+
+    private static bool IsValidThemeToken(string token) =>
+        token.Trim().ToLowerInvariant() is "1" or "agy" or "gemini" or "gemini-agy" or "default"
+            or "2" or "uv" or "astral" or "astral-uv"
+            or "3" or "kubectl" or "k8s" or "kube";
+
+    private static bool HasFlag(string[] args, string flag) =>
+        args.Contains(flag, StringComparer.OrdinalIgnoreCase);
 
     private static bool HasAnyFlag(string[] args, params string[] flags)
     {
@@ -396,51 +1021,5 @@ public static class Program
         }
 
         return null;
-    }
-
-    private static void PrintHelp(TextWriter output)
-    {
-        var color = new ConsoleColorWriter(output);
-        color.WriteHeader("Smart Backlog Assistant — Ergonomic CLI & TUI for AI-First Backlog Generation");
-        color.WriteMuted("Inspired by Gemini CLI (agy), Astral uv, and kubectl");
-        output.WriteLine();
-        output.WriteLine("USAGE:");
-        output.WriteLine("  dotnet run --project src/SmartBacklogAssistant -- [command] [options]");
-        output.WriteLine();
-        output.WriteLine("COMMANDS (agy / uv / kubectl style):");
-        output.WriteLine("  menu | tui            Launch interactive colored TUI menu (default when run with no args)");
-        output.WriteLine("  run [file]            Process raw discovery notes from file or workspace './in'");
-        output.WriteLine("  draft <goal>          Quick-draft a Jira item directly from a goal/title (alias: add)");
-        output.WriteLine("  models                List Gemini models compatible with generateContent");
-        output.WriteLine("  doctor | status       Run environment, workspace, and Gemini API key readiness check");
-        output.WriteLine("  version               Print build, .NET runtime, and OS architecture version");
-        output.WriteLine();
-        output.WriteLine("WORKSPACE DIRECTORIES (Windows & WSL Compatible):");
-        output.WriteLine(@"  Windows Default Root : c:\workspace\smart-backlog-assistant\{in,out}");
-        output.WriteLine("  WSL Compatible Root  : /mnt/c/workspace/smart-backlog-assistant/{in,out}");
-        output.WriteLine();
-        output.WriteLine("OPTIONS:");
-        output.WriteLine("  --menu                Launch interactive colored CLI menu (default when run interactively)");
-        output.WriteLine("  --theme <agy|uv|kubectl> CLI color theme style (default: agy)");
-        output.WriteLine(@"  -w, --workspace <path> Workspace root override (default: c:\workspace on Windows, /mnt/c/workspace on WSL)");
-        output.WriteLine("  --goal <text>         Quick-add a Goal or Title directly into the output directory");
-        output.WriteLine("  -i, --input <path>    Path to raw discovery notes or input folder (default: samples/raw-notes.txt)");
-        output.WriteLine("  -p, --prompt <path>   Path to Markdown prompt template (default: prompts/as-is-v1-prompt.md)");
-        output.WriteLine("  --provider <name>     AI provider: gemini (default), manual, azure, claude");
-        output.WriteLine("  -m, --model <name>    Gemini model ID (default: best API-supported model or GEMINI_MODEL)");
-        output.WriteLine("  --list-models         List models available to your API key that support generateContent");
-        output.WriteLine("  --gemini-live         Generate the backlog draft through the Gemini API (default)");
-        output.WriteLine("  --offline             Use the local deterministic draft without calling the Gemini API");
-        output.WriteLine("  --api-key <key>       Gemini API key (or set GEMINI_API_KEY / GOOGLE_API_KEY / AI_API_KEY in OS env)");
-        output.WriteLine("                        Obtain a Gemini key from: https://aistudio.google.com/api-keys");
-        output.WriteLine("  -t, --type <01|02|both> Jira backlog type: Type01/01 (Given/When/Then), Type02/02 (Title+Description), or both");
-        output.WriteLine("  --output-dir <path>   Directory for Jira Markdown & JSON output (default: output)");
-        output.WriteLine("  -o, --output <md|json|both> Output artifact format selector (default: md)");
-        output.WriteLine("  --json-out [true|false] Enable writing .json backlog files alongside .md files (default: false / .md only)");
-        output.WriteLine("  --no-json-out         Disable writing .json backlog files (generate .md files only)");
-        output.WriteLine("  --dry-run             Preview generated Jira item in terminal without writing files to disk");
-        output.WriteLine("  --non-interactive     Run without interactive console prompts");
-        output.WriteLine("  -v, --version         Print version information");
-        output.WriteLine("  -h, --help            Show help information");
     }
 }
