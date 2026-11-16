@@ -114,6 +114,210 @@ public sealed partial class WorkspacePathService
     }
 
     /// <summary>
+    /// Applies custom input/output directory overrides from persisted <see cref="Domain.CliSettings"/>.
+    /// </summary>
+    public WorkspaceDirectories ApplySettings(WorkspaceDirectories baseWorkspace, Domain.CliSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(baseWorkspace);
+        ArgumentNullException.ThrowIfNull(settings);
+
+        var inputDir = string.IsNullOrWhiteSpace(settings.CustomInputDirectory)
+            ? baseWorkspace.InputDirectory
+            : ResolveConfiguredDirectory(settings.CustomInputDirectory, baseWorkspace.IsWindows);
+
+        var outputDir = string.IsNullOrWhiteSpace(settings.CustomOutputDirectory)
+            ? baseWorkspace.OutputDirectory
+            : ResolveConfiguredDirectory(settings.CustomOutputDirectory, baseWorkspace.IsWindows);
+
+        return baseWorkspace with
+        {
+            InputDirectory = inputDir,
+            OutputDirectory = outputDir
+        };
+    }
+
+    /// <summary>
+    /// Resolves a process target (<c>all</c>, <c>&lt;filename&gt;</c>, or <c>@filename</c>) against
+    /// cwd, workspace <c>in</c> directory, project root, and <c>samples/</c>.
+    /// </summary>
+    public string ResolveInputTarget(string? target, WorkspaceDirectories workspace)
+    {
+        ArgumentNullException.ThrowIfNull(workspace);
+
+        if (string.IsNullOrWhiteSpace(target) ||
+            string.Equals(target.Trim(), "all", StringComparison.OrdinalIgnoreCase))
+        {
+            return workspace.InputDirectory;
+        }
+
+        var resolved = TryResolveContextFile(target, workspace);
+        if (resolved is not null)
+        {
+            return resolved;
+        }
+
+        var normalized = NormalizePathForOs(target.Trim().TrimStart('@'), workspace.IsWindows);
+        if (Directory.Exists(normalized))
+        {
+            return normalized;
+        }
+
+        throw new FileNotFoundException(
+            $"Input file '{target.Trim()}' was not found in current directory or '{workspace.InputDirectory}'.",
+            target.Trim());
+    }
+
+    /// <summary>
+    /// Attempts to resolve a file path or <c>@filename</c> mention against cwd, workspace <c>./in</c>,
+    /// workspace root, and <c>samples/</c>.
+    /// </summary>
+    public string? TryResolveContextFile(string? mentionOrPath, WorkspaceDirectories workspace)
+    {
+        ArgumentNullException.ThrowIfNull(workspace);
+        if (string.IsNullOrWhiteSpace(mentionOrPath))
+        {
+            return null;
+        }
+
+        var cleaned = mentionOrPath.Trim();
+        if (cleaned.StartsWith('@'))
+        {
+            cleaned = cleaned[1..].Trim();
+        }
+
+        if (string.IsNullOrWhiteSpace(cleaned))
+        {
+            return null;
+        }
+
+        // Handle explicit "./in/<name>" or "in/<name>" shorthand
+        var slashNormalized = cleaned.Replace('\\', '/');
+        if (slashNormalized.StartsWith("./in/", StringComparison.OrdinalIgnoreCase))
+        {
+            var inCandidate = Path.Combine(workspace.InputDirectory, slashNormalized["./in/".Length..]);
+            if (File.Exists(inCandidate))
+            {
+                return inCandidate;
+            }
+        }
+        else if (slashNormalized.StartsWith("in/", StringComparison.OrdinalIgnoreCase))
+        {
+            var inCandidate = Path.Combine(workspace.InputDirectory, slashNormalized["in/".Length..]);
+            if (File.Exists(inCandidate))
+            {
+                return inCandidate;
+            }
+        }
+
+        var osNormalized = NormalizePathForOs(cleaned, workspace.IsWindows);
+        if (File.Exists(osNormalized) || Directory.Exists(osNormalized))
+        {
+            return osNormalized;
+        }
+
+        if (File.Exists(cleaned) || Directory.Exists(cleaned))
+        {
+            return cleaned;
+        }
+
+        var candidates = new[]
+        {
+            Path.Combine(workspace.InputDirectory, osNormalized),
+            Path.Combine(workspace.ProjectRoot, osNormalized),
+            Path.Combine("samples", Path.GetFileName(osNormalized))
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        // Case-insensitive filename match inside workspace InputDirectory
+        var requestedName = Path.GetFileName(osNormalized);
+        if (!string.IsNullOrWhiteSpace(requestedName))
+        {
+            var match = GetInputFiles(workspace.InputDirectory)
+                .FirstOrDefault(f => string.Equals(Path.GetFileName(f), requestedName, StringComparison.OrdinalIgnoreCase));
+            if (match is not null)
+            {
+                return match;
+            }
+        }
+
+        return null;
+    }
+
+    public static string FormatCompactLabel(string activePath, string defaultDirectory, string defaultLabel)
+    {
+        if (string.IsNullOrWhiteSpace(activePath))
+        {
+            return defaultLabel;
+        }
+
+        if (string.Equals(
+            activePath.TrimEnd('\\', '/'),
+            defaultDirectory.TrimEnd('\\', '/'),
+            StringComparison.OrdinalIgnoreCase))
+        {
+            return defaultLabel;
+        }
+
+        var normalized = activePath.Replace('\\', '/').TrimEnd('/');
+        var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length >= 2
+            ? $".../{parts[^2]}/{parts[^1]}"
+            : normalized;
+    }
+
+    public static bool IsWslEnvironment()
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WSL_DISTRO_NAME")) ||
+            !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WSL_INTEROP")))
+        {
+            return true;
+        }
+
+        try
+        {
+            const string procVersion = "/proc/version";
+            if (File.Exists(procVersion))
+            {
+                var content = File.ReadAllText(procVersion);
+                return content.Contains("Microsoft", StringComparison.OrdinalIgnoreCase) ||
+                       content.Contains("WSL", StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        catch (IOException)
+        {
+            // Ignore restricted procfs
+        }
+
+        return false;
+    }
+
+    private string ResolveConfiguredDirectory(string path, bool isWindows)
+    {
+        var trimmed = path.Trim();
+        if (trimmed.StartsWith("./", StringComparison.Ordinal) ||
+            trimmed.StartsWith("../", StringComparison.Ordinal) ||
+            trimmed.StartsWith(".\\", StringComparison.Ordinal) ||
+            trimmed.StartsWith("..\\", StringComparison.Ordinal))
+        {
+            return NormalizePathForOs(Path.GetFullPath(trimmed), isWindows);
+        }
+
+        return NormalizePathForOs(trimmed, isWindows);
+    }
+
+    /// <summary>
     /// Ensures the "smart-backlog-assistant/in" and "smart-backlog-assistant/out" directories exist,
     /// optionally seeding a default discovery note if the "in" directory is empty.
     /// </summary>

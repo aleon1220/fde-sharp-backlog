@@ -93,3 +93,27 @@ graph TD
 * **Prompt Engineering Log:** Document your v1 (monolithic prompt) versus v2 (role-based sequential prompt with structured output schema) to prove iterative prompt refinement.
 * **AI-Assisted Development Evidence:** Include a section detailing how AI tools assisted in generating boilerplate C# records, unit test fixtures, and regex/PDF text sanitization during coding.
 * **Reflection & Future Roadmap:** Discuss what worked well (type-safe structured outputs via `Microsoft.Extensions.AI`) and propose an Evaluator-Optimizer agent loop or MCP server integration as your next iteration.
+
+---
+
+## Step 6: Ergonomic CLI & TUI Standards ([Issue #3](https://github.com/aleon1220/fde-sharp-backlog/issues/3) · [Issue #5](https://github.com/aleon1220/fde-sharp-backlog/issues/5) · [Issue #7](https://github.com/aleon1220/fde-sharp-backlog/issues/7) · [Milestone #1 `release-fde-version`](https://github.com/aleon1220/fde-sharp-backlog/milestone/1))
+
+### 1. Evaluation of Contemporary CLI & TUI Tools
+* **Gemini CLI / Antigravity (`agy`):** Establishes interactive REPL ergonomics with a compact boxed workspace header, `/slash` commands, `@filename` context mentions, and progressive disclosure into submenus without sacrificing zero-config simplicity.
+* **Astral `uv` (Python):** Sets the bar for fast verb-driven subcommands (`process`, `draft`, `status`, `config`, `models`), elapsed step timers (`✓ Resolved ... in 1ms`), non-intrusive Braille progress spinners, actionable error + `hint:` messages, and scannable per-command `--help`.
+* **`kubectl` (Kubernetes CLI):** Establishes predictable resource/verb ergonomics, `-o` / `--output <md|json|both>` / `--json` format flags, `--dry-run` / `--preview` safe previews, and environment pre-flight diagnostics (`status` / `doctor`).
+
+### 2. Ergonomic Terminal Standards & Multi-Provider Orchestration Implemented on `feature/cli-overhaul`
+1. **Astral `uv`-Style Subcommands (Headless Speed):**
+   * `process [all | <file>] [--dry-run] [--json]` (alias `run`): Processes queued `.txt`/`.md` files in `./in` or a targeted file.
+   * `draft "<Goal or Title>" [--type <01|02|both>] [--preview]` (alias `add`): Generates Type `01` (User Story + GWT), Type `02` (Schedule Item), or `both` without blocking stdin.
+   * `status` (alias `doctor`): Renders a crisp, color-coded Unicode table of WSL2/Windows resolved paths, queued `./in` count, export state, Gemini API key status, and AI Provider Matrix.
+   * `config [--json <on|off>] [--in <path>] [--out <path>] [--theme ...] [--provider ...]`: Non-interactively updates persisted workspace settings in `smart-backlog-assistant/settings.json`.
+   * `models` & `version`: Inspects supported models for active provider (`gemini` or `copilot-sdk`) and build metadata.
+2. **Gemini CLI / Agy Interactive REPL & 3-Option Menu State Machine:**
+   * Boxed workspace status header (`In: ./in | Out: ./out | Export: .md (JSON: ON/OFF)`) + provider/live/theme telemetry bar.
+   * Full `/slash` command support (`/process`, `/draft`, `/settings`, `/status`, `/config`, `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`) and `@filename` context mentions.
+   * Settings submenu (`[1..8]`) including `[4]` CLI Theme (`agy`, `uv`, `kubectl`), `[7]` View `settings.json`, and `[8]` Select AI Provider (`gemini`, `copilot-sdk`, `azure`, `claude`, `manual`).
+3. **`GitHub.Copilot.SDK` Multi-Provider Orchestration (`AiProviderOrchestrator`):**
+   * Preserves `GoogleGemini` REST, `ManualPrompt`, `AzureOpenAi`, and `AnthropicClaude` zero-regression pipelines while adding `GitHubCopilot` (`GitHub.Copilot.SDK` `1.0.34`) native session routing and BYOK provider support.
+

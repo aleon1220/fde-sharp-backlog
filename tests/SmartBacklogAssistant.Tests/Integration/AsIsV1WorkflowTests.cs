@@ -42,16 +42,41 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         // User enters Gemini API key when prompted in CLI, then presses Enter for default Type01 (Given/When/Then)
         using var input = new StringReader("AIzaSyCliEnteredKey5566\n\n");
         using var output = new StringWriter();
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(request =>
+            request.Method == HttpMethod.Get
+                ? JsonResponse("""
+                    {
+                      "models": [{
+                        "name": "models/gemini-2.5-flash",
+                        "baseModelId": "gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                      }]
+                    }
+                    """)
+                : JsonResponse("""
+                    {
+                      "candidates": [{
+                        "content": {
+                          "parts": [{
+                            "text": "{\"title\":\"Webhook Retry Policy\",\"description\":\"Retry transient webhook failures.\",\"userStory\":\"As an integration developer, I want retries, so that transient failures do not drop events.\",\"scenarios\":[{\"given\":\"A webhook endpoint returns HTTP 503\",\"when\":\"The delivery attempt fails\",\"then\":\"The event is retried\"}]}"
+                          }]
+                        }
+                      }]
+                    }
+                    """)));
 
         var isolatedSecretProvider = new GeminiSecretProvider(
             environmentReader: _ => null,
             environmentWriter: (_, _) => { });
 
-        var workflow = CreateWorkflow(isolatedSecretProvider);
+        var workflow = CreateWorkflow(isolatedSecretProvider, new GeminiApiClient(httpClient));
         var options = new WorkflowOptions(
             InputFilePath: _inputFilePath,
             PromptFilePath: _promptFilePath,
             OutputDirectory: _outputDir,
+            ModelName: "gemini-2.5-flash",
+            GeminiLive: true,
             NonInteractive: false);
 
         var ticket = workflow.Execute(options, input, output);
@@ -180,6 +205,7 @@ public sealed class AsIsV1WorkflowTests : IDisposable
     [Fact]
     public void Execute_WithGeminiLive_UsesSelectedCompatibleModelAndGeneratedDraft()
     {
+        var requestBody = string.Empty;
         var handler = new StubHttpMessageHandler(request =>
         {
             if (request.Method == HttpMethod.Get)
@@ -196,19 +222,21 @@ public sealed class AsIsV1WorkflowTests : IDisposable
                     """);
             }
 
+                        requestBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
             return JsonResponse("""
                 {
                   "candidates": [{
-                    "content": { "parts": [{ "text": "{\"title\":\"Gemini Draft\",\"description\":\"Created from Gemini\",\"userStory\":\"As a user, I want a generated draft, so that the team can review it.\",\"scenarios\":[{\"given\":\"the user has notes\",\"when\":\"Gemini drafts a backlog item\",\"then\":\"a structured item is returned\"}]}" }] }
+                                        "content": { "parts": [{ "text": "{\"title\":\"Gemini Draft\",\"description\":\"Created from Gemini\"}" }] }
                   }]
                 }
                 """);
         });
         using var httpClient = new HttpClient(handler);
         var workflow = CreateWorkflow(geminiApiClient: new GeminiApiClient(httpClient));
+                var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
         var options = new WorkflowOptions(
             InputFilePath: _inputFilePath,
-            PromptFilePath: _promptFilePath,
+                        PromptFilePath: Path.Combine(repositoryRoot, PromptTemplateService.Type02PromptFilePath),
             ApiKey: "AIzaSyLiveTestKey1234",
             ModelName: "gemini-3.8-flash",
             BacklogTypeInput: "Type02",
@@ -221,6 +249,8 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Equal(BacklogType.Type02, ticket.BacklogType);
         Assert.Equal("Gemini Draft", ticket.Title);
         Assert.Equal("Created from Gemini", ticket.Description);
+        Assert.Contains("Schedule Item (Type 02)", requestBody);
+        Assert.Contains("Do not add a user story", requestBody);
     }
 
     [Fact]
@@ -245,6 +275,242 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Contains("Jira - schedule (Type02)", output.ToString());
         Assert.True(File.Exists(Path.Combine(_outputDir, "type01-webhook-retry-policy.md")));
         Assert.True(File.Exists(Path.Combine(_outputDir, "type02-webhook-retry-policy.md")));
+    }
+
+    [Fact]
+    public void Execute_WithDryRunEnabled_PreviewsTicketWithoutWritingFiles()
+    {
+        using var input = new StringReader(string.Empty);
+        using var output = new StringWriter();
+        var workflow = CreateWorkflow();
+        var options = new WorkflowOptions(
+            InputFilePath: _inputFilePath,
+            PromptFilePath: _promptFilePath,
+            ProviderInput: "manual",
+            BacklogTypeInput: "Type01",
+            OutputDirectory: _outputDir,
+            NonInteractive: true,
+            DryRun: true);
+
+        var ticket = workflow.Execute(options, input, output);
+
+        Assert.Equal(BacklogType.Type01, ticket.BacklogType);
+        Assert.Contains("[Preview / Dry Run]", output.ToString());
+        Assert.False(Directory.Exists(_outputDir));
+    }
+
+    [Fact]
+    public void Execute_WithWebSearchGrounding_InjectsSearchFindingsAndSourcesIntoGeminiDraft()
+    {
+        var capturedPosts = new List<string>();
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get)
+            {
+                return JsonResponse("""
+                    {
+                      "models": [{
+                        "name": "models/gemini-2.5-flash",
+                        "baseModelId": "gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                      }]
+                    }
+                    """);
+            }
+
+            var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            capturedPosts.Add(body);
+
+            if (body.Contains("google_search", StringComparison.Ordinal))
+            {
+                return JsonResponse("""
+                    {
+                      "candidates": [{
+                        "content": { "parts": [{ "text": "- Official Geocaching HQ 2026 hiding movie theme invites cinema-inspired caches." }] },
+                        "groundingMetadata": {
+                          "groundingChunks": [{ "web": { "title": "Geocaching HQ", "uri": "https://www.geocaching.com/blog/" } }]
+                        }
+                      }]
+                    }
+                    """);
+            }
+
+            if (body.Contains("Goal-to-Notes Expansion", StringComparison.Ordinal))
+            {
+                return JsonResponse("""
+                    {
+                      "candidates": [{
+                        "content": {
+                          "parts": [{
+                            "text": "{\"enhancedTitle\":\"Verify & Document Geocaching 2026 Hiding Movie Theme Rules\",\"userStory\":\"As a cache organizer, I want to verify official 2026 movie hiding rules so that our submission qualifies for the campaign.\",\"discoverySummary\":\"**Objective:** Verify official 2026 cinema-inspired hide criteria and dates.\",\"keyChecklist\":[\"Verify Geocaching HQ blog dates\"],\"alternatives\":[{\"angle\":\"Action & Delivery\",\"title\":\"Verify & Document 2026 Movie Theme\",\"description\":\"Audit official campaign guidelines and dates.\"},{\"angle\":\"User Value / Story\",\"title\":\"Guide Hiders on 2026 Movie Theme\",\"description\":\"Help cache owners craft qualifying themed submissions.\"},{\"angle\":\"Verification & Scope\",\"title\":\"Confirm 2026 Movie Souvenir Criteria\",\"description\":\"Review eligibility dates and rule constraints.\"}]}"
+                          }]
+                        }
+                      }]
+                    }
+                    """);
+            }
+
+            return JsonResponse("""
+                {
+                  "candidates": [{
+                    "content": {
+                      "parts": [{
+                        "text": "{\"title\":\"Verify Geocaching 2026 Hiding Movie Theme Campaign\",\"description\":\"Objective: Confirm official 2026 cinema-inspired hide criteria.\\nChecklist:\\n- Verify Geocaching HQ blog dates\",\"alternatives\":[{\"angle\":\"Action & Delivery\",\"title\":\"Verify & Document 2026 Movie Theme\",\"description\":\"Audit official campaign guidelines and dates.\"},{\"angle\":\"User Value / Story\",\"title\":\"Guide Hiders on 2026 Movie Theme\",\"description\":\"Help cache owners craft qualifying themed submissions.\"},{\"angle\":\"Verification & Scope\",\"title\":\"Confirm 2026 Movie Souvenir Criteria\",\"description\":\"Review eligibility dates and rule constraints.\"}]}"
+                      }]
+                    }
+                  }]
+                }
+                """);
+        }));
+
+        var workflow = CreateWorkflow(geminiApiClient: new GeminiApiClient(httpClient));
+        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
+        using var output = new StringWriter();
+
+        var ticket = workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _tempDir,
+                PromptFilePath: Path.Combine(repositoryRoot, PromptTemplateService.DefaultPromptFilePath),
+                ApiKey: "AIzaSyLiveSearchTest1234",
+                ModelName: "gemini-2.5-flash",
+                BacklogTypeInput: "Type02",
+                GoalTitle: "check Geocaching 2026 hiding movie theme",
+                GoalContext: "Verify hiding criteria and dates",
+                WebSearchGrounding: true,
+                OutputDirectory: _outputDir,
+                NonInteractive: true,
+                GeminiLive: true),
+            new StringReader(string.Empty),
+            output);
+
+        Assert.Equal(3, capturedPosts.Count);
+        Assert.Contains("google_search", capturedPosts[0]);
+        Assert.Contains("Goal-to-Notes Expansion", capturedPosts[1]);
+        Assert.Contains("Web Research Findings:", capturedPosts[1]);
+        Assert.Contains("Synthesized Goal Brief (Goal Expansion):", capturedPosts[2]);
+        Assert.Contains("Web Research Findings:", capturedPosts[2]);
+        Assert.Contains("cinema-inspired caches", capturedPosts[2]);
+        Assert.Contains("https://www.geocaching.com/blog/", capturedPosts[2]);
+        Assert.Contains("Goal: check Geocaching 2026 hiding movie theme", capturedPosts[2]);
+        Assert.Contains("Context: Verify hiding criteria and dates", capturedPosts[2]);
+
+        Assert.Equal("Verify Geocaching 2026 Hiding Movie Theme Campaign", ticket.Title);
+        Assert.Contains("cinema-inspired hide criteria", ticket.Description);
+        Assert.Equal(3, ticket.Alternatives?.Count);
+        Assert.Contains("Alternatives", output.ToString());
+        Assert.Contains("User Story", output.ToString());
+        Assert.Contains("web research from 1 source(s)", output.ToString());
+    }
+
+    [Fact]
+    public void Execute_WhenWebSearchGroundingReturnsHttp400_LogsWarningAndCompletesDraft()
+    {
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(request =>
+        {
+            if (request.Method == HttpMethod.Get)
+            {
+                return JsonResponse("""
+                    {
+                      "models": [{
+                        "name": "models/gemini-2.5-flash",
+                        "baseModelId": "gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                      }]
+                    }
+                    """);
+            }
+
+            var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            if (body.Contains("google_search", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.BadRequest)
+                {
+                    ReasonPhrase = "Bad Request",
+                    Content = new StringContent("""{"error":"Search grounding unavailable"}""", System.Text.Encoding.UTF8, "application/json")
+                };
+            }
+
+            if (body.Contains("Goal-to-Notes Expansion", StringComparison.Ordinal))
+            {
+                return JsonResponse("""
+                    {
+                      "candidates": [{
+                        "content": { "parts": [{ "text": "{\"enhancedTitle\":\"Verify Theme Draft\",\"userStory\":\"As a PM, I want to verify theme rules so that requirements are clear.\",\"discoverySummary\":\"**Objective:** Verify theme criteria.\",\"keyChecklist\":[\"Check announcement\"],\"alternatives\":[{\"angle\":\"Action & Delivery\",\"title\":\"Verify Theme Draft\",\"description\":\"Confirm rules.\"},{\"angle\":\"User Value / Story\",\"title\":\"Support Theme Participation\",\"description\":\"Clarify user criteria.\"},{\"angle\":\"Verification & Scope\",\"title\":\"Audit Theme Dates\",\"description\":\"Verify campaign timeline.\"}]}" }] }
+                      }]
+                    }
+                    """);
+            }
+
+            return JsonResponse("""
+                {
+                  "candidates": [{
+                    "content": { "parts": [{ "text": "{\"title\":\"Verify Theme Draft\",\"description\":\"Standard fallback description without web grounding.\"}" }] }
+                  }]
+                }
+                """);
+        }));
+
+        var workflow = CreateWorkflow(geminiApiClient: new GeminiApiClient(httpClient));
+        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
+        using var output = new StringWriter();
+
+        var ticket = workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _tempDir,
+                PromptFilePath: Path.Combine(repositoryRoot, PromptTemplateService.DefaultPromptFilePath),
+                ApiKey: "AIzaSyLiveSearchWarn1234",
+                ModelName: "gemini-2.5-flash",
+                BacklogTypeInput: "Type02",
+                GoalTitle: "check Geocaching 2026 hiding movie theme",
+                WebSearchGrounding: true,
+                OutputDirectory: _outputDir,
+                NonInteractive: true,
+                GeminiLive: true),
+            new StringReader(string.Empty),
+            output);
+
+        Assert.Equal("Verify Theme Draft", ticket.Title);
+        Assert.Contains("Google Search grounding skipped (HTTP 400 (Bad Request))", output.ToString());
+    }
+
+    [Fact]
+    public void Execute_BareType02GoalOffline_CreativelySynthesizesUserStoryDescriptionAndThreeAlternatives()
+    {
+        var workflow = CreateWorkflow();
+        using var output = new StringWriter();
+
+        var ticket = workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _tempDir,
+                PromptFilePath: _promptFilePath,
+                BacklogTypeInput: "Type02",
+                GoalTitle: "check Geocaching 2026 hiding movie theme",
+                DryRun: true,
+                NonInteractive: true,
+                GeminiLive: false),
+            new StringReader(string.Empty),
+            output);
+
+        Assert.Equal(BacklogType.Type02, ticket.BacklogType);
+        Assert.Equal("Check Geocaching 2026 hiding movie theme", ticket.Title);
+        Assert.NotNull(ticket.Description);
+        Assert.Contains("**Objective:**", ticket.Description);
+        Assert.Contains("**Suggested Actions:**", ticket.Description);
+        Assert.Contains("* Gather official rules", ticket.Description);
+        Assert.True(DescriptionFormatter.CountWords(ticket.Description) <= DescriptionFormatter.MaxDescriptionWords);
+        Assert.DoesNotContain("Not specified in discovery notes", ticket.Description);
+        Assert.Equal(3, ticket.Alternatives?.Count);
+        Assert.Contains("## Title & Description Alternatives", ticket.FormattedMarkdown);
+
+        var consoleText = output.ToString();
+        Assert.Contains("Smart Backlog Assistant — Markdown Outcome", consoleText);
+        Assert.Contains("User Story", consoleText);
+        Assert.Contains("Alternatives", consoleText);
+        Assert.Contains("[Action & Delivery]", consoleText);
+        Assert.Contains("┌", consoleText);
+        Assert.Contains("└", consoleText);
     }
 
     private static AsIsV1Workflow CreateWorkflow(

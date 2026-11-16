@@ -55,7 +55,7 @@ public sealed class RuntimeEnvironmentService
 
         var keyStatus = secretResolution.IsConfigured
             ? $"{secretResolution.SourceDetail} [{secretResolution.MaskedKey}]"
-            : $"Not registered in OS or CLI — will prompt in CLI (get key: {info.KeyPortalUrl})";
+            : $"Not registered in OS or CLI — required for live Gemini generation (get key: {info.KeyPortalUrl})";
 
         var sb = new StringBuilder();
         sb.AppendLine("--- Runtime Environment & Build Info ---");
@@ -110,6 +110,9 @@ public sealed class RuntimeEnvironmentService
 #endif
     }
 
+    public const string DefaultCopilotModel = "gpt-5-mini";
+    public const string CopilotModelEnvVar = "COPILOT_MODEL";
+
     private static string ResolveEnabledModelDisplay(AiProviderType provider, string? customModelName)
     {
         var configuredGeminiModel = !string.IsNullOrWhiteSpace(customModelName)
@@ -118,12 +121,28 @@ public sealed class RuntimeEnvironmentService
                 ? envModel.Trim()
                 : DefaultGeminiModel;
 
+        var configuredCopilotModel = !string.IsNullOrWhiteSpace(customModelName)
+            ? customModelName.Trim()
+            : Environment.GetEnvironmentVariable(CopilotModelEnvVar) is { Length: > 0 } copilotEnvModel
+                ? copilotEnvModel.Trim()
+                : DefaultCopilotModel;
+
         return provider switch
         {
             AiProviderType.GoogleGemini => $"Google Gemini ({configuredGeminiModel})",
-            AiProviderType.AzureOpenAi => "Azure OpenAI (gpt-4o)",
-            AiProviderType.AnthropicClaude => "Anthropic Claude (claude-3-5-sonnet)",
+            AiProviderType.GitHubCopilot => $"GitHub Copilot SDK ({configuredCopilotModel})",
+            AiProviderType.AzureOpenAi => $"Azure OpenAI ({(!string.IsNullOrWhiteSpace(customModelName) ? customModelName.Trim() : "gpt-4o")})",
+            AiProviderType.AnthropicClaude => $"Anthropic Claude ({(!string.IsNullOrWhiteSpace(customModelName) ? customModelName.Trim() : "claude-sonnet-4.5")})",
             _ => $"Manual Prompt Mode (Google Gemini {configuredGeminiModel} / Copilot Ready)"
         };
     }
+
+    public static string FormatProviderCode(AiProviderType provider) => provider switch
+    {
+        AiProviderType.GoogleGemini => "gemini",
+        AiProviderType.GitHubCopilot => "copilot-sdk",
+        AiProviderType.AzureOpenAi => "azure",
+        AiProviderType.AnthropicClaude => "claude",
+        _ => "manual"
+    };
 }

@@ -76,5 +76,47 @@ public sealed class JiraBacklogFormatterTests
         Assert.Empty(ticket.AcceptanceCriteria);
         Assert.Contains("# [Jira - schedule (Type02)] Export Audit Logs", ticket.FormattedMarkdown);
         Assert.Contains("Support async CSV export for over 5,000 rows.", ticket.FormattedMarkdown);
+        Assert.DoesNotContain("## Title & Description Alternatives", ticket.FormattedMarkdown);
+    }
+
+    [Fact]
+    public void Format_WhenOutcomeHasAlternatives_RendersAlternativesSectionInBothTypes()
+    {
+        var outcome = CreateSampleOutcome() with
+        {
+            Alternatives =
+            [
+                new DraftAlternative("Action & Delivery", "Deliver Async Audit Export", "Implement queued CSV export."),
+                new DraftAlternative("User Value / Story", "Enable Self-Service Audit Downloads", "Allow admins to download large logs cleanly."),
+                new DraftAlternative("Verification & Scope", "Validate Export SLAs & Access Rules", "Verify 30s SLA and RBAC enforcement.")
+            ]
+        };
+
+        var type01 = _sut.Format(outcome, BacklogType.Type01);
+        var type02 = _sut.Format(outcome, BacklogType.Type02);
+
+        Assert.Equal(3, type01.Alternatives?.Count);
+        Assert.Equal(3, type02.Alternatives?.Count);
+        Assert.Contains("## Title & Description Alternatives", type01.FormattedMarkdown);
+        Assert.Contains("**[Action & Delivery] Deliver Async Audit Export** — Implement queued CSV export.", type01.FormattedMarkdown);
+        Assert.Contains("## Title & Description Alternatives", type02.FormattedMarkdown);
+        Assert.Contains("**[Verification & Scope] Validate Export SLAs & Access Rules** — Verify 30s SLA and RBAC enforcement.", type02.FormattedMarkdown);
+    }
+
+    [Fact]
+    public void Format_WithType02VerboseDescription_LimitsTo57WordsAndUsesAsteriskBullets()
+    {
+        var verboseOutcome = CreateSampleOutcome() with
+        {
+            Description = "**Objective:** " + string.Join(' ', Enumerable.Range(1, 35).Select(i => $"word{i}")) +
+                          "\n**Suggested Actions:**\n- Check item one\n- Check item two\n- Check item three"
+        };
+
+        var ticket = _sut.Format(verboseOutcome, BacklogType.Type02);
+
+        Assert.NotNull(ticket.Description);
+        Assert.True(DescriptionFormatter.CountWords(ticket.Description) <= DescriptionFormatter.MaxDescriptionWords);
+        Assert.Contains("* Check item one", ticket.Description);
+        Assert.DoesNotContain("- Check item", ticket.Description);
     }
 }

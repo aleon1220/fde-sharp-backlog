@@ -56,6 +56,8 @@ public sealed class JiraBacklogFormatter
             sb.AppendLine($"- **Then** {scenario.Then}");
         }
 
+        AppendAlternativesSection(sb, outcome.Alternatives);
+
         return new JiraBacklogTicket(
             BacklogType: BacklogType.Type01,
             JiraStage: "complete",
@@ -63,24 +65,45 @@ public sealed class JiraBacklogFormatter
             Description: null,
             UserStory: outcome.UserStory,
             AcceptanceCriteria: outcome.Scenarios,
-            FormattedMarkdown: sb.ToString().TrimEnd().Replace("\r\n", "\n"));
+            FormattedMarkdown: sb.ToString().TrimEnd().Replace("\r\n", "\n"),
+            Alternatives: outcome.Alternatives);
     }
 
     private static JiraBacklogTicket FormatType02Schedule(ProcessedOutcome outcome)
     {
+        var description = DescriptionFormatter.Normalize(outcome.Description);
         var sb = new StringBuilder();
         sb.AppendLine($"# [Jira - schedule (Type02)] {outcome.Title}");
         sb.AppendLine();
         sb.AppendLine("## Description");
-        sb.AppendLine(outcome.Description);
+        sb.AppendLine(description);
+
+        AppendAlternativesSection(sb, outcome.Alternatives);
 
         return new JiraBacklogTicket(
             BacklogType: BacklogType.Type02,
             JiraStage: "schedule",
             Title: outcome.Title,
-            Description: outcome.Description,
+            Description: description,
             UserStory: null,
             AcceptanceCriteria: [],
-            FormattedMarkdown: sb.ToString().TrimEnd().Replace("\r\n", "\n"));
+            FormattedMarkdown: sb.ToString().TrimEnd().Replace("\r\n", "\n"),
+            Alternatives: outcome.Alternatives);
+    }
+
+    private static void AppendAlternativesSection(StringBuilder sb, IReadOnlyList<DraftAlternative>? alternatives)
+    {
+        if (alternatives is not { Count: > 0 })
+        {
+            return;
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("## Title & Description Alternatives");
+        for (var i = 0; i < alternatives.Count; i++)
+        {
+            var alt = alternatives[i];
+            sb.AppendLine($"{i + 1}. **[{alt.Angle}] {alt.Title}** — {alt.Description}");
+        }
     }
 }

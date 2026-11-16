@@ -23,6 +23,7 @@ public sealed class CliSettingsServiceTests : IDisposable
         var settings = sut.Load(workspace);
 
         Assert.False(settings.JsonFileOut);
+        Assert.Equal(CliThemeStyle.Agy, settings.Theme);
     }
 
     [Fact]
@@ -32,13 +33,14 @@ public sealed class CliSettingsServiceTests : IDisposable
         var workspace = workspaceService.Resolve(_tempRoot);
         var sut = new CliSettingsService();
 
-        var savedPath = sut.Save(workspace, new CliSettings(JsonFileOut: true));
+        var savedPath = sut.Save(workspace, new CliSettings(JsonFileOut: true, Theme: CliThemeStyle.Uv));
 
         Assert.True(File.Exists(savedPath));
         Assert.EndsWith("settings.json", savedPath, StringComparison.OrdinalIgnoreCase);
 
         var loaded = sut.Load(workspace);
         Assert.True(loaded.JsonFileOut);
+        Assert.Equal(CliThemeStyle.Uv, loaded.Theme);
     }
 
     [Fact]

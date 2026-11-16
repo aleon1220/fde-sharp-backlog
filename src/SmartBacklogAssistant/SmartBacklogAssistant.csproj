@@ -7,6 +7,21 @@
     <Nullable>enable</Nullable>
     <Version>1.1.0</Version>
     <InformationalVersion>1.1.0-gemini-runtime</InformationalVersion>
+    <CopilotSkipCliDownload Condition="'$(CopilotSkipCliDownload)' == ''">true</CopilotSkipCliDownload>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SmartBacklogAssistant.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" Version="1.0.34" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\..\prompts\**\*.md"
+             Link="prompts\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 
 </Project>

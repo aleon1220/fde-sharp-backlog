@@ -67,7 +67,69 @@ public sealed class GeminiApiClientTests
         Assert.Contains("application/json", capturedRequestBody);
     }
 
-      private static HttpClient CreateHttpClient(Func<HttpRequestMessage, HttpResponseMessage> responseFactory)
+    [Fact]
+    public void GatherWebGrounding_UsesGoogleSearchToolWithoutJsonMimeTypeAndDeduplicatesSources()
+    {
+        string? capturedRequestBody = null;
+        using var httpClient = CreateHttpClient(request =>
+        {
+            capturedRequestBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+            return JsonResponse("""
+                {
+                  "candidates": [{
+                    "content": {
+                      "parts": [{ "text": "- Official 2026 Geocaching theme covers cinema genres." }]
+                    },
+                    "groundingMetadata": {
+                      "groundingChunks": [
+                        { "web": { "title": "Geocaching Blog", "uri": "https://www.geocaching.com/blog/" } },
+                        { "web": { "title": "Duplicate", "uri": "https://www.geocaching.com/blog/" } },
+                        { "web": { "title": "HQ Rules", "uri": "https://www.geocaching.com/help/" } }
+                      ]
+                    }
+                  }]
+                }
+                """);
+        });
+
+        var result = new GeminiApiClient(httpClient).GatherWebGrounding(
+            "test-key",
+            "gemini-2.5-flash",
+            "Check Geocaching 2026 hiding movie theme");
+
+        Assert.True(result.Succeeded);
+        Assert.Contains("cinema genres", result.Summary);
+        Assert.Equal(2, result.Sources.Count);
+        Assert.Equal("Geocaching Blog", result.Sources[0].Title);
+        Assert.Contains("google_search", capturedRequestBody);
+        Assert.DoesNotContain("responseMimeType", capturedRequestBody);
+    }
+
+    [Fact]
+    public void GatherWebGrounding_OnToolBadRequestReturnsGracefulFailure_WhileUnauthorizedThrows()
+    {
+        using var badRequestClient = CreateHttpClient(_ => new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            ReasonPhrase = "Bad Request",
+            Content = new StringContent("""{"error":"tool unsupported"}""", Encoding.UTF8, "application/json")
+        });
+
+        var skipped = new GeminiApiClient(badRequestClient).GatherWebGrounding("test-key", "gemini-2.5-flash", "topic");
+        Assert.False(skipped.Succeeded);
+        Assert.Empty(skipped.Sources);
+        Assert.Contains("HTTP 400", skipped.Warning);
+
+        using var unauthorizedClient = CreateHttpClient(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized)
+        {
+            ReasonPhrase = "Unauthorized",
+            Content = new StringContent("""{"error":"invalid api key"}""", Encoding.UTF8, "application/json")
+        });
+
+        Assert.Throws<InvalidOperationException>(() =>
+            new GeminiApiClient(unauthorizedClient).GatherWebGrounding("bad-key", "gemini-2.5-flash", "topic"));
+    }
+
+    private static HttpClient CreateHttpClient(Func<HttpRequestMessage, HttpResponseMessage> responseFactory)
     {
         var handler = new StubHttpMessageHandler(responseFactory);
         return new HttpClient(handler);
