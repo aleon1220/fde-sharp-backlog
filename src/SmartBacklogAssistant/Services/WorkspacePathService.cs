@@ -197,7 +197,7 @@ public sealed partial class WorkspacePathService
             var inCandidate = Path.Combine(workspace.InputDirectory, slashNormalized["./in/".Length..]);
             if (File.Exists(inCandidate))
             {
-                return inCandidate;
+                return ResolveExactDiskCasing(inCandidate);
             }
         }
         else if (slashNormalized.StartsWith("in/", StringComparison.OrdinalIgnoreCase))
@@ -205,17 +205,27 @@ public sealed partial class WorkspacePathService
             var inCandidate = Path.Combine(workspace.InputDirectory, slashNormalized["in/".Length..]);
             if (File.Exists(inCandidate))
             {
-                return inCandidate;
+                return ResolveExactDiskCasing(inCandidate);
             }
         }
 
         var osNormalized = NormalizePathForOs(cleaned, workspace.IsWindows);
-        if (File.Exists(osNormalized) || Directory.Exists(osNormalized))
+        if (File.Exists(osNormalized))
+        {
+            return ResolveExactDiskCasing(osNormalized);
+        }
+
+        if (Directory.Exists(osNormalized))
         {
             return osNormalized;
         }
 
-        if (File.Exists(cleaned) || Directory.Exists(cleaned))
+        if (File.Exists(cleaned))
+        {
+            return ResolveExactDiskCasing(cleaned);
+        }
+
+        if (Directory.Exists(cleaned))
         {
             return cleaned;
         }
@@ -231,7 +241,7 @@ public sealed partial class WorkspacePathService
         {
             if (File.Exists(candidate))
             {
-                return candidate;
+                return ResolveExactDiskCasing(candidate);
             }
         }
 
@@ -248,6 +258,22 @@ public sealed partial class WorkspacePathService
         }
 
         return null;
+    }
+
+    private static string ResolveExactDiskCasing(string filePath)
+    {
+        var directory = Path.GetDirectoryName(filePath);
+        var fileName = Path.GetFileName(filePath);
+        if (string.IsNullOrEmpty(directory) || string.IsNullOrEmpty(fileName) || !Directory.Exists(directory))
+        {
+            return filePath;
+        }
+
+        var exactMatch = Directory
+            .EnumerateFiles(directory)
+            .FirstOrDefault(f => string.Equals(Path.GetFileName(f), fileName, StringComparison.OrdinalIgnoreCase));
+
+        return exactMatch ?? filePath;
     }
 
     public static string FormatCompactLabel(string activePath, string defaultDirectory, string defaultLabel)

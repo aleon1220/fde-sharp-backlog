@@ -57,3 +57,10 @@ The following backlog items have been structured in Jira-ready `Type01` (`comple
 
 ### [SBA-105] Developer Environment Bootstrap & SDK Pre-Flight Script (`Type02` — `schedule` | Priority: P2)
 * **Description:** Provide cross-platform bootstrap scripts (`scripts/setup-dev-env.ps1` and `scripts/setup-dev-env.sh`) that verify `.NET 10.0 SDK` availability (configuring `$HOME/.dotnet` on `PATH` if needed), check `GEMINI_API_KEY` registration across OS scopes, and validate Podman/WSL2 virtualization readiness.
+
+### [SBA-106] Simplified CLI Menu Redesign & Quick-Action Navigation (`Type01` — `complete` | Priority: P1)
+* **User Story:** As a CLI user running Smart Backlog Assistant interactively, I want a compact, scannable menu with single-key shortcuts (`p/d/w/s/v/c/?/q`) and universal `[b]ack`/`[q]uit` submenu navigation while retaining every feature, so that common backlog workflows take fewer keystrokes with zero visual clutter.
+* **Acceptance Criteria (Given / When / Then):**
+  * **Given** the user launches the interactive REPL (`dotnet run --project src/SmartBacklogAssistant`)
+  * **When** the user navigates via `[0-4]`, single-key shortcuts (`p`, `d`, `w`, `s`, `v`, `c`, `?`, `q`), `/wizard`, or submenu `[b]ack`/`[q]uit`
+  * **Then** the main menu renders compact aligned rows (`descWidth = 36`), `[3] Workspace & Settings` shows a 3-line summary header (`Paths`, `Active`, `Config`) while preserving `[3] Runtime & AI Diagnostics`, `[4/5 Review Decision]` renders themed `[Key]` options, and all 197 automated tests pass.

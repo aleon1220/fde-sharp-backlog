@@ -130,7 +130,7 @@ public sealed class ConsoleColorWriter
         string? description,
         string slashCommand,
         int labelWidth = 22,
-        int descWidth = 49)
+        int descWidth = 36)
     {
         WriteColored($"  [{key}] ", GetOptionKeyColor());
         WriteColored(label.PadRight(labelWidth), ConsoleColor.White);

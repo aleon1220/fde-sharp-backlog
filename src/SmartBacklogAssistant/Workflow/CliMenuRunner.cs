@@ -181,13 +181,13 @@ public sealed class CliMenuRunner
         color.WriteMuted($"  Provider: {providerCode} ({modelLabel}) │ Live: {(currentSettings.GeminiLive == true ? "ON" : "OFF")} │ Theme: {themeCode}");
         color.WriteLine();
 
-        color.WriteMenuOptionWithSlash("1", "Process Input Files", "Extract Jira items from './in' to './out'", "/process");
-        color.WriteMenuOptionWithSlash("2", "Draft Backlog Item", "Create a User Story (Type01) or Task (Type02)", "/draft");
-        color.WriteMenuOptionWithSlash("3", "Workspace & Settings", "Configure outputs, inspect files, & status", "/settings");
-        color.WriteMenuOptionWithSlash("4", "Preview & Copy (.md)", "Preview saved './out/*.md' table & copy", "/preview");
+        color.WriteMenuOptionWithSlash("1", "Process Input Files", "Batch or single file from ./in", "/process");
+        color.WriteMenuOptionWithSlash("2", "Draft Backlog Item", "Story (01), Task (02), or Wizard", "/draft");
+        color.WriteMenuOptionWithSlash("3", "Workspace & Settings", "Provider, model, JSON, & status", "/settings");
+        color.WriteMenuOptionWithSlash("4", "Preview & Copy (.md)", "View ./out/*.md table & copy", "/preview");
         color.WriteMenuOptionWithSlash("0", "Exit", null, "/exit");
         color.WriteLine();
-        color.WriteMuted("  Tip: Type a number [0-4], a slash command (/process, /draft, /preview, /copy), or @filename");
+        color.WriteMuted("  Tip: [0-4] or [p/d/w/s/v/c/q] │ /commands (/process, /draft, /wizard, /preview, /copy) │ @filename");
         color.WriteColored("backlog > ", color.GetOptionKeyColor());
 
         var choice = input.ReadLine();
@@ -229,15 +229,36 @@ public sealed class CliMenuRunner
             return MenuState.Main;
         }
 
-        return trimmed switch
+        switch (trimmed.ToLowerInvariant())
         {
-            "0" or "q" or "Q" => MenuState.Exit,
-            "1" => MenuState.ProcessFiles,
-            "2" => MenuState.DraftItem,
-            "3" => MenuState.Settings,
-            "4" => MenuState.PreviewOutcome,
-            _ => WarnAndStay(color, trimmed, "0-4, /command, or @filename", MenuState.Main)
-        };
+            case "0" or "q" or "quit" or "exit":
+                return MenuState.Exit;
+            case "1" or "p" or "process":
+                return MenuState.ProcessFiles;
+            case "2" or "d" or "draft":
+                return MenuState.DraftItem;
+            case "w" or "wizard":
+                return RunGuidedDraftWizard(
+                    workspace,
+                    ref sessionOptions,
+                    ref currentSettings,
+                    baseWorkspace,
+                    input,
+                    output,
+                    color,
+                    returnState: MenuState.Main);
+            case "3" or "s" or "settings":
+                return MenuState.Settings;
+            case "4" or "v" or "preview" or "view":
+                return MenuState.PreviewOutcome;
+            case "c" or "copy":
+                return ExecuteInlineCopyCommand([], input, color);
+            case "?" or "h" or "help":
+                WriteReplHelp(color);
+                return MenuState.Main;
+            default:
+                return WarnAndStay(color, trimmed, "0-4, [p/d/w/s/v/c/q], /command, or @filename", MenuState.Main);
+        }
     }
 
     private MenuState ExecuteSlashCommand(
@@ -307,6 +328,17 @@ public sealed class CliMenuRunner
                     ExecuteInlineDraftCommand(args, workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color);
                     return MenuState.Main;
                 }
+
+                case "/wizard" or "/guided":
+                    return RunGuidedDraftWizard(
+                        workspace,
+                        ref sessionOptions,
+                        ref currentSettings,
+                        baseWorkspace,
+                        input,
+                        output,
+                        color,
+                        returnState: MenuState.Main);
 
                 case "/theme":
                 {
@@ -390,8 +422,7 @@ public sealed class CliMenuRunner
                 }
 
                 case "/copy":
-                    ExecuteInlineCopyCommand(args, input, color);
-                    return MenuState.Main;
+                    return ExecuteInlineCopyCommand(args, input, color);
 
                 default:
                     color.WriteWarning($"  [!] Unknown slash command '{command}'. Type /help for available commands.");
@@ -745,7 +776,6 @@ public sealed class CliMenuRunner
         var files = _workspaceService.GetInputFiles(workspace.InputDirectory);
 
         color.WriteLine();
-        color.WriteLine();
         color.WriteHeader("=== Process Input Files ===");
         color.WriteMuted($"Queued files in {workspace.InputDirectory}: {files.Count}");
         for (var index = 0; index < files.Count; index++)
@@ -760,11 +790,11 @@ public sealed class CliMenuRunner
         }
 
         color.WriteLine();
-        color.WriteMenuOption("1", "Process All Files");
-        color.WriteMenuOption("2", "Select Single File");
-        color.WriteMenuOption("3", "Dry Run (Preview Only)");
+        color.WriteMenuOption("1", "Process All Files", "Run all queued ./in files");
+        color.WriteMenuOption("2", "Select Single File", "Pick one file by number");
+        color.WriteMenuOption("3", "Dry Run (Preview Only)", "Preview without writing files");
         color.WriteMenuOption("0", "Back to Main Menu");
-        color.WriteColored("Select an option (0-3, or @filename): ", ConsoleColor.Yellow);
+        color.WriteColored("Select an option (0-3, b=back, q=quit, or @filename): ", ConsoleColor.Yellow);
 
         var choice = input.ReadLine();
         if (choice is null)
@@ -773,12 +803,13 @@ public sealed class CliMenuRunner
         }
 
         var trimmed = choice.Trim();
-        if (trimmed.Equals("/back", StringComparison.OrdinalIgnoreCase))
+        var normalized = trimmed.ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back")
         {
             return MenuState.Main;
         }
 
-        if (trimmed.Equals("/exit", StringComparison.OrdinalIgnoreCase) || trimmed.Equals("/quit", StringComparison.OrdinalIgnoreCase))
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
         {
             return MenuState.Exit;
         }
@@ -798,14 +829,12 @@ public sealed class CliMenuRunner
             return MenuState.ProcessFiles;
         }
 
-        switch (trimmed)
+        switch (normalized)
         {
-            case "0":
-                return MenuState.Main;
-            case "1":
+            case "1" or "a" or "all":
                 ProcessFiles(files, false, baseWorkspace, ref sessionOptions, ref currentSettings, input, output, color);
                 return MenuState.ProcessFiles;
-            case "2":
+            case "2" or "s" or "single":
                 var selectedFile = SelectSingleFile(files, input, color);
                 if (selectedFile is not null)
                 {
@@ -813,11 +842,11 @@ public sealed class CliMenuRunner
                 }
 
                 return MenuState.ProcessFiles;
-            case "3":
+            case "3" or "p" or "preview" or "dry":
                 ProcessFiles(files, true, baseWorkspace, ref sessionOptions, ref currentSettings, input, output, color);
                 return MenuState.ProcessFiles;
             default:
-                return WarnAndStay(color, choice, "0, 1, 2, or 3", MenuState.ProcessFiles);
+                return WarnAndStay(color, choice, "0-3, b=back, q=quit, or @filename", MenuState.ProcessFiles);
         }
     }
 
@@ -911,15 +940,14 @@ public sealed class CliMenuRunner
     {
         color.WriteLine();
         color.WriteHeader("=== Draft Backlog Item ===");
-        color.WriteMenuOption("1", "Complete User Story (Type 01)", "Title, Description, User Story, and Given/When/Then criteria");
-        color.WriteMenuOption("2", "Schedule Item (Type 02)", "Concise Title and Engineering Description (with Goal -> User Story synthesis)");
-        color.WriteMenuOption("3", "Combined Output (Both)", "Generate Type 01 and Type 02 from one draft");
-        color.WriteMenuOption("4", "Preview Draft (No Files Saved)", "Select Type 01, Type 02, or Both without saving files");
-        color.WriteMenuOption("5", "Guided Draft & Refine (Wizard)", "Add details/scope, optional Google Search, & refine before saving");
+        color.WriteMenuOption("1", "Complete User Story (Type 01)", "User Story + Given/When/Then criteria");
+        color.WriteMenuOption("2", "Schedule Item (Type 02)", "Title + Description + Story synthesis");
+        color.WriteMenuOption("3", "Combined Output (Both)", "Generate Type 01 & Type 02 together");
+        color.WriteMenuOption("4", "Preview Draft (No Files Saved)", "Dry-run Type 01, Type 02, or Both");
+        color.WriteMenuOption("5", "Guided Draft & Refine (Wizard)", "Step-by-step details, search, & refine");
         color.WriteMenuOption("0", "Back to Main Menu");
-        color.WriteMuted("  Tips: Enter just a goal (\"<Verb> <Topic>\") — bare goals auto-expand via User Story principles + 3 Alternatives.");
-        color.WriteMuted("        Append '| <scope/dates>' for extra details, '--search' for live web lookup, or '@filename' to attach notes.");
-        color.WriteColored("Select an option (0-5): ", ConsoleColor.Yellow);
+        color.WriteMuted("  Tip: Bare goals auto-expand (INVEST + 3 alternatives). Append '| details', '--search', or '@file'.");
+        color.WriteColored("Select an option (0-5, w=wizard, b=back, q=quit): ", ConsoleColor.Yellow);
 
         var choice = input.ReadLine();
         if (choice is null)
@@ -927,34 +955,34 @@ public sealed class CliMenuRunner
             return MenuState.Exit;
         }
 
-        var normalizedChoice = choice.Trim();
-        if (normalizedChoice == "0" || normalizedChoice.Equals("/back", StringComparison.OrdinalIgnoreCase))
+        var normalizedChoice = choice.Trim().ToLowerInvariant();
+        if (normalizedChoice is "0" or "b" or "back" or "/back")
         {
             return MenuState.Main;
         }
 
-        if (normalizedChoice.Equals("/exit", StringComparison.OrdinalIgnoreCase) || normalizedChoice.Equals("/quit", StringComparison.OrdinalIgnoreCase))
+        if (normalizedChoice is "q" or "quit" or "/exit" or "/quit")
         {
             return MenuState.Exit;
         }
 
-        if (normalizedChoice == "4")
+        if (normalizedChoice is "4" or "p" or "preview")
         {
             return ShowPreviewDraftSubMenu(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color);
         }
 
-        if (normalizedChoice == "5")
+        if (normalizedChoice is "5" or "w" or "wizard")
         {
-            return RunGuidedDraftWizard(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color);
+            return RunGuidedDraftWizard(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color, returnState: MenuState.DraftItem);
         }
 
-        if (normalizedChoice is not ("1" or "2" or "3"))
+        if (normalizedChoice is not ("1" or "01" or "type01" or "2" or "02" or "type02" or "3" or "both" or "all"))
         {
-            return WarnAndStay(color, choice, "0, 1, 2, 3, 4, or 5", MenuState.DraftItem);
+            return WarnAndStay(color, choice, "0-5, w=wizard, b=back, or q=quit", MenuState.DraftItem);
         }
 
-        var combinedOutput = normalizedChoice == "3";
-        var backlogType = normalizedChoice == "2" ? "Type02" : "Type01";
+        var combinedOutput = normalizedChoice is "3" or "both" or "all";
+        var backlogType = normalizedChoice is "2" or "02" or "type02" ? "Type02" : "Type01";
         var previewOnly = sessionOptions.DryRun;
 
         var resultState = ExecuteGoalPromptDraft(
@@ -985,15 +1013,15 @@ public sealed class CliMenuRunner
         {
             color.WriteLine();
             color.WriteHeader("=== Preview Draft (No Files Saved) ===");
-            color.WriteMenuOption("1", "Complete User Story (Type 01)", "Preview Title, User Story, & Given/When/Then without saving");
-            color.WriteMenuOption("2", "Schedule Item (Type 02)", "Preview enhanced Title, Description, User Story framing & 3 Alternatives");
-            color.WriteMenuOption("3", "Combined Output (Both)", "Preview Type 01 and Type 02 side-by-side without saving");
+            color.WriteMenuOption("1", "Complete User Story (Type 01)", "Preview Story + Given/When/Then");
+            color.WriteMenuOption("2", "Schedule Item (Type 02)", "Preview Title, Description, Story & 3 Alternatives");
+            color.WriteMenuOption("3", "Combined Output (Both)", "Preview Type 01 & Type 02 together");
             color.WriteMenuOption("0", "Back to Draft Menu");
             color.WriteMuted("  Goal Tips for Better Results:");
-            color.WriteMuted("    • Bare Goals  : Write <Verb> <Topic> for <Outcome> (auto-expands with INVEST User Story + 3 Alternatives)");
+            color.WriteMuted("    • Bare Goals  : <Verb> <Topic> for <Outcome> (auto-expands INVEST + 3 Alternatives)");
             color.WriteMuted("    • Add Context : \"check Geocaching 2026 hiding movie theme | Verify official rules and dates\"");
-            color.WriteMuted("    • Live Lookup : Add \"--search\" for web grounding or \"@file.txt\" to attach discovery notes");
-            color.WriteColored("Select preview type (0-3): ", ConsoleColor.Yellow);
+            color.WriteMuted("    • Live Lookup : Append '--search' for web grounding or '@file.txt' for notes");
+            color.WriteColored("Select preview type (0-3, b=back, q=quit): ", ConsoleColor.Yellow);
 
             var choice = input.ReadLine();
             if (choice is null)
@@ -1002,12 +1030,12 @@ public sealed class CliMenuRunner
             }
 
             var normalized = choice.Trim().ToLowerInvariant();
-            if (normalized is "0" or "/back" or "back")
+            if (normalized is "0" or "b" or "/back" or "back")
             {
                 return MenuState.DraftItem;
             }
 
-            if (normalized is "/exit" or "/quit" or "q")
+            if (normalized is "q" or "quit" or "/exit" or "/quit")
             {
                 return MenuState.Exit;
             }
@@ -1132,13 +1160,25 @@ public sealed class CliMenuRunner
         WorkspaceDirectories baseWorkspace,
         TextReader input,
         TextWriter output,
-        ConsoleColorWriter color)
+        ConsoleColorWriter color,
+        MenuState returnState = MenuState.DraftItem)
     {
         color.WriteLine();
         color.WriteSubHeader("--- Guided Draft & Refine Wizard ---");
         color.WriteColored("Format ([1] Type01 Story, [2] Type02 Schedule, [3] Both) [default: 1]: ", ConsoleColor.Yellow);
         var formatChoice = input.ReadLine();
         if (formatChoice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var normalizedFormatChoice = formatChoice.Trim().ToLowerInvariant();
+        if (normalizedFormatChoice is "0" or "b" or "back" or "/back")
+        {
+            return returnState;
+        }
+
+        if (normalizedFormatChoice is "q" or "quit" or "/exit" or "/quit")
         {
             return MenuState.Exit;
         }
@@ -1157,14 +1197,14 @@ public sealed class CliMenuRunner
         if (string.IsNullOrWhiteSpace(parsedGoal.GoalExpression))
         {
             color.WriteWarning("  [!] Goal or Title cannot be empty.");
-            return MenuState.DraftItem;
+            return returnState;
         }
 
         var enrichedGoal = ResolveInlineContextMentions(parsedGoal.GoalExpression, workspace, color, out var missingMentions);
         if (missingMentions.Count > 0)
         {
             WarnMissingContextFiles(missingMentions, workspace, color);
-            return MenuState.DraftItem;
+            return returnState;
         }
 
         color.WriteColored("Additional details / required info to include (Enter to skip): ", ConsoleColor.Yellow);
@@ -1228,16 +1268,16 @@ public sealed class CliMenuRunner
                 var hasAlternatives = latestOutcome?.Alternatives is { Count: > 0 };
                 if (hasAlternatives)
                 {
-                    color.WriteLine($"  [1-{latestOutcome!.Alternatives!.Count}] Adopt Alternative Title & Description (#1..#{latestOutcome.Alternatives.Count})");
+                    color.WriteMenuOption($"1-{latestOutcome!.Alternatives!.Count}", $"Adopt Alternative Title & Description (#1..#{latestOutcome.Alternatives.Count})");
                 }
 
-                color.WriteLine($"  [A] Accept & Save to '{sessionOptions.OutputDirectory}' (default)");
-                color.WriteLine("  [M] Copy Markdown to clipboard");
-                color.WriteLine("  [W] Copy Raw Text (table) to clipboard");
-                color.WriteLine("  [R] Refine Title / Description with feedback");
-                color.WriteLine("  [T] Switch format (Type01 / Type02 / Both)");
-                color.WriteLine("  [P] Preview only (finish without writing files)");
-                color.WriteLine("  [C] Cancel draft");
+                color.WriteMenuOption("A", $"Accept & Save to '{sessionOptions.OutputDirectory}' (default)");
+                color.WriteMenuOption("M", "Copy Markdown to clipboard");
+                color.WriteMenuOption("W", "Copy Raw Text (table) to clipboard");
+                color.WriteMenuOption("R", "Refine Title / Description with feedback");
+                color.WriteMenuOption("T", "Switch format (Type01 / Type02 / Both)");
+                color.WriteMenuOption("P", "Preview only (finish without writing files)");
+                color.WriteMenuOption("C", "Cancel draft");
                 var actionPrompt = hasAlternatives
                     ? $"Choose action (1-{latestOutcome!.Alternatives!.Count}/A/M/W/R/T/P/C) [A]: "
                     : "Choose action (A/M/W/R/T/P/C) [A]: ";
@@ -1250,6 +1290,11 @@ public sealed class CliMenuRunner
                 }
 
                 var normalizedAction = action.Trim().ToLowerInvariant();
+                if (normalizedAction is "q" or "quit" or "/exit" or "/quit")
+                {
+                    return MenuState.Exit;
+                }
+
                 if (int.TryParse(normalizedAction, out var altChoice) &&
                     latestOutcome?.Alternatives is { Count: > 0 } availableAlternatives &&
                     altChoice >= 1 &&
@@ -1294,20 +1339,20 @@ public sealed class CliMenuRunner
 
                     var savedSummary = combinedOutput ? "Type01 and Type02 items" : $"{latestTickets[0].BacklogType} item";
                     color.WriteSuccess($"[✓] Ready-to-add {savedSummary} '{latestTickets[0].Title}' saved to '{sessionOptions.OutputDirectory}'.");
-                    return MenuState.DraftItem;
+                    return returnState;
                 }
 
                 if (normalizedAction is "p" or "preview")
                 {
                     var previewSummary = combinedOutput ? "Type01 and Type02 items" : $"{latestTickets[0].BacklogType} item";
                     color.WriteSuccess($"[Preview] {previewSummary} '{latestTickets[0].Title}' generated. No files written.");
-                    return MenuState.DraftItem;
+                    return returnState;
                 }
 
-                if (normalizedAction is "c" or "cancel" or "/back")
+                if (normalizedAction is "c" or "cancel" or "b" or "back" or "/back")
                 {
                     color.WriteMuted("  Draft cancelled. No files written.");
-                    return MenuState.DraftItem;
+                    return returnState;
                 }
 
                 if (normalizedAction is "r" or "refine")
@@ -1400,16 +1445,16 @@ public sealed class CliMenuRunner
     {
         WriteSettingsHeader(baseWorkspace, workspace, sessionOptions, currentSettings, color);
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
-        color.WriteMenuOption("1", $"Toggle JSON Export [{(currentSettings.JsonFileOut ? "ON" : "OFF")}]");
-        color.WriteMenuOption("2", "Inspect Directories");
-        color.WriteMenuOption("3", "Runtime & AI Diagnostics");
-        color.WriteMenuOption("4", $"Select CLI Theme [{ConsoleColorWriter.GetThemeCode(currentSettings.Theme)}]", "Switch between agy (default), uv, and kubectl styles");
-        color.WriteMenuOption("5", $"Toggle Live AI API [{(currentSettings.GeminiLive == true ? "ON" : "OFF")}]", "ON calls configured AI provider; OFF uses deterministic local draft");
-        color.WriteMenuOption("6", $"Select AI Model [{currentSettings.ModelName ?? "automatic"}]", "Fetch models supported by your active provider");
-        color.WriteMenuOption("7", "View settings.json", "Display persisted JSON workspace configuration");
-        color.WriteMenuOption("8", $"Select AI Provider [{RuntimeEnvironmentService.FormatProviderCode(activeProvider)}]", "Switch between Gemini, GitHub Copilot SDK, Azure, Claude, & Manual");
+        color.WriteMenuOption("1", $"Toggle JSON Export [{(currentSettings.JsonFileOut ? "ON" : "OFF")}]", "Write .md + .json vs .md only");
+        color.WriteMenuOption("2", "Inspect Directories", "List files & byte sizes in ./in and ./out");
+        color.WriteMenuOption("3", "Runtime & AI Diagnostics", "Windows/WSL paths, env vars, & status table");
+        color.WriteMenuOption("4", $"Select CLI Theme [{ConsoleColorWriter.GetThemeCode(currentSettings.Theme)}]", "Switch agy, uv, or kubectl palette");
+        color.WriteMenuOption("5", $"Toggle Live AI API [{(currentSettings.GeminiLive == true ? "ON" : "OFF")}]", "Live provider calls vs offline draft");
+        color.WriteMenuOption("6", $"Select AI Model [{currentSettings.ModelName ?? "automatic"}]", "Pick model for active provider");
+        color.WriteMenuOption("7", "View settings.json", "Show persisted JSON configuration");
+        color.WriteMenuOption("8", $"Select AI Provider [{RuntimeEnvironmentService.FormatProviderCode(activeProvider)}]", "gemini, copilot-sdk, azure, claude, manual");
         color.WriteMenuOption("0", "Back to Main Menu");
-        color.WriteColored("Select an option (0-8): ", ConsoleColor.Yellow);
+        color.WriteColored("Select an option (0-8, b=back, q=quit): ", ConsoleColor.Yellow);
 
         var choice = input.ReadLine();
         if (choice is null)
@@ -1417,21 +1462,19 @@ public sealed class CliMenuRunner
             return MenuState.Exit;
         }
 
-        var trimmed = choice.Trim();
-        if (trimmed.Equals("/back", StringComparison.OrdinalIgnoreCase))
+        var normalized = choice.Trim().ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back")
         {
             return MenuState.Main;
         }
 
-        if (trimmed.Equals("/exit", StringComparison.OrdinalIgnoreCase) || trimmed.Equals("/quit", StringComparison.OrdinalIgnoreCase))
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
         {
             return MenuState.Exit;
         }
 
-        switch (trimmed)
+        switch (normalized)
         {
-            case "0":
-                return MenuState.Main;
             case "1":
                 currentSettings = currentSettings with { JsonFileOut = !currentSettings.JsonFileOut };
                 sessionOptions = sessionOptions with { JsonFileOut = currentSettings.JsonFileOut };
@@ -1462,7 +1505,7 @@ public sealed class CliMenuRunner
             case "8":
                 return MenuState.ProviderSelector;
             default:
-                return WarnAndStay(color, choice, "0-8", MenuState.Settings);
+                return WarnAndStay(color, choice, "0-8, b=back, or q=quit", MenuState.Settings);
         }
     }
 
@@ -1481,7 +1524,7 @@ public sealed class CliMenuRunner
         color.WriteMenuOption("2", "UV Style", "Astral uv palette (Magenta headers, Cyan steps, Green prompts)");
         color.WriteMenuOption("3", "Kubectl Style", "Kubernetes kubectl palette (Blue headers, DarkCyan steps, Cyan prompts)");
         color.WriteMenuOption("0", "Back to Workspace & Settings");
-        color.WriteColored("Select a CLI theme (0-3): ", ConsoleColor.Yellow);
+        color.WriteColored("Select a CLI theme (0-3, b=back, q=quit): ", ConsoleColor.Yellow);
 
         var choice = input.ReadLine();
         if (choice is null)
@@ -1489,13 +1532,18 @@ public sealed class CliMenuRunner
             return MenuState.Exit;
         }
 
-        var normalized = choice.Trim();
-        if (normalized == "0" || normalized.Equals("/back", StringComparison.OrdinalIgnoreCase))
+        var normalized = choice.Trim().ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back")
         {
             return MenuState.Settings;
         }
 
-        CliThemeStyle? selectedTheme = normalized.ToLowerInvariant() switch
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
+        }
+
+        CliThemeStyle? selectedTheme = normalized switch
         {
             "1" or "agy" => CliThemeStyle.Agy,
             "2" or "uv" => CliThemeStyle.Uv,
@@ -1535,7 +1583,7 @@ public sealed class CliMenuRunner
         color.WriteMenuOption("4", "Anthropic Claude (claude)", "Copilot SDK BYOK when configured, else mock fallback");
         color.WriteMenuOption("5", "Manual Prompt (manual)", "Render Markdown prompt for copy/paste into Copilot or any AI");
         color.WriteMenuOption("0", "Back to Workspace & Settings");
-        color.WriteColored("Select an AI provider (0-5): ", ConsoleColor.Yellow);
+        color.WriteColored("Select an AI provider (0-5, b=back, q=quit): ", ConsoleColor.Yellow);
 
         var choice = input.ReadLine();
         if (choice is null)
@@ -1543,13 +1591,18 @@ public sealed class CliMenuRunner
             return MenuState.Exit;
         }
 
-        var normalized = choice.Trim();
-        if (normalized == "0" || normalized.Equals("/back", StringComparison.OrdinalIgnoreCase))
+        var normalized = choice.Trim().ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back")
         {
             return MenuState.Settings;
         }
 
-        AiProviderType? selected = normalized.ToLowerInvariant() switch
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
+        }
+
+        AiProviderType? selected = normalized switch
         {
             "1" or "gemini" => AiProviderType.GoogleGemini,
             "2" or "copilot-sdk" or "github-copilot" => AiProviderType.GitHubCopilot,
@@ -1580,23 +1633,16 @@ public sealed class CliMenuRunner
         ConsoleColorWriter color)
     {
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
+        var providerCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
+        var modelLabel = currentSettings.ModelName ?? "automatic";
+        var themeCode = ConsoleColorWriter.GetThemeCode(currentSettings.Theme);
+
         color.WriteLine();
         color.WriteHeader("=== Workspace & Settings ===");
-        color.WriteLine($"Input Dir       : {workspace.InputDirectory}");
-        color.WriteLine($"Output Dir      : {sessionOptions.OutputDirectory}");
-        color.WriteLine($"Workspace Root  : {workspace.WorkspaceRoot}");
-        color.WriteLine($"Windows Root    : {WorkspacePathService.DefaultWindowsWorkspaceRoot}");
-        color.WriteLine($"WSL Root        : {WorkspacePathService.DefaultWslWorkspaceRoot}");
-        color.WriteLine($"JSON Export     : {(currentSettings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)")}");
-        color.WriteLine($"AI Provider     : {RuntimeEnvironmentService.FormatProviderCode(activeProvider)}");
-        color.WriteLine($"Gemini Live API : {(currentSettings.GeminiLive == true ? "ON" : "OFF")}");
-        color.WriteLine($"Gemini Model    : {currentSettings.ModelName ?? "automatic (best available)"}");
-        color.WriteLine($"CLI Theme       : {ConsoleColorWriter.FormatThemeDisplay(currentSettings.Theme)}");
-        color.WriteLine($"Settings File   : {_settingsService.GetSettingsFilePath(baseWorkspace)}");
-
-        var runtimeInfo = _runtimeEnvService.Inspect(activeProvider, sessionOptions.ModelName);
-        var secret = _secretProvider.Resolve(sessionOptions.ApiKey);
-        color.WriteMuted(_runtimeEnvService.FormatRuntimeBanner(runtimeInfo, secret).TrimEnd());
+        color.WriteMuted($"  Paths  : In: {workspace.InputDirectory} │ Out: {sessionOptions.OutputDirectory}");
+        color.WriteMuted($"  Active : Provider: {providerCode} ({modelLabel}) │ Live: {(currentSettings.GeminiLive == true ? "ON" : "OFF")} │ JSON: {(currentSettings.JsonFileOut ? "ON" : "OFF")} │ Theme: {themeCode}");
+        color.WriteMuted($"  Config : {_settingsService.GetSettingsFilePath(baseWorkspace)}");
+        color.WriteLine();
     }
 
     private void InspectDirectoryContents(string label, string directoryPath, ConsoleColorWriter color)
@@ -1826,7 +1872,7 @@ public sealed class CliMenuRunner
         }
 
         color.WriteMenuOption("0", "Back to Main Menu");
-        color.WriteColored($"Select a Markdown file [Enter for #1, or 0 to back]: ", ConsoleColor.Yellow);
+        color.WriteColored("Select a Markdown file [Enter for #1, b=back, q=quit]: ", ConsoleColor.Yellow);
         var selection = input.ReadLine();
         if (selection is null)
         {
@@ -1834,9 +1880,15 @@ public sealed class CliMenuRunner
         }
 
         var trimmed = selection.Trim();
-        if (trimmed is "0" or "/back" or "q")
+        var normalized = trimmed.ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back")
         {
             return MenuState.Main;
+        }
+
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
         }
 
         var selectedIndex = 0;
@@ -1866,12 +1918,12 @@ public sealed class CliMenuRunner
         color.WriteMuted("  Tip: Run '/copy raw' or '/copy md' to copy this preview to your clipboard.");
     }
 
-    private void ExecuteInlineCopyCommand(string[] args, TextReader input, ConsoleColorWriter color)
+    private MenuState ExecuteInlineCopyCommand(string[] args, TextReader input, ConsoleColorWriter color)
     {
         if (_lastMarkdownDocuments.Count == 0)
         {
             color.WriteWarning("  [!] No outcome available yet. Run /process, /draft, or /preview first.");
-            return;
+            return MenuState.Main;
         }
 
         if (args.Length > 0)
@@ -1880,20 +1932,20 @@ public sealed class CliMenuRunner
             if (mode is "md" or "markdown")
             {
                 CopyCurrentOutcomeToClipboard(asMarkdown: true, color);
-                return;
+                return MenuState.Main;
             }
 
             if (mode is "raw" or "text" or "table")
             {
                 CopyCurrentOutcomeToClipboard(asMarkdown: false, color);
-                return;
+                return MenuState.Main;
             }
 
             color.WriteWarning($"  [!] Unknown copy format '{args[0]}'. Use '/copy raw' or '/copy md'.");
-            return;
+            return MenuState.Main;
         }
 
-        PromptCopyFormatLoop(input, color);
+        return PromptCopyFormatLoop(input, color);
     }
 
     private MenuState PromptCopyFormatLoop(TextReader input, ConsoleColorWriter color)
@@ -1901,7 +1953,7 @@ public sealed class CliMenuRunner
         while (true)
         {
             color.WriteLine();
-            color.WriteColored("Copy outcome? [1] Raw Text (table)  [2] Markdown  [0] Back: ", ConsoleColor.Yellow);
+            color.WriteColored("Copy outcome? [1] Raw Text (table)  [2] Markdown  [0/b] Back  [q] Quit: ", ConsoleColor.Yellow);
             var copyChoice = input.ReadLine();
             if (copyChoice is null)
             {
@@ -1909,9 +1961,14 @@ public sealed class CliMenuRunner
             }
 
             var normalized = copyChoice.Trim().ToLowerInvariant();
-            if (normalized is "" or "0" or "back" or "/back" or "done")
+            if (normalized is "" or "0" or "b" or "back" or "/back" or "done")
             {
                 return MenuState.Main;
+            }
+
+            if (normalized is "q" or "quit" or "/exit" or "/quit")
+            {
+                return MenuState.Exit;
             }
 
             if (normalized is "1" or "raw" or "text" or "w")
@@ -1926,7 +1983,7 @@ public sealed class CliMenuRunner
                 continue;
             }
 
-            color.WriteWarning($"  [!] Invalid option '{copyChoice.Trim()}'. Choose 1, 2, or 0.");
+            color.WriteWarning($"  [!] Invalid option '{copyChoice.Trim()}'. Choose 1, 2, 0/b, or q.");
         }
     }
 
@@ -2127,8 +2184,11 @@ public sealed class CliMenuRunner
         color.WriteLine();
         color.WriteHeader("Interactive REPL Commands & Context Mentions");
         color.WriteLine("  Numbers        [1] Process Files   [2] Draft Item   [3] Settings   [4] Preview (.md)   [0] Exit");
+        color.WriteLine("  Shortcuts      [p] Process   [d] Draft   [w] Wizard   [s] Settings   [v] Preview   [c] Copy   [?] Help   [q] Quit");
+        color.WriteLine("  Navigation     Enter [0/b/back] in any submenu to go back, or [q/quit] to exit anytime");
         color.WriteLine("  /process       Open Process menu, or run inline: /process [all|<file>] [--dry-run] [--json]");
         color.WriteLine("  /draft         Open Draft menu (incl. [5] Guided Wizard), or inline: /draft \"<goal>\" [-t 01|02|both] [--details \"...\"] [--search] [--preview]");
+        color.WriteLine("  /wizard        Jump straight into the Guided Draft & Refine Wizard (alias: /guided)");
         color.WriteLine("  /preview       Preview saved './out/*.md' outcome table & copy: /preview [filename]");
         color.WriteLine("  /copy          Copy last outcome to clipboard: /copy [raw|md]");
         color.WriteLine("  /status        Show crisp WSL2/Windows paths, queued files, & AI provider readiness table");

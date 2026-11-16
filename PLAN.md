@@ -110,10 +110,13 @@ graph TD
    * `status` (alias `doctor`): Renders a crisp, color-coded Unicode table of WSL2/Windows resolved paths, queued `./in` count, export state, Gemini API key status, and AI Provider Matrix.
    * `config [--json <on|off>] [--in <path>] [--out <path>] [--theme ...] [--provider ...]`: Non-interactively updates persisted workspace settings in `smart-backlog-assistant/settings.json`.
    * `models` & `version`: Inspects supported models for active provider (`gemini` or `copilot-sdk`) and build metadata.
-2. **Gemini CLI / Agy Interactive REPL & 3-Option Menu State Machine:**
+2. **Gemini CLI / Agy Interactive REPL & Streamlined Menu State Machine:**
    * Boxed workspace status header (`In: ./in | Out: ./out | Export: .md (JSON: ON/OFF)`) + provider/live/theme telemetry bar.
-   * Full `/slash` command support (`/process`, `/draft`, `/settings`, `/status`, `/config`, `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`) and `@filename` context mentions.
-   * Settings submenu (`[1..8]`) including `[4]` CLI Theme (`agy`, `uv`, `kubectl`), `[7]` View `settings.json`, and `[8]` Select AI Provider (`gemini`, `copilot-sdk`, `azure`, `claude`, `manual`).
+   * Compact aligned options (`descWidth = 36`), single-key quick shortcuts (`[p/d/w/s/v/c/?/q]`), universal `[0/b/back]` and `[q/quit]` submenu navigation, `/slash` commands (`/process`, `/draft`, `/wizard`, `/preview`, `/copy`, `/settings`, `/status`, `/config`, `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`), and `@filename` context mentions.
+   * Settings submenu (`[1..8]`) with a compact 3-line summary header (`Paths`, `Active`, `Config`), `[3]` full Runtime & AI Diagnostics, `[4]` CLI Theme (`agy`, `uv`, `kubectl`), `[7]` View `settings.json`, and `[8]` Select AI Provider (`gemini`, `copilot-sdk`, `azure`, `claude`, `manual`).
 3. **`GitHub.Copilot.SDK` Multi-Provider Orchestration (`AiProviderOrchestrator`):**
    * Preserves `GoogleGemini` REST, `ManualPrompt`, `AzureOpenAi`, and `AnthropicClaude` zero-regression pipelines while adding `GitHubCopilot` (`GitHub.Copilot.SDK` `1.0.34`) native session routing and BYOK provider support.
+4. **Simplified CLI Menu Framing & Verification Checks (`feature/simpler-format-cli-tui`):**
+   * **User Value**: Scannability at a glance (compact 76-col rows + 3-line Settings summary instead of an 18-line diagnostic dump), fewer keystrokes (`w`/`/wizard` direct entry, `p/d/s/v/c/?/q`), and consistent `[b]ack`/`[q]uit` across all submenus and themed `[Key]` badges in `[4/5 Review Decision]`.
+   * **Clear Success Criteria**: Verified via `CliMenuRunnerTests` covering main menu quick shortcuts, direct wizard return flow, universal back/quit across submenus, compact Settings header, and full `dotnet test` suite (`197` tests).
 

@@ -676,8 +676,9 @@ public static class Program
         output.WriteLine("  version                  Print build, .NET runtime, and architecture information");
         output.WriteLine();
         output.WriteLine("INTERACTIVE REPL (run with zero arguments):");
-        output.WriteLine("  Supports numbers [0-4], /slash commands (/process, /draft, /preview, /copy, /settings,");
-        output.WriteLine("  /status, /config, /provider, /models, /theme, /json, /live, /help, /exit), and @filename context mentions.");
+        output.WriteLine("  Supports numbers [0-4], quick shortcuts [p/d/w/s/v/c/?/q], /slash commands (/process, /draft,");
+        output.WriteLine("  /wizard, /preview, /copy, /settings, /status, /config, /provider, /models, /theme, /json, /live, /help, /exit),");
+        output.WriteLine("  universal submenu [b]ack/[q]uit navigation, and @filename context mentions.");
         output.WriteLine();
         output.WriteLine("AI PROVIDERS (--provider):");
         output.WriteLine("  gemini (default) | copilot-sdk (GitHub.Copilot.SDK) | azure | claude | manual");

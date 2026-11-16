@@ -787,6 +787,82 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.Contains("┌", clipboard.CopiedPayloads[4]);
     }
 
+    [Fact]
+    public void Run_MainMenuQuickShortcuts_NavigateToWizardPreviewCopyAndHelpWithMinimalKeystrokes()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var clipboard = new FakeClipboardService();
+        var menu = CreateMenuRunner(workspaceService, clipboardService: clipboard);
+
+        // ? (Help) -> w (Wizard directly from Main Menu -> Type02 -> goal -> accept)
+        // -> v (Preview & Copy -> #1 -> back) -> c (Copy -> Raw Text -> back) -> q (Quit)
+        using var input = new StringReader(
+            "?\n" +
+            "w\n2\nSimplify CLI menu\n\na\n" +
+            "v\n\n0\n" +
+            "c\n1\n0\n" +
+            "q\n");
+        using var output = new StringWriter();
+
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("Tip: [0-4] or [p/d/w/s/v/c/q]", text);
+        Assert.Contains("Shortcuts      [p] Process   [d] Draft   [w] Wizard", text);
+        Assert.Contains("--- Guided Draft & Refine Wizard ---", text);
+        Assert.Contains("Ready-to-add Type02 item 'Simplify CLI menu' saved", text);
+        Assert.Contains("=== Preview & Copy Outcome (Markdown) ===", text);
+        Assert.Contains("✓ Copied Raw Text outcome to clipboard", text);
+        Assert.Single(clipboard.CopiedPayloads);
+        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type02-simplify-cli-menu.md")));
+    }
+
+    [Fact]
+    public void Run_UniversalBackAndQuitShortcuts_WorkAcrossSubmenus()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var menu = CreateMenuRunner(workspaceService);
+
+        // p -> b (Process -> Back), d -> b (Draft -> Back), /wizard -> c (Cancel -> Main),
+        // s -> q (Settings compact header -> Quit directly from submenu)
+        using var input = new StringReader(
+            "p\nb\n" +
+            "d\nb\n" +
+            "/wizard\n\nCancelled Draft\n\nc\n" +
+            "s\nq\n");
+        using var output = new StringWriter();
+
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        Assert.Empty(Directory.GetFiles(dirs.OutputDirectory));
+        var text = output.ToString();
+        Assert.Contains("=== Process Input Files ===", text);
+        Assert.Contains("=== Draft Backlog Item ===", text);
+        Assert.Contains("Draft cancelled. No files written.", text);
+        Assert.Contains("=== Workspace & Settings ===", text);
+        Assert.Contains("  Paths  : In:", text);
+        Assert.Contains("  Active : Provider:", text);
+        Assert.Contains("  Config :", text);
+        Assert.DoesNotContain("Windows Root    :", text);
+        Assert.Contains("Goodbye! Backlog artifacts are ready in:", text);
+    }
+
     private static CliMenuRunner CreateMenuRunner(
         WorkspacePathService workspaceService,
         CliSettingsService? settingsService = null,

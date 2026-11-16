@@ -6,8 +6,8 @@
 
 **Smart Backlog Assistant** (`fde-sharp-backlog`) combines deterministic .NET 10 ingestion, schema validation, and cross-platform Windows/WSL workspace management with a multi-provider AI orchestrator (**Google Gemini REST** and **`GitHub.Copilot.SDK`** with native Copilot CLI or BYOK providers). Modeled after two gold-standard terminal paradigms:
 
-1. **Astral `uv` (Frictionless One-Shot Subcommand CLI):** Deterministic, verb-driven subcommands (`process`, `draft`, `status`, `config`, `models`) with elapsed step timers (`✓ Resolved ... in 1ms`), non-intrusive Braille progress spinners during async AI calls, actionable error + `hint:` diagnostics, and scannable `--help` output.
-2. **Gemini CLI / Agy (Interactive REPL & Branching 3-Option TUI):** Launching with zero arguments opens an interactive session with a boxed status bar (`In: ./in | Out: ./out | Export: .md`), `/slash` commands, `@filename` context mentions, and our streamlined 3-option menu state machine.
+1. **Astral `uv` (Frictionless One-Shot Subcommand CLI):** Deterministic, verb-driven subcommands (`process`, `draft`, `preview`, `status`, `config`, `models`) with elapsed step timers (`✓ Resolved ... in 1ms`), non-intrusive Braille progress spinners during async AI calls, actionable error + `hint:` diagnostics, and scannable `--help` output.
+2. **Gemini CLI / Agy (Interactive REPL & Streamlined TUI):** Launching with zero arguments opens a compact, scannable interactive session with a boxed workspace bar (`In: ./in | Out: ./out | Export: .md`), single-key shortcuts (`[0-4]` or `[p/d/w/s/v/c/?/q]`), universal `[b]ack`/`[q]uit` submenu navigation, `/slash` commands (including `/wizard`), and `@filename` context mentions.
 
 * **GitHub Repository & Project**: [aleon1220/fde-sharp-backlog](https://github.com/aleon1220/fde-sharp-backlog) · [Project Backlog & Issues](https://github.com/aleon1220/fde-sharp-backlog/issues)
 * **Active Release Milestone**: [Milestone #1 — `release-fde-version`](https://github.com/aleon1220/fde-sharp-backlog/milestone/1)
@@ -39,14 +39,17 @@ Subcommand aliases preserved for backward compatibility: `run` (`process`), `add
 
 ## Interactive REPL & Menu (Gemini CLI / Agy Style)
 
-Running with zero arguments displays the compact boxed workspace header and supports three interaction styles seamlessly from `backlog > `:
+Running with zero arguments displays the compact boxed workspace header (`In`, `Out`, `Export`, `Provider`, `Live`, `Theme`) and supports numeric options, single-key quick shortcuts, `/slash` commands, and `@filename` mentions seamlessly from `backlog > `:
 
-* **Numeric Menu `[0-3]`:**
-  * `[1] Process Input Files` — Queue inspection, process all, single file, or dry-run preview.
-  * `[2] Draft Backlog Item` — Draft `Type01` (`complete` — Given/When/Then), `Type02` (`schedule` — Title + Description), `Both`, **`[4] Preview Draft (No Files Saved)` sub-menu** (`Type 01`, `Type 02`, or `Both` with interactive typing tips), or `[5] Guided Draft & Refine (Wizard)` with `[1-3]` Alternative selection, optional Google Search grounding, and `[A]ccept / [R]efine / [T]ype / [P]review / [C]ancel`. Bare Goals automatically trigger two-step INVEST Goal Expansion (`prompts/prompt-goal-expand.md`) to enhance the Title, synthesize User Story framing + structured Description, and present **3 Title & Description alternatives**.
-  * `[3] Workspace & Settings` — Toggle JSON export, inspect `./in` & `./out`, run diagnostics, select CLI theme (`agy`, `uv`, `kubectl`), toggle Live AI, select model, `[7]` view `settings.json`, and `[8]` select active AI provider.
+* **Numeric Menu `[0-4]` & Quick Shortcuts `[p/d/w/s/v/c/?/q]`:**
+  * `[1]` / `p` **Process Input Files** — Batch or single file from `./in` (`all`, `single`, or `dry` preview).
+  * `[2]` / `d` **Draft Backlog Item** — Draft `Type01` (`complete` — Given/When/Then), `Type02` (`schedule` — Title + Description), `Both`, `[4]` **Preview Draft (No Files Saved)**, or `[5]` **Guided Draft & Refine (Wizard)** with `[1-3]` Alternative selection, optional Google Search grounding, `[M]` Markdown / `[W]` Raw Text clipboard copy, and `[A]ccept / [R]efine / [T]ype / [P]review / [C]ancel`. Bare Goals automatically trigger two-step INVEST Goal Expansion (`prompts/prompt-goal-expand.md`) to enhance the Title, synthesize User Story framing + structured Description, and present **3 Title & Description alternatives**.
+  * `w` / `/wizard` **Direct Guided Wizard** — Jump straight into the Guided Draft & Refine Wizard from `backlog > ` and return cleanly to the main menu when finished.
+  * `[3]` / `s` **Workspace & Settings** — Compact 3-line summary (`Paths`, `Active`, `Config`) with `[1]` JSON Export toggle, `[2]` Inspect Directories, `[3]` full Runtime & AI Diagnostics, `[4]` CLI Theme (`agy`, `uv`, `kubectl`), `[5]` Live AI toggle, `[6]` Select AI Model, `[7]` View `settings.json`, and `[8]` Select AI Provider.
+  * `[4]` / `v` **Preview & Copy (.md)** — Inspect saved `./out/*.md` outcomes in a unified 2-column colored table and copy as Raw Text (`[1]` / `c`) or Markdown (`[2]`).
+  * `[0]` / `q` **Exit** — Universal navigation across all submenus: enter `0` / `b` / `back` to return to the parent menu, or `q` / `quit` to exit anytime.
 * **`/slash` Commands:**
-  * `/process [all|<file>] [--dry-run] [--json]`, `/draft "<goal>" [-t 01|02|both] [--details "..."] [--search] [--preview]`, `/settings`, `/status`, `/config [--json on|off] [--in <dir>] [--out <dir>]`, `/provider <name>`, `/models`, `/theme <agy|uv|kubectl>`, `/json [on|off]`, `/live [on|off]`, `/help`, `/clear`, `/exit`.
+  * `/process [all|<file>] [--dry-run] [--json]`, `/draft "<goal>" [-t 01|02|both] [--details "..."] [--search] [--preview]`, `/wizard` (`/guided`), `/preview [<file>]`, `/copy [raw|md]`, `/settings`, `/status`, `/config [--json on|off] [--in <dir>] [--out <dir>]`, `/provider <name>`, `/models`, `/theme <agy|uv|kubectl>`, `/json [on|off]`, `/live [on|off]`, `/help`, `/clear`, `/exit`.
 * **`@filename` Context Mentions:**
   * Reference queued `./in` or `./samples` files directly in the REPL: `@raw-notes.txt` (processes file) or `@raw-notes.txt Implement OAuth2 PKCE` (attaches discovery context cleanly without hallucination). Type `@` or `@?` to list available context files.
 
@@ -74,7 +77,7 @@ Preserves strict **Zero Hallucination** prompt rules and Type `01`/`02` formatti
 ## Quick Start (.NET 10 SDK)
 
 ```bash
-# Restore, build, and run full test suite (180 tests)
+# Restore, build, and run full test suite (197 tests)
 dotnet test
 
 # Optional: configure Gemini or Copilot credentials
