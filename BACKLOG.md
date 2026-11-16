@@ -64,3 +64,10 @@ The following backlog items have been structured in Jira-ready `Type01` (`comple
   * **Given** the user launches the interactive REPL (`dotnet run --project src/SmartBacklogAssistant`)
   * **When** the user navigates via `[0-4]`, single-key shortcuts (`p`, `d`, `w`, `s`, `v`, `c`, `?`, `q`), `/wizard`, or submenu `[b]ack`/`[q]uit`
   * **Then** the main menu renders compact aligned rows (`descWidth = 36`), `[3] Workspace & Settings` shows a 3-line summary header (`Paths`, `Active`, `Config`) while preserving `[3] Runtime & AI Diagnostics`, `[4/5 Review Decision]` renders themed `[Key]` options, and all 197 automated tests pass.
+
+### [SBA-107] Interactive Output Selection, Clean Plain Text & OSC 52 Clipboard (`Type01` — `complete` | Priority: P1 — Issue #12)
+* **User Story:** As a CLI operator, I want to fuzzy-select saved outcomes and individual Jira fields (`clean`, `title`, `story`, `desc`, `ac`, `alt1..alt3`) with keyboard navigation, route picker prompts to `stderr`, and copy clean text via native clipboards or OSC 52 fallback, so that pasting into Jira or piping `stdout` requires zero manual cleanup.
+* **Acceptance Criteria (Given / When / Then):**
+  * **Given** generated or saved Markdown outcomes exist in `./out`
+  * **When** the user runs `preview --select`, `--copy <clean|title|story|desc|ac|alt1>`, `/copy <target>`, `[4] Preview & Copy`, or `[S]` in the Guided Wizard
+  * **Then** `InteractiveSelector` fuzzy-matches files and Jira fields (with `stderr` prompt routing in `--select` mode and graceful non-interactive exit), `MarkdownOutcomeRenderer` strips borders/Markdown markers cleanly, `OsClipboardService` falls back to OSC 52 (`tmux`-aware) when native tools are unavailable, and all 206 automated tests pass.

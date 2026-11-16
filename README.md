@@ -11,7 +11,7 @@
 
 * **GitHub Repository & Project**: [aleon1220/fde-sharp-backlog](https://github.com/aleon1220/fde-sharp-backlog) · [Project Backlog & Issues](https://github.com/aleon1220/fde-sharp-backlog/issues)
 * **Active Release Milestone**: [Milestone #1 — `release-fde-version`](https://github.com/aleon1220/fde-sharp-backlog/milestone/1)
-* **CLI & TUI Ergonomics Track**: [Issue #3](https://github.com/aleon1220/fde-sharp-backlog/issues/3) · [Issue #5](https://github.com/aleon1220/fde-sharp-backlog/issues/5) · [Issue #7](https://github.com/aleon1220/fde-sharp-backlog/issues/7)
+* **CLI & TUI Ergonomics Track**: [Issue #3](https://github.com/aleon1220/fde-sharp-backlog/issues/3) · [Issue #5](https://github.com/aleon1220/fde-sharp-backlog/issues/5) · [Issue #7](https://github.com/aleon1220/fde-sharp-backlog/issues/7) · [Issue #11](https://github.com/aleon1220/fde-sharp-backlog/issues/11) · [Issue #12](https://github.com/aleon1220/fde-sharp-backlog/issues/12)
 
 ## Ergonomic CLI Subcommands (`uv` Style — Headless Execution)
 
@@ -31,6 +31,11 @@ dotnet run --project src/SmartBacklogAssistant -- draft "Add Redis Distributed C
 # Non-interactively configure persisted settings (stored in smart-backlog-assistant/settings.json)
 dotnet run --project src/SmartBacklogAssistant -- config --json on --in ./in --out ./out --theme uv --provider copilot-sdk
 
+# Preview & interactively fuzzy-select saved outputs or copy clean plain text / Jira fields
+dotnet run --project src/SmartBacklogAssistant -- preview --select
+dotnet run --project src/SmartBacklogAssistant -- preview latest --copy clean
+dotnet run --project src/SmartBacklogAssistant -- preview latest --copy title
+
 # Crisp diagnostic table: WSL2/Windows paths, ./in count, export format, & AI provider matrix
 dotnet run --project src/SmartBacklogAssistant -- status
 ```
@@ -43,13 +48,13 @@ Running with zero arguments displays the compact boxed workspace header (`In`, `
 
 * **Numeric Menu `[0-4]` & Quick Shortcuts `[p/d/w/s/v/c/?/q]`:**
   * `[1]` / `p` **Process Input Files** — Batch or single file from `./in` (`all`, `single`, or `dry` preview).
-  * `[2]` / `d` **Draft Backlog Item** — Draft `Type01` (`complete` — Given/When/Then), `Type02` (`schedule` — Title + Description), `Both`, `[4]` **Preview Draft (No Files Saved)**, or `[5]` **Guided Draft & Refine (Wizard)** with `[1-3]` Alternative selection, optional Google Search grounding, `[M]` Markdown / `[W]` Raw Text clipboard copy, and `[A]ccept / [R]efine / [T]ype / [P]review / [C]ancel`. Bare Goals automatically trigger two-step INVEST Goal Expansion (`prompts/prompt-goal-expand.md`) to enhance the Title, synthesize User Story framing + structured Description, and present **3 Title & Description alternatives**.
+  * `[2]` / `d` **Draft Backlog Item** — Draft `Type01` (`complete` — Given/When/Then), `Type02` (`schedule` — Title + Description), `Both`, `[4]` **Preview Draft (No Files Saved)**, or `[5]` **Guided Draft & Refine (Wizard)** with `[1-3]` Alternative selection, optional Google Search grounding, `[M]` Markdown / `[W]` Raw Text / `[S]` Unified Field & Clean Text clipboard copy, and `[A]ccept / [R]efine / [T]ype / [P]review / [C]ancel`. Bare Goals automatically trigger two-step INVEST Goal Expansion (`prompts/prompt-goal-expand.md`) to enhance the Title, synthesize User Story framing + structured Description, and present **3 Title & Description alternatives**.
   * `w` / `/wizard` **Direct Guided Wizard** — Jump straight into the Guided Draft & Refine Wizard from `backlog > ` and return cleanly to the main menu when finished.
   * `[3]` / `s` **Workspace & Settings** — Compact 3-line summary (`Paths`, `Active`, `Config`) with `[1]` JSON Export toggle, `[2]` Inspect Directories, `[3]` full Runtime & AI Diagnostics, `[4]` CLI Theme (`agy`, `uv`, `kubectl`), `[5]` Live AI toggle, `[6]` Select AI Model, `[7]` View `settings.json`, and `[8]` Select AI Provider.
-  * `[4]` / `v` **Preview & Copy (.md)** — Inspect saved `./out/*.md` outcomes in a unified 2-column colored table and copy as Raw Text (`[1]` / `c`) or Markdown (`[2]`).
+  * `[4]` / `v` **Preview & Copy (.md)** — Fuzzy-filter or pick saved `./out/*.md` outcomes, inspect in a unified 2-column colored table, and copy Raw Text (`raw`), Markdown (`md`), Clean Plain Text (`clean`), or individual Jira fields (`title`, `story`, `desc`, `ac`, `alt1..alt3`). Native clipboards (`Set-Clipboard`/`clip.exe`, `pbcopy`, `wl-copy`/`xclip`/`xsel`) fall back automatically to ANSI **OSC 52** (with `tmux` passthrough) over SSH/headless terminals.
   * `[0]` / `q` **Exit** — Universal navigation across all submenus: enter `0` / `b` / `back` to return to the parent menu, or `q` / `quit` to exit anytime.
 * **`/slash` Commands:**
-  * `/process [all|<file>] [--dry-run] [--json]`, `/draft "<goal>" [-t 01|02|both] [--details "..."] [--search] [--preview]`, `/wizard` (`/guided`), `/preview [<file>]`, `/copy [raw|md]`, `/settings`, `/status`, `/config [--json on|off] [--in <dir>] [--out <dir>]`, `/provider <name>`, `/models`, `/theme <agy|uv|kubectl>`, `/json [on|off]`, `/live [on|off]`, `/help`, `/clear`, `/exit`.
+  * `/process [all|<file>] [--dry-run] [--json]`, `/draft "<goal>" [-t 01|02|both] [--details "..."] [--search] [--preview]`, `/wizard` (`/guided`), `/preview [<file>]`, `/copy [raw|md|clean|title|story|desc|ac|alt1..]`, `/settings`, `/status`, `/config [--json on|off] [--in <dir>] [--out <dir>]`, `/provider <name>`, `/models`, `/theme <agy|uv|kubectl>`, `/json [on|off]`, `/live [on|off]`, `/help`, `/clear`, `/exit`.
 * **`@filename` Context Mentions:**
   * Reference queued `./in` or `./samples` files directly in the REPL: `@raw-notes.txt` (processes file) or `@raw-notes.txt Implement OAuth2 PKCE` (attaches discovery context cleanly without hallucination). Type `@` or `@?` to list available context files.
 
@@ -77,7 +82,7 @@ Preserves strict **Zero Hallucination** prompt rules and Type `01`/`02` formatti
 ## Quick Start (.NET 10 SDK)
 
 ```bash
-# Restore, build, and run full test suite (197 tests)
+# Restore, build, and run full test suite (206 tests)
 dotnet test
 
 # Optional: configure Gemini or Copilot credentials

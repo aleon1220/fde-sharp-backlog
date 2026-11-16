@@ -863,6 +863,59 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.Contains("Goodbye! Backlog artifacts are ready in:", text);
     }
 
+    [Fact]
+    public void Run_PreviewFuzzyFilterAndUnifiedFieldCopy_CopiesCleanTextAndIndividualFields()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var clipboard = new FakeClipboardService();
+        var menu = CreateMenuRunner(workspaceService, clipboardService: clipboard);
+
+        // 1) Wizard from Main Menu: draft Type02, [S] select & copy 'clean' and 'title', [0] back to review, [A] save
+        // 2) Draft another file so multiple .md files exist in ./out
+        // 3) [v] Preview & Copy -> fuzzy filter 'osc52' -> copy 'desc' and 'alt1' -> [0] back
+        // 4) /copy title -> q (Exit)
+        using var input = new StringReader(
+            "w\n2\nBuild OSC52 Clipboard\n\ns\nclean\ntitle\n0\na\n" +
+            "d\n2\nAudit Release Gates\n0\n" +
+            "v\nosc52\ndesc\nalt1\n0\n" +
+            "/copy title\n" +
+            "q\n");
+        using var output = new StringWriter();
+
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("Selectable Output Formats & Jira Fields:", text);
+        Assert.Contains("✓ Matched 'type02-build-osc52-clipboard.md'", text);
+        Assert.Contains("✓ Copied Clean Plain Text outcome to clipboard", text);
+        Assert.Contains("✓ Copied Title to clipboard", text);
+        Assert.Contains("✓ Copied Description to clipboard", text);
+        Assert.Contains("✓ Copied Alternative #1 to clipboard", text);
+
+        Assert.Equal(5, clipboard.CopiedPayloads.Count);
+        // [0] Clean Plain Text (no box borders or markdown markers)
+        Assert.DoesNotContain("┌", clipboard.CopiedPayloads[0]);
+        Assert.DoesNotContain("**", clipboard.CopiedPayloads[0]);
+        Assert.Contains("Build OSC52 Clipboard", clipboard.CopiedPayloads[0]);
+        // [1] Clean Title from Wizard [S]
+        Assert.Equal("Build OSC52 Clipboard", clipboard.CopiedPayloads[1]);
+        // [2] Clean Description from [v] fuzzy preview
+        Assert.Contains("Objective:", clipboard.CopiedPayloads[2]);
+        Assert.DoesNotContain("**", clipboard.CopiedPayloads[2]);
+        // [3] Alternative #1 from [v] fuzzy preview
+        Assert.Contains("\n", clipboard.CopiedPayloads[3]);
+        // [4] Title from /copy title
+        Assert.Equal("Build OSC52 Clipboard", clipboard.CopiedPayloads[4]);
+    }
+
     private static CliMenuRunner CreateMenuRunner(
         WorkspacePathService workspaceService,
         CliSettingsService? settingsService = null,

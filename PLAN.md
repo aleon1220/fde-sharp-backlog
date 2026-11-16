@@ -116,7 +116,11 @@ graph TD
    * Settings submenu (`[1..8]`) with a compact 3-line summary header (`Paths`, `Active`, `Config`), `[3]` full Runtime & AI Diagnostics, `[4]` CLI Theme (`agy`, `uv`, `kubectl`), `[7]` View `settings.json`, and `[8]` Select AI Provider (`gemini`, `copilot-sdk`, `azure`, `claude`, `manual`).
 3. **`GitHub.Copilot.SDK` Multi-Provider Orchestration (`AiProviderOrchestrator`):**
    * Preserves `GoogleGemini` REST, `ManualPrompt`, `AzureOpenAi`, and `AnthropicClaude` zero-regression pipelines while adding `GitHubCopilot` (`GitHub.Copilot.SDK` `1.0.34`) native session routing and BYOK provider support.
-4. **Simplified CLI Menu Framing & Verification Checks (`feature/simpler-format-cli-tui`):**
+4. **Simplified CLI Menu Framing & Verification Checks (`feature/simpler-format-cli-tui` · [Issue #11](https://github.com/aleon1220/fde-sharp-backlog/issues/11)):**
    * **User Value**: Scannability at a glance (compact 76-col rows + 3-line Settings summary instead of an 18-line diagnostic dump), fewer keystrokes (`w`/`/wizard` direct entry, `p/d/s/v/c/?/q`), and consistent `[b]ack`/`[q]uit` across all submenus and themed `[Key]` badges in `[4/5 Review Decision]`.
-   * **Clear Success Criteria**: Verified via `CliMenuRunnerTests` covering main menu quick shortcuts, direct wizard return flow, universal back/quit across submenus, compact Settings header, and full `dotnet test` suite (`197` tests).
+   * **Clear Success Criteria**: Verified via `CliMenuRunnerTests` covering main menu quick shortcuts, direct wizard return flow, universal back/quit across submenus, and compact Settings header.
+5. **Interactive Output Selector, Clean Text Extraction, & Cross-Platform OSC 52 Clipboard ([Issue #12](https://github.com/aleon1220/fde-sharp-backlog/issues/12)):**
+   * **Interactive Selection (`InteractiveSelector`):** Live TTY arrow-key (`↑`/`↓`/type-to-filter/`Enter`/`Esc`) picker with line-based fuzzy filtering fallback for redirected/test streams across saved `.md` files and output formats/fields (`raw`, `md`, `clean`, `title`, `story`, `desc`, `ac`, `alt1..alt3`).
+   * **Clean `stdout` / `stderr` Pipeline Separation:** `backlog preview --select` routes interactive prompts and clipboard feedback to `stderr`, emits only the selected clean text to `stdout`, and exits gracefully with an actionable hint under `--non-interactive` or EOF streams.
+   * **Cross-Platform Clipboard + OSC 52 Fallback (`OsClipboardService`):** Uses native utilities first and falls back to ANSI OSC 52 (`\e]52;c;<base64>\a` or `tmux` DCS passthrough) on compatible terminals; verified across all `206` unit and integration tests.
 

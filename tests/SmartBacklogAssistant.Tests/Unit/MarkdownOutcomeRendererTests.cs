@@ -115,4 +115,79 @@ public sealed class MarkdownOutcomeRendererTests
         Assert.Contains(rows, r => r.Section == "Acceptance");
         Assert.Contains(rows, r => r.Section == "Description");
     }
+
+    [Fact]
+    public void RenderCleanPlainTextAndExtractSelectableItems_StripBordersMarkdownAndExposeAllFields()
+    {
+        var markdown = """
+            # [Jira - complete (Type01)] Enable OAuth2 PKCE Login
+
+            ## User Story
+            As a **mobile user**, I want `PKCE` login so that sessions stay secure.
+
+            ## Description
+            **Objective:** Replace implicit flow with PKCE.
+            * Configure `code_challenge` verifier
+
+            ## Acceptance Criteria (Given / When / Then)
+            ### Scenario 1
+            - **Given** User opens login
+            - **When** Authorization completes
+            - **Then** Token rotates cleanly
+
+            ## Title & Description Alternatives
+            1. **[Action & Delivery] Ship OAuth2 PKCE** — Deliver PKCE auth flow.
+            2. **[User Value / Story] Secure Mobile Sign-In** — Protect mobile users with PKCE.
+            """;
+
+        var cleanText = MarkdownOutcomeRenderer.RenderCleanPlainText([markdown]);
+        Assert.DoesNotContain("┌", cleanText);
+        Assert.DoesNotContain("**", cleanText);
+        Assert.DoesNotContain("`", cleanText);
+        Assert.DoesNotContain("# ", cleanText);
+        Assert.Contains("Title: Enable OAuth2 PKCE Login", cleanText);
+        Assert.Contains("As a mobile user, I want PKCE login so that sessions stay secure.", cleanText);
+        Assert.Contains("* Configure code_challenge verifier", cleanText);
+
+        var items = MarkdownOutcomeRenderer.ExtractSelectableItems([markdown]);
+        Assert.Equal("raw", items[0].Id);
+        Assert.Equal("md", items[1].Id);
+        Assert.Equal("clean", items[2].Id);
+        Assert.Equal("Enable OAuth2 PKCE Login", items.Single(i => i.Id == "title").Value);
+        Assert.Equal("As a mobile user, I want PKCE login so that sessions stay secure.", items.Single(i => i.Id == "story").Value);
+        Assert.Contains("Objective: Replace implicit flow with PKCE.", items.Single(i => i.Id == "desc").Value);
+        Assert.Contains("Scenario 1", items.Single(i => i.Id == "ac").Value);
+        Assert.Contains("Ship OAuth2 PKCE\nDeliver PKCE auth flow.", items.Single(i => i.Id == "alt1").Value);
+        Assert.Contains("Secure Mobile Sign-In\nProtect mobile users with PKCE.", items.Single(i => i.Id == "alt2").Value);
+    }
+
+    [Fact]
+    public void InteractiveSelector_FuzzyMatchesOutputItemsAndFilePaths()
+    {
+        var markdown = """
+            # [Jira - schedule (Type02)] Plan Canary Rollout
+
+            ## Description
+            **Objective:** Roll out service safely.
+            """;
+        var items = MarkdownOutcomeRenderer.ExtractSelectableItems([markdown]);
+
+        var cleanMatch = InteractiveSelector.FilterOutputItems(items, "clean");
+        Assert.Single(cleanMatch);
+        Assert.Equal("clean", cleanMatch[0].Id);
+
+        var titleMatch = InteractiveSelector.FilterOutputItems(items, "ttl");
+        Assert.Contains(titleMatch, m => m.Id == "title");
+
+        var files = new[]
+        {
+            @"c:\out\type01-oauth2-pkce.md",
+            @"c:\out\type02-canary-rollout.md",
+            @"c:\out\jira-backlog-item.md"
+        };
+
+        var fileMatches = InteractiveSelector.FilterFilePaths(files, "cnry");
+        var matchedFile = Assert.Single(fileMatches);
+        Assert.EndsWith("type02-canary-rollout.md", matchedFile);
+    }
 }

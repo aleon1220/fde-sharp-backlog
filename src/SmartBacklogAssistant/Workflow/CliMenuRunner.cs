@@ -1274,13 +1274,14 @@ public sealed class CliMenuRunner
                 color.WriteMenuOption("A", $"Accept & Save to '{sessionOptions.OutputDirectory}' (default)");
                 color.WriteMenuOption("M", "Copy Markdown to clipboard");
                 color.WriteMenuOption("W", "Copy Raw Text (table) to clipboard");
+                color.WriteMenuOption("S", "Select & Copy field / Clean Text (Title, Story, Desc, AC)");
                 color.WriteMenuOption("R", "Refine Title / Description with feedback");
                 color.WriteMenuOption("T", "Switch format (Type01 / Type02 / Both)");
                 color.WriteMenuOption("P", "Preview only (finish without writing files)");
                 color.WriteMenuOption("C", "Cancel draft");
                 var actionPrompt = hasAlternatives
-                    ? $"Choose action (1-{latestOutcome!.Alternatives!.Count}/A/M/W/R/T/P/C) [A]: "
-                    : "Choose action (A/M/W/R/T/P/C) [A]: ";
+                    ? $"Choose action (1-{latestOutcome!.Alternatives!.Count}/A/M/W/S/R/T/P/C) [A]: "
+                    : "Choose action (A/M/W/S/R/T/P/C) [A]: ";
                 color.WriteColored(actionPrompt, ConsoleColor.Yellow);
 
                 var action = input.ReadLine();
@@ -1321,7 +1322,19 @@ public sealed class CliMenuRunner
                     continue;
                 }
 
-                if (normalizedAction is "" or "a" or "accept" or "save" or "s")
+                if (normalizedAction is "s" or "select")
+                {
+                    CacheWizardTickets(latestOutcome!, latestTickets!, combinedOutput);
+                    var selectResult = PromptCopyFormatLoop(input, color);
+                    if (selectResult == MenuState.Exit)
+                    {
+                        return MenuState.Exit;
+                    }
+
+                    continue;
+                }
+
+                if (normalizedAction is "" or "a" or "accept" or "save")
                 {
                     if (!string.IsNullOrWhiteSpace(sessionOptions.OutputDirectory))
                     {
@@ -1865,45 +1878,71 @@ public sealed class CliMenuRunner
             return MenuState.Main;
         }
 
-        for (var i = 0; i < mdFiles.Count; i++)
+        IReadOnlyList<string> candidates = mdFiles;
+        while (true)
         {
-            var info = new FileInfo(mdFiles[i]);
-            color.WriteMenuOption((i + 1).ToString(), info.Name, $"{info.Length:N0} bytes");
-        }
-
-        color.WriteMenuOption("0", "Back to Main Menu");
-        color.WriteColored("Select a Markdown file [Enter for #1, b=back, q=quit]: ", ConsoleColor.Yellow);
-        var selection = input.ReadLine();
-        if (selection is null)
-        {
-            return MenuState.Exit;
-        }
-
-        var trimmed = selection.Trim();
-        var normalized = trimmed.ToLowerInvariant();
-        if (normalized is "0" or "b" or "back" or "/back")
-        {
-            return MenuState.Main;
-        }
-
-        if (normalized is "q" or "quit" or "/exit" or "/quit")
-        {
-            return MenuState.Exit;
-        }
-
-        var selectedIndex = 0;
-        if (!string.IsNullOrEmpty(trimmed))
-        {
-            if (!int.TryParse(trimmed, out var chosen) || chosen < 1 || chosen > mdFiles.Count)
+            for (var i = 0; i < candidates.Count; i++)
             {
-                return WarnAndStay(color, trimmed, $"0-{mdFiles.Count}", MenuState.PreviewOutcome);
+                var info = new FileInfo(candidates[i]);
+                color.WriteMenuOption((i + 1).ToString(), info.Name, $"{info.Length:N0} bytes");
             }
 
-            selectedIndex = chosen - 1;
-        }
+            color.WriteMenuOption("0", "Back to Main Menu");
+            color.WriteColored("Select file [Enter=#1, number, fuzzy name, b=back, q=quit]: ", ConsoleColor.Yellow);
+            var selection = input.ReadLine();
+            if (selection is null)
+            {
+                return MenuState.Exit;
+            }
 
-        PreviewMarkdownFilePath(mdFiles[selectedIndex], color);
-        return PromptCopyFormatLoop(input, color);
+            var trimmed = selection.Trim();
+            var normalized = trimmed.ToLowerInvariant();
+            if (normalized is "0" or "b" or "back" or "/back")
+            {
+                return MenuState.Main;
+            }
+
+            if (normalized is "q" or "quit" or "/exit" or "/quit")
+            {
+                return MenuState.Exit;
+            }
+
+            if (string.IsNullOrEmpty(trimmed))
+            {
+                PreviewMarkdownFilePath(candidates[0], color);
+                return PromptCopyFormatLoop(input, color);
+            }
+
+            if (int.TryParse(trimmed, out var chosen))
+            {
+                if (chosen < 1 || chosen > candidates.Count)
+                {
+                    color.WriteWarning($"[!] Invalid option '{trimmed}'. Choose 0-{candidates.Count}.");
+                    continue;
+                }
+
+                PreviewMarkdownFilePath(candidates[chosen - 1], color);
+                return PromptCopyFormatLoop(input, color);
+            }
+
+            var matches = InteractiveSelector.FilterFilePaths(candidates, trimmed);
+            if (matches.Count == 1)
+            {
+                color.WriteSuccess($"  ✓ Matched '{Path.GetFileName(matches[0])}'");
+                PreviewMarkdownFilePath(matches[0], color);
+                return PromptCopyFormatLoop(input, color);
+            }
+
+            if (matches.Count > 1)
+            {
+                candidates = matches;
+                color.WriteMuted($"  Filtered to {matches.Count} matching file(s):");
+                continue;
+            }
+
+            color.WriteWarning($"  [!] No saved Markdown files matched '{trimmed}'.");
+            candidates = mdFiles;
+        }
     }
 
     private void ExecuteInlinePreviewCommand(
@@ -1915,7 +1954,7 @@ public sealed class CliMenuRunner
         var outputDir = sessionOptions.OutputDirectory ?? workspace.OutputDirectory;
         var targetPath = ResolveSavedMarkdownTarget(args[0], outputDir);
         PreviewMarkdownFilePath(targetPath, color);
-        color.WriteMuted("  Tip: Run '/copy raw' or '/copy md' to copy this preview to your clipboard.");
+        color.WriteMuted("  Tip: Run '/copy raw', '/copy md', '/copy clean', or '/copy <field>' to copy to your clipboard.");
     }
 
     private MenuState ExecuteInlineCopyCommand(string[] args, TextReader input, ConsoleColorWriter color)
@@ -1926,22 +1965,34 @@ public sealed class CliMenuRunner
             return MenuState.Main;
         }
 
+        var items = MarkdownOutcomeRenderer.ExtractSelectableItems(
+            _lastMarkdownDocuments,
+            _lastSupplementalUserStory,
+            _lastSupplementalDescription);
+
         if (args.Length > 0)
         {
-            var mode = args[0].Trim().ToLowerInvariant();
-            if (mode is "md" or "markdown")
+            var query = string.Join(" ", args);
+            var matches = InteractiveSelector.FilterOutputItems(items, query);
+            if (matches.Count == 1)
             {
-                CopyCurrentOutcomeToClipboard(asMarkdown: true, color);
+                MarkdownOutcomeRenderer.CopySelectableItemToClipboard(_clipboardService, matches[0], color);
                 return MenuState.Main;
             }
 
-            if (mode is "raw" or "text" or "table")
+            if (matches.Count > 1)
             {
-                CopyCurrentOutcomeToClipboard(asMarkdown: false, color);
+                color.WriteMuted($"  Multiple items matched '{query}': {string.Join(", ", matches.Select(m => m.Id))}");
+                var picked = InteractiveSelector.SelectOutputItemInteractive(matches, input, color, allowInteractiveKeys: false);
+                if (picked is not null)
+                {
+                    MarkdownOutcomeRenderer.CopySelectableItemToClipboard(_clipboardService, picked, color);
+                }
+
                 return MenuState.Main;
             }
 
-            color.WriteWarning($"  [!] Unknown copy format '{args[0]}'. Use '/copy raw' or '/copy md'.");
+            color.WriteWarning($"  [!] Unknown copy target '{query}'. Try: {string.Join(", ", items.Select(i => i.Id))}.");
             return MenuState.Main;
         }
 
@@ -1950,10 +2001,29 @@ public sealed class CliMenuRunner
 
     private MenuState PromptCopyFormatLoop(TextReader input, ConsoleColorWriter color)
     {
+        var allItems = MarkdownOutcomeRenderer.ExtractSelectableItems(
+            _lastMarkdownDocuments,
+            _lastSupplementalUserStory,
+            _lastSupplementalDescription);
+        var currentItems = allItems;
+        var showList = true;
+
         while (true)
         {
+            if (showList)
+            {
+                color.WriteLine();
+                color.WriteSubHeader("Selectable Output Formats & Jira Fields:");
+                foreach (var item in currentItems)
+                {
+                    color.WriteMenuOption(item.NumberKey, item.Label, item.PreviewSummary);
+                }
+
+                showList = false;
+            }
+
             color.WriteLine();
-            color.WriteColored("Copy outcome? [1] Raw Text (table)  [2] Markdown  [0/b] Back  [q] Quit: ", ConsoleColor.Yellow);
+            color.WriteColored("Copy [1] Raw  [2] Markdown  [3] Clean Text  [4..N/name] Field  [0/b] Back  [q] Quit: ", ConsoleColor.Yellow);
             var copyChoice = input.ReadLine();
             if (copyChoice is null)
             {
@@ -1971,19 +2041,30 @@ public sealed class CliMenuRunner
                 return MenuState.Exit;
             }
 
-            if (normalized is "1" or "raw" or "text" or "w")
+            if (normalized is "?" or "list" or "all")
             {
-                CopyCurrentOutcomeToClipboard(asMarkdown: false, color);
+                currentItems = allItems;
+                showList = true;
                 continue;
             }
 
-            if (normalized is "2" or "md" or "markdown" or "m")
+            var matches = InteractiveSelector.FilterOutputItems(currentItems, copyChoice.Trim());
+            if (matches.Count == 1)
             {
-                CopyCurrentOutcomeToClipboard(asMarkdown: true, color);
+                MarkdownOutcomeRenderer.CopySelectableItemToClipboard(_clipboardService, matches[0], color);
+                currentItems = allItems;
                 continue;
             }
 
-            color.WriteWarning($"  [!] Invalid option '{copyChoice.Trim()}'. Choose 1, 2, 0/b, or q.");
+            if (matches.Count > 1)
+            {
+                currentItems = matches;
+                showList = true;
+                continue;
+            }
+
+            color.WriteWarning($"  [!] No format or field matched '{copyChoice.Trim()}'. Choose 1-{allItems.Count}, field name, 0/b, or q.");
+            currentItems = allItems;
         }
     }
 
@@ -1998,22 +2079,29 @@ public sealed class CliMenuRunner
         MarkdownOutcomeRenderer.WriteOutcomeTable(color, _lastMarkdownDocuments);
     }
 
+    private void CacheWizardTickets(
+        ProcessedOutcome outcome,
+        IReadOnlyList<JiraBacklogTicket> tickets,
+        bool combinedOutput)
+    {
+        var resolvedType = tickets[0].BacklogType;
+        _lastMarkdownDocuments = tickets.Select(t => t.FormattedMarkdown).ToArray();
+        _lastSupplementalUserStory = AsIsV1Workflow.ResolveSupplementalUserStory(outcome, resolvedType, combinedOutput);
+        _lastSupplementalDescription = AsIsV1Workflow.ResolveSupplementalDescription(outcome, resolvedType, combinedOutput);
+    }
+
     private void RenderAndCacheWizardTickets(
         ProcessedOutcome outcome,
         IReadOnlyList<JiraBacklogTicket> tickets,
         bool combinedOutput,
         ConsoleColorWriter color)
     {
-        var resolvedType = tickets[0].BacklogType;
-        var docs = tickets.Select(t => t.FormattedMarkdown).ToArray();
-        var suppStory = AsIsV1Workflow.ResolveSupplementalUserStory(outcome, resolvedType, combinedOutput);
-        var suppDesc = AsIsV1Workflow.ResolveSupplementalDescription(outcome, resolvedType, combinedOutput);
-
-        _lastMarkdownDocuments = docs;
-        _lastSupplementalUserStory = suppStory;
-        _lastSupplementalDescription = suppDesc;
-
-        MarkdownOutcomeRenderer.WriteOutcomeTable(color, docs, suppStory, suppDesc);
+        CacheWizardTickets(outcome, tickets, combinedOutput);
+        MarkdownOutcomeRenderer.WriteOutcomeTable(
+            color,
+            _lastMarkdownDocuments,
+            _lastSupplementalUserStory,
+            _lastSupplementalDescription);
     }
 
     private void CopyCurrentOutcomeToClipboard(bool asMarkdown, ConsoleColorWriter color) =>
@@ -2189,8 +2277,8 @@ public sealed class CliMenuRunner
         color.WriteLine("  /process       Open Process menu, or run inline: /process [all|<file>] [--dry-run] [--json]");
         color.WriteLine("  /draft         Open Draft menu (incl. [5] Guided Wizard), or inline: /draft \"<goal>\" [-t 01|02|both] [--details \"...\"] [--search] [--preview]");
         color.WriteLine("  /wizard        Jump straight into the Guided Draft & Refine Wizard (alias: /guided)");
-        color.WriteLine("  /preview       Preview saved './out/*.md' outcome table & copy: /preview [filename]");
-        color.WriteLine("  /copy          Copy last outcome to clipboard: /copy [raw|md]");
+        color.WriteLine("  /preview       Fuzzy-pick or preview saved './out/*.md' outcome table & copy: /preview [filename]");
+        color.WriteLine("  /copy          Copy outcome or field: /copy [raw|md|clean|title|story|desc|ac|alt1..]");
         color.WriteLine("  /status        Show crisp WSL2/Windows paths, queued files, & AI provider readiness table");
         color.WriteLine("  /config        Show or update settings: /config [--json on|off] [--in <dir>] [--out <dir>]");
         color.WriteLine("  /provider      Switch AI orchestrator provider (gemini, copilot-sdk, azure, claude, manual)");

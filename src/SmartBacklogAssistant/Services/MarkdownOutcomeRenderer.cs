@@ -20,6 +20,15 @@ public static class MarkdownOutcomeRenderer
         bool DividerBefore = false,
         ConsoleColor? OverrideTextColor = null);
 
+    public sealed record SelectableOutputItem(
+        string NumberKey,
+        string Id,
+        string Label,
+        string CopyBadgeLabel,
+        string Value,
+        string PreviewSummary,
+        IReadOnlyList<string> Aliases);
+
     public static ParsedMarkdownOutcome ParseMarkdown(string markdown)
     {
         if (string.IsNullOrWhiteSpace(markdown))
@@ -296,12 +305,39 @@ public static class MarkdownOutcomeRenderer
         var payload = asMarkdown
             ? RenderMarkdownText(markdownDocuments)
             : RenderRawTableText(markdownDocuments, supplementalUserStory, supplementalDescription);
+        var label = asMarkdown ? "Markdown outcome" : "Raw Text outcome";
+        return CopyTextAndReport(clipboardService, payload, label, color);
+    }
 
+    public static ClipboardCopyResult CopySelectableItemToClipboard(
+        IClipboardService clipboardService,
+        SelectableOutputItem item,
+        ConsoleColorWriter color)
+    {
+        ArgumentNullException.ThrowIfNull(clipboardService);
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(color);
+
+        if (string.IsNullOrWhiteSpace(item.Value))
+        {
+            var emptyResult = new ClipboardCopyResult(false, "none", $"Selected item '{item.Label}' has no content to copy.");
+            color.WriteWarning($"  [!] {emptyResult.Message}");
+            return emptyResult;
+        }
+
+        return CopyTextAndReport(clipboardService, item.Value, item.CopyBadgeLabel, color);
+    }
+
+    private static ClipboardCopyResult CopyTextAndReport(
+        IClipboardService clipboardService,
+        string payload,
+        string badgeLabel,
+        ConsoleColorWriter color)
+    {
         var result = clipboardService.CopyText(payload);
-        var label = asMarkdown ? "Markdown" : "Raw Text";
         if (result.Succeeded)
         {
-            color.WriteSuccess($"  ✓ Copied {label} outcome to clipboard ({result.Method}).");
+            color.WriteSuccess($"  ✓ Copied {badgeLabel} to clipboard ({result.Method}).");
         }
         else
         {
@@ -309,6 +345,316 @@ public static class MarkdownOutcomeRenderer
         }
 
         return result;
+    }
+
+    public static string StripMarkdownFormatting(string markdown)
+    {
+        if (string.IsNullOrWhiteSpace(markdown))
+        {
+            return string.Empty;
+        }
+
+        var lines = markdown.Replace("\r\n", "\n").Split('\n');
+        var cleaned = new List<string>(lines.Length);
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.TrimEnd();
+            if (line.StartsWith("# [Jira - ", StringComparison.OrdinalIgnoreCase))
+            {
+                cleaned.Add(ExtractCleanTitle(line));
+                continue;
+            }
+
+            if (line.StartsWith('#'))
+            {
+                var idx = 0;
+                while (idx < line.Length && line[idx] == '#')
+                {
+                    idx++;
+                }
+
+                line = line[idx..].TrimStart();
+            }
+
+            line = line.Replace("**", string.Empty, StringComparison.Ordinal)
+                       .Replace("`", string.Empty, StringComparison.Ordinal);
+
+            cleaned.Add(line);
+        }
+
+        return TrimBlankLines(cleaned);
+    }
+
+    public static string RenderCleanPlainText(
+        IReadOnlyList<string> markdownDocuments,
+        string? supplementalUserStory = null,
+        string? supplementalDescription = null)
+    {
+        ArgumentNullException.ThrowIfNull(markdownDocuments);
+
+        var rows = BuildTableRows(markdownDocuments, supplementalUserStory, supplementalDescription);
+        if (rows.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var blocks = new List<string>(rows.Count);
+        foreach (var row in rows)
+        {
+            if (row.Section.Equals("Stage / Type", StringComparison.OrdinalIgnoreCase))
+            {
+                blocks.Add($"Stage / Type: {row.Content.Trim()}");
+                continue;
+            }
+
+            if (row.Section is "Title" or "Type01" or "Type02")
+            {
+                blocks.Add($"{row.Section}: {ExtractCleanTitle(row.Content)}");
+                continue;
+            }
+
+            var header = row.Section.Equals("Acceptance", StringComparison.OrdinalIgnoreCase)
+                ? "Acceptance Criteria"
+                : row.Section;
+            var cleanBody = StripMarkdownFormatting(row.Content);
+            if (!string.IsNullOrWhiteSpace(cleanBody))
+            {
+                blocks.Add($"{header}:\n{cleanBody}");
+            }
+        }
+
+        return string.Join("\n\n", blocks).Trim();
+    }
+
+    public static IReadOnlyList<SelectableOutputItem> ExtractSelectableItems(
+        IReadOnlyList<string> markdownDocuments,
+        string? supplementalUserStory = null,
+        string? supplementalDescription = null)
+    {
+        ArgumentNullException.ThrowIfNull(markdownDocuments);
+        if (markdownDocuments.Count == 0)
+        {
+            return [];
+        }
+
+        var items = new List<SelectableOutputItem>();
+        var rawTable = RenderRawTableText(markdownDocuments, supplementalUserStory, supplementalDescription);
+        var fullMarkdown = RenderMarkdownText(markdownDocuments);
+        var cleanText = RenderCleanPlainText(markdownDocuments, supplementalUserStory, supplementalDescription);
+
+        items.Add(new SelectableOutputItem(
+            "1",
+            "raw",
+            "Raw Text (table)",
+            "Raw Text outcome",
+            rawTable,
+            SummarizePreview(rawTable),
+            ["raw", "table", "w"]));
+
+        items.Add(new SelectableOutputItem(
+            "2",
+            "md",
+            "Markdown",
+            "Markdown outcome",
+            fullMarkdown,
+            SummarizePreview(fullMarkdown),
+            ["md", "markdown", "m"]));
+
+        items.Add(new SelectableOutputItem(
+            "3",
+            "clean",
+            "Clean Plain Text (no borders/markdown)",
+            "Clean Plain Text outcome",
+            cleanText,
+            SummarizePreview(cleanText),
+            ["clean", "plain", "text", "c"]));
+
+        var rows = BuildTableRows(markdownDocuments, supplementalUserStory, supplementalDescription);
+        var nextNumber = 4;
+
+        var titleRow = rows.FirstOrDefault(r => r.Section is "Title" or "Type01" or "Type02");
+        if (titleRow is not null)
+        {
+            var cleanTitle = ExtractCleanTitle(titleRow.Content);
+            if (!string.IsNullOrWhiteSpace(cleanTitle))
+            {
+                items.Add(new SelectableOutputItem(
+                    (nextNumber++).ToString(),
+                    "title",
+                    "Title (Clean)",
+                    "Title",
+                    cleanTitle,
+                    SummarizePreview(cleanTitle),
+                    ["title", "t"]));
+            }
+        }
+
+        var storyRow = rows.FirstOrDefault(r => r.Section.Equals("User Story", StringComparison.OrdinalIgnoreCase));
+        if (storyRow is not null && IsMeaningfulSupplemental(storyRow.Content))
+        {
+            var cleanStory = StripMarkdownFormatting(storyRow.Content);
+            items.Add(new SelectableOutputItem(
+                (nextNumber++).ToString(),
+                "story",
+                "User Story (Clean)",
+                "User Story",
+                cleanStory,
+                SummarizePreview(cleanStory),
+                ["story", "user-story", "us"]));
+        }
+
+        var descRow = rows.FirstOrDefault(r => r.Section.Equals("Description", StringComparison.OrdinalIgnoreCase));
+        if (descRow is not null && IsMeaningfulSupplemental(descRow.Content))
+        {
+            var cleanDesc = StripMarkdownFormatting(descRow.Content);
+            items.Add(new SelectableOutputItem(
+                (nextNumber++).ToString(),
+                "desc",
+                "Description (Clean)",
+                "Description",
+                cleanDesc,
+                SummarizePreview(cleanDesc),
+                ["desc", "description", "d"]));
+        }
+
+        var acRow = rows.FirstOrDefault(r => r.Section.Equals("Acceptance", StringComparison.OrdinalIgnoreCase));
+        if (acRow is not null)
+        {
+            var cleanAc = StripMarkdownFormatting(acRow.Content);
+            if (!string.IsNullOrWhiteSpace(cleanAc))
+            {
+                items.Add(new SelectableOutputItem(
+                    (nextNumber++).ToString(),
+                    "ac",
+                    "Acceptance Criteria (Clean)",
+                    "Acceptance Criteria",
+                    cleanAc,
+                    SummarizePreview(cleanAc),
+                    ["ac", "acceptance", "gwt", "criteria"]));
+            }
+        }
+
+        var altRow = rows.FirstOrDefault(r => r.Section.Equals("Alternatives", StringComparison.OrdinalIgnoreCase));
+        if (altRow is not null)
+        {
+            var alternatives = ParseAlternatives(altRow.Content);
+            for (var i = 0; i < alternatives.Count; i++)
+            {
+                var (angle, title, description) = alternatives[i];
+                var altNum = i + 1;
+                var value = string.IsNullOrWhiteSpace(description)
+                    ? title
+                    : $"{title}\n{description}";
+                var label = string.IsNullOrWhiteSpace(angle)
+                    ? $"Alternative #{altNum}"
+                    : $"Alternative #{altNum} ({angle})";
+
+                items.Add(new SelectableOutputItem(
+                    (nextNumber++).ToString(),
+                    $"alt{altNum}",
+                    label,
+                    $"Alternative #{altNum}",
+                    value,
+                    SummarizePreview(title),
+                    [$"alt{altNum}", $"alternative{altNum}", $"alt-{altNum}"]));
+            }
+        }
+
+        return items;
+    }
+
+    private static string ExtractCleanTitle(string rawTitleLine)
+    {
+        var trimmed = rawTitleLine.Trim();
+        if (trimmed.StartsWith("# ", StringComparison.Ordinal))
+        {
+            trimmed = trimmed[2..].Trim();
+        }
+
+        const string jiraPrefix = "[Jira - ";
+        if (trimmed.StartsWith(jiraPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            var closeIdx = trimmed.IndexOf(']', jiraPrefix.Length);
+            if (closeIdx >= 0 && closeIdx + 1 < trimmed.Length)
+            {
+                trimmed = trimmed[(closeIdx + 1)..].Trim();
+            }
+        }
+
+        return trimmed.Replace("**", string.Empty, StringComparison.Ordinal)
+                      .Replace("`", string.Empty, StringComparison.Ordinal);
+    }
+
+    private static IReadOnlyList<(string Angle, string Title, string Description)> ParseAlternatives(string rawAlternatives)
+    {
+        var parsed = new List<(string Angle, string Title, string Description)>();
+        var lines = rawAlternatives.Replace("\r\n", "\n").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.Trim();
+            var prefixLen = GetNumberedListPrefixLength(line);
+            if (prefixLen == 0)
+            {
+                continue;
+            }
+
+            var body = line[prefixLen..].Replace("**", string.Empty, StringComparison.Ordinal).Trim();
+            var angle = string.Empty;
+            if (body.StartsWith('[') && body.IndexOf(']') is > 1 and var closeBracket)
+            {
+                angle = body[1..closeBracket].Trim();
+                body = body[(closeBracket + 1)..].Trim();
+            }
+
+            string title;
+            string description;
+            var emDashIdx = body.IndexOf(" — ", StringComparison.Ordinal);
+            if (emDashIdx >= 0)
+            {
+                title = body[..emDashIdx].Trim();
+                description = body[(emDashIdx + 3)..].Trim();
+            }
+            else
+            {
+                var dashIdx = body.IndexOf(" - ", StringComparison.Ordinal);
+                if (dashIdx >= 0)
+                {
+                    title = body[..dashIdx].Trim();
+                    description = body[(dashIdx + 3)..].Trim();
+                }
+                else
+                {
+                    title = body;
+                    description = string.Empty;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(title))
+            {
+                parsed.Add((angle, title, description));
+            }
+        }
+
+        return parsed;
+    }
+
+    private static string SummarizePreview(string value, int maxLength = 52)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var singleLine = string.Join(
+            ' ',
+            value.Replace("\r\n", "\n")
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+
+        return singleLine.Length <= maxLength
+            ? singleLine
+            : singleLine[..(maxLength - 1)] + "…";
     }
 
     private static void WriteStyledMarkdownCellLine(

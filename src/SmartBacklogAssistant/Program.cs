@@ -111,7 +111,9 @@ public static class Program
                     workspaceService,
                     settingsService,
                     clipboardService ?? new OsClipboardService(),
-                    output);
+                    input,
+                    output,
+                    error);
             }
 
             if (options.ShowDoctorStatus)
@@ -176,7 +178,21 @@ public static class Program
             workflow.Execute(resolvedOptions, input, output);
 
             var copyMode = GetArgValue(args, "--copy");
-            if (!string.IsNullOrWhiteSpace(copyMode) && workflow.LastMarkdownDocuments.Count > 0)
+            var selectInteractive = HasAnyFlag(args, "--select", "-s");
+            if (selectInteractive && workflow.LastMarkdownDocuments.Count > 0)
+            {
+                RunInteractiveOutputSelection(
+                    options,
+                    resolvedOptions.CliTheme,
+                    workflow.LastMarkdownDocuments,
+                    workflow.LastSupplementalUserStory,
+                    workflow.LastSupplementalDescription,
+                    clipboardService ?? new OsClipboardService(),
+                    input,
+                    output,
+                    error);
+            }
+            else if (!string.IsNullOrWhiteSpace(copyMode) && workflow.LastMarkdownDocuments.Count > 0)
             {
                 var colorWriter = new ConsoleColorWriter(output, theme: ConsoleColorWriter.ResolveTheme(resolvedOptions.CliTheme));
                 CopyOutcomeWithMode(
@@ -332,7 +348,26 @@ public static class Program
         WorkspacePathService workspaceService,
         CliSettingsService settingsService,
         IClipboardService clipboardService,
-        TextWriter output)
+        TextWriter output) =>
+        RunPreviewCommand(
+            args,
+            options,
+            workspaceService,
+            settingsService,
+            clipboardService,
+            Console.In,
+            output,
+            Console.Error);
+
+    public static int RunPreviewCommand(
+        string[] args,
+        WorkflowOptions options,
+        WorkspacePathService workspaceService,
+        CliSettingsService settingsService,
+        IClipboardService clipboardService,
+        TextReader input,
+        TextWriter output,
+        TextWriter error)
     {
         var baseWorkspace = workspaceService.Resolve(options.WorkspaceRoot);
         var settings = settingsService.Load(baseWorkspace);
@@ -341,23 +376,140 @@ public static class Program
             ? workspaceService.ResolveCustomOrRelativePath(options.OutputDirectory, activeWorkspace.IsWindows)
             : activeWorkspace.OutputDirectory;
 
-        var (_, positionalTarget) = ParseSubcommand(args);
-        var explicitTarget = GetArgValue(args, "--input", "-i") ?? positionalTarget;
-        var resolvedPath = CliMenuRunner.ResolveSavedMarkdownTarget(explicitTarget, outputDir);
-        var markdown = File.ReadAllText(resolvedPath);
+        var selectInteractive = HasAnyFlag(args, "--select", "-s");
+        var copyMode = GetArgValue(args, "--copy");
+        if (selectInteractive && options.NonInteractive)
+        {
+            throw new InvalidOperationException("Interactive selection ('--select') requires an interactive terminal session.");
+        }
 
         var theme = ConsoleColorWriter.ResolveTheme(options.CliTheme, settings.Theme);
+        var (_, positionalTarget) = ParseSubcommand(args);
+        var explicitTarget = GetArgValue(args, "--input", "-i") ?? positionalTarget;
+
+        string resolvedPath;
+        if (selectInteractive && string.IsNullOrWhiteSpace(explicitTarget))
+        {
+            var savedFiles = CliMenuRunner.GetSavedMarkdownFiles(outputDir);
+            if (savedFiles.Count == 0)
+            {
+                throw new FileNotFoundException($"No saved Markdown outcome files (.md) found in '{outputDir}'.", outputDir);
+            }
+
+            if (savedFiles.Count == 1)
+            {
+                resolvedPath = savedFiles[0];
+            }
+            else
+            {
+                EnsureInteractiveInputAvailable(input);
+                var promptColor = new ConsoleColorWriter(error, theme: theme);
+                var chosenPath = InteractiveSelector.SelectFileInteractive(savedFiles, input, promptColor);
+                if (chosenPath is null)
+                {
+                    promptColor.WriteMuted("  Selection cancelled.");
+                    return 0;
+                }
+
+                resolvedPath = chosenPath;
+            }
+        }
+        else
+        {
+            resolvedPath = CliMenuRunner.ResolveSavedMarkdownTarget(explicitTarget, outputDir);
+        }
+
+        var markdown = File.ReadAllText(resolvedPath);
+
+        if (selectInteractive)
+        {
+            var promptColor = new ConsoleColorWriter(error, theme: theme);
+            if (!string.IsNullOrWhiteSpace(copyMode))
+            {
+                var items = MarkdownOutcomeRenderer.ExtractSelectableItems([markdown]);
+                var matches = InteractiveSelector.FilterOutputItems(items, copyMode.Trim());
+                if (matches.Count == 0)
+                {
+                    var validTargets = string.Join(", ", items.Select(i => i.Id));
+                    throw new ArgumentException($"Unsupported --copy target '{copyMode}'. Available targets: {validTargets}.");
+                }
+
+                MarkdownOutcomeRenderer.CopySelectableItemToClipboard(clipboardService, matches[0], promptColor);
+                output.WriteLine(matches[0].Value);
+                return 0;
+            }
+
+            return RunInteractiveOutputSelection(
+                options,
+                ConsoleColorWriter.GetThemeCode(theme),
+                [markdown],
+                null,
+                null,
+                clipboardService,
+                input,
+                output,
+                error);
+        }
+
         var color = new ConsoleColorWriter(output, theme: theme);
         color.WriteMuted($"  Reading Markdown: {resolvedPath}");
         MarkdownOutcomeRenderer.WriteOutcomeTable(color, [markdown]);
 
-        var copyMode = GetArgValue(args, "--copy");
         if (!string.IsNullOrWhiteSpace(copyMode))
         {
             CopyOutcomeWithMode(copyMode, [markdown], null, null, clipboardService, color);
         }
 
         return 0;
+    }
+
+    private static int RunInteractiveOutputSelection(
+        WorkflowOptions options,
+        string? cliTheme,
+        IReadOnlyList<string> markdownDocuments,
+        string? supplementalUserStory,
+        string? supplementalDescription,
+        IClipboardService clipboardService,
+        TextReader input,
+        TextWriter output,
+        TextWriter error)
+    {
+        if (options.NonInteractive)
+        {
+            throw new InvalidOperationException("Interactive selection ('--select') requires an interactive terminal session.");
+        }
+
+        EnsureInteractiveInputAvailable(input);
+
+        var promptColor = new ConsoleColorWriter(error, theme: ConsoleColorWriter.ResolveTheme(cliTheme));
+        var items = MarkdownOutcomeRenderer.ExtractSelectableItems(
+            markdownDocuments,
+            supplementalUserStory,
+            supplementalDescription);
+
+        var selected = InteractiveSelector.SelectOutputItemInteractive(items, input, promptColor);
+        if (selected is null)
+        {
+            promptColor.WriteMuted("  Selection cancelled.");
+            return 0;
+        }
+
+        MarkdownOutcomeRenderer.CopySelectableItemToClipboard(clipboardService, selected, promptColor);
+        output.WriteLine(selected.Value);
+        return 0;
+    }
+
+    private static void EnsureInteractiveInputAvailable(TextReader input)
+    {
+        if (ReferenceEquals(input, Console.In) && Console.IsInputRedirected && input.Peek() == -1)
+        {
+            throw new InvalidOperationException("Interactive selection ('--select') received EOF on stdin.");
+        }
+
+        if (!ReferenceEquals(input, Console.In) && input.Peek() == -1)
+        {
+            throw new InvalidOperationException("Interactive selection ('--select') received empty input.");
+        }
     }
 
     private static void CopyOutcomeWithMode(
@@ -368,20 +520,18 @@ public static class Program
         IClipboardService clipboardService,
         ConsoleColorWriter color)
     {
-        var normalized = copyMode.Trim().ToLowerInvariant();
-        if (normalized is not ("md" or "markdown" or "raw" or "text" or "table"))
-        {
-            throw new ArgumentException($"Unsupported --copy format '{copyMode}'. Use 'raw' or 'md'.");
-        }
-
-        var asMarkdown = normalized is "md" or "markdown";
-        MarkdownOutcomeRenderer.CopyOutcomeToClipboard(
-            clipboardService,
-            asMarkdown,
+        var items = MarkdownOutcomeRenderer.ExtractSelectableItems(
             markdownDocuments,
             supplementalUserStory,
-            supplementalDescription,
-            color);
+            supplementalDescription);
+        var matches = InteractiveSelector.FilterOutputItems(items, copyMode.Trim());
+        if (matches.Count == 0)
+        {
+            var validTargets = string.Join(", ", items.Select(i => i.Id));
+            throw new ArgumentException($"Unsupported --copy target '{copyMode}'. Available targets: {validTargets}.");
+        }
+
+        MarkdownOutcomeRenderer.CopySelectableItemToClipboard(clipboardService, matches[0], color);
     }
 
     public static int RunConfigCommand(
@@ -651,7 +801,8 @@ public static class Program
                 output.WriteLine("Reads a saved .md outcome from ./out (or explicit path) and previews it in one colored table.");
                 output.WriteLine();
                 output.WriteLine("OPTIONS:");
-                output.WriteLine("  --copy <raw|md>          Copy outcome to clipboard as Raw Text table or Markdown");
+                output.WriteLine("  -s, --select             Interactively fuzzy-select file & field (prompts on stderr, clean value on stdout)");
+                output.WriteLine("  --copy <target>          Copy to clipboard: raw, md, clean, title, story, desc, ac, alt1..alt3");
                 output.WriteLine("  --output-dir <path>      Override ./out directory to inspect");
                 output.WriteLine("  -w, --workspace <path>   Workspace root override");
                 output.WriteLine("  --theme <agy|uv|kubectl> Table color palette");
@@ -691,6 +842,8 @@ public static class Program
         output.WriteLine("  -d, --details <text>         Additional context/requirements for goal drafts");
         output.WriteLine("  --search, --web              Run Google Search grounding on goal drafts (Gemini Live)");
         output.WriteLine("  --offline / --live           Toggle live AI generation vs local deterministic drafting");
+        output.WriteLine("  -s, --select                 Interactive fuzzy output picker (stderr prompts, clean stdout)");
+        output.WriteLine("  --copy <target>              Copy outcome or field (raw, md, clean, title, story, desc, ac, alt1..)");
         output.WriteLine("  --non-interactive            Disable stdin prompts");
         output.WriteLine("  --theme <agy|uv|kubectl>     CLI color palette");
         output.WriteLine("  -h, --help                   Show help (run '<command> --help' for command options)");

@@ -16,22 +16,29 @@ public interface IClipboardService
 /// <summary>
 /// Cross-platform OS clipboard writer using native system utilities
 /// (<c>Set-Clipboard</c>/<c>clip.exe</c> on Windows and WSL2, <c>pbcopy</c> on macOS,
-/// <c>wl-copy</c>/<c>xclip</c>/<c>xsel</c> on Linux) with zero external NuGet dependencies.
+/// <c>wl-copy</c>/<c>xclip</c>/<c>xsel</c> on Linux) with ANSI OSC 52 terminal fallback
+/// and zero external NuGet dependencies.
 /// </summary>
 public sealed class OsClipboardService : IClipboardService
 {
     private readonly Func<string, string?> _environmentReader;
     private readonly Func<string, bool> _fileExists;
     private readonly Func<string, string, string, bool> _commandRunner;
+    private readonly TextWriter? _osc52Writer;
+    private readonly Func<bool>? _osc52Allowed;
 
     public OsClipboardService(
         Func<string, string?>? environmentReader = null,
         Func<string, bool>? fileExists = null,
-        Func<string, string, string, bool>? commandRunner = null)
+        Func<string, string, string, bool>? commandRunner = null,
+        TextWriter? osc52Writer = null,
+        Func<bool>? osc52Allowed = null)
     {
         _environmentReader = environmentReader ?? Environment.GetEnvironmentVariable;
         _fileExists = fileExists ?? File.Exists;
         _commandRunner = commandRunner ?? ExecuteClipboardCommand;
+        _osc52Writer = osc52Writer;
+        _osc52Allowed = osc52Allowed;
     }
 
     public ClipboardCopyResult CopyText(string text)
@@ -49,10 +56,68 @@ public sealed class OsClipboardService : IClipboardService
             }
         }
 
+        if (CanUseOsc52Fallback())
+        {
+            var isTmux = !string.IsNullOrWhiteSpace(_environmentReader("TMUX"));
+            var sequence = FormatOsc52Sequence(text, isTmux);
+            try
+            {
+                var writer = _osc52Writer ?? Console.Error;
+                writer.Write(sequence);
+                writer.Flush();
+                var method = isTmux ? "OSC 52 (tmux)" : "OSC 52";
+                return new ClipboardCopyResult(true, method, $"Copied to clipboard via {method}.");
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                return new ClipboardCopyResult(false, "none", $"Failed to write OSC 52 clipboard sequence: {ex.Message}");
+            }
+        }
+
         return new ClipboardCopyResult(
             false,
             "none",
             "No active OS clipboard utility detected in this terminal session.");
+    }
+
+    public static string FormatOsc52Sequence(string text, bool isTmux = false)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
+        return isTmux
+            ? $"\u001bPtmux;\u001b\u001b]52;c;{base64}\a\u001b\\"
+            : $"\u001b]52;c;{base64}\a";
+    }
+
+    internal bool CanUseOsc52Fallback()
+    {
+        if (_osc52Allowed is not null)
+        {
+            return _osc52Allowed();
+        }
+
+        var overrideFlag = _environmentReader("SBA_OSC52")?.Trim().ToLowerInvariant();
+        if (overrideFlag is "1" or "on" or "true")
+        {
+            return true;
+        }
+
+        if (overrideFlag is "0" or "off" or "false")
+        {
+            return false;
+        }
+
+        var term = _environmentReader("TERM");
+        if (string.Equals(term?.Trim(), "dumb", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return !string.IsNullOrWhiteSpace(term) ||
+               !string.IsNullOrWhiteSpace(_environmentReader("WT_SESSION")) ||
+               !string.IsNullOrWhiteSpace(_environmentReader("TERM_PROGRAM")) ||
+               !string.IsNullOrWhiteSpace(_environmentReader("SSH_TTY")) ||
+               !string.IsNullOrWhiteSpace(_environmentReader("TMUX"));
     }
 
     internal IReadOnlyList<(string Executable, string Arguments, string Label)> ResolveCandidates()
