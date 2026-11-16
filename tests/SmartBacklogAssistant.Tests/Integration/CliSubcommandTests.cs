@@ -22,6 +22,7 @@ public sealed class CliSubcommandTests : IDisposable
     [InlineData(new[] { "process", "--help" }, "Process Discovery Files")]
     [InlineData(new[] { "draft", "--help" }, "Draft Backlog Item from Goal or Title")]
     [InlineData(new[] { "config", "--help" }, "View or Persist Workspace Configuration")]
+    [InlineData(new[] { "preview", "--help" }, "Preview Saved Markdown Outcome")]
     [InlineData(new[] { "status", "--help" }, "Workspace & AI Diagnostics")]
     public void Execute_HelpCommands_RenderScannableSubcommandDocumentation(string[] args, string expectedHeading)
     {
@@ -322,14 +323,99 @@ public sealed class CliSubcommandTests : IDisposable
         Assert.Empty(Directory.GetFiles(dirs.OutputDirectory));
 
         var consoleText = output.ToString();
+        Assert.Contains("Smart Backlog Assistant — Markdown Outcome", consoleText);
         Assert.Contains("**Objective:**", consoleText);
-        Assert.Contains("User Story :", consoleText);
-        Assert.Contains("Suggested Title & Description Alternatives", consoleText);
-        Assert.Contains("[1] Action & Delivery", consoleText);
-        Assert.Contains("[2] User Value / Story", consoleText);
-        Assert.Contains("[3] Verification & Scope", consoleText);
-        Assert.Contains("## Title & Description Alternatives", consoleText);
+        Assert.Contains("User Story", consoleText);
+        Assert.Contains("Alternatives", consoleText);
+        Assert.Contains("[Action & Delivery]", consoleText);
+        Assert.Contains("[User Value / Story]", consoleText);
+        Assert.Contains("[Verification & Scope]", consoleText);
         Assert.DoesNotContain("Not specified in discovery notes", consoleText);
+
+        var tableLines = consoleText
+            .Replace("\r\n", "\n")
+            .Split('\n')
+            .SkipWhile(line => !line.StartsWith('┌'))
+            .TakeWhile(line => !line.Contains("[Preview / Dry Run]", StringComparison.Ordinal))
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .ToArray();
+
+        Assert.True(tableLines.Length >= 8);
+        Assert.StartsWith("┌", tableLines[0]);
+        Assert.EndsWith("┐", tableLines[0]);
+        Assert.StartsWith("└", tableLines[^1]);
+        Assert.EndsWith("┘", tableLines[^1]);
+        var expectedWidth = tableLines[0].Length;
+        Assert.All(tableLines, line => Assert.Equal(expectedWidth, line.Length));
+        Assert.All(tableLines[1..^1], line => Assert.True(
+            (line.StartsWith("│ ", StringComparison.Ordinal) && line.EndsWith(" │", StringComparison.Ordinal)) ||
+            (line.StartsWith("├", StringComparison.Ordinal) && line.EndsWith("┤", StringComparison.Ordinal))));
+    }
+
+    [Fact]
+    public void Execute_PreviewSubcommand_ReadsSavedMarkdownAndCopiesRawAndMarkdownFormats()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempRoot);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        var mdPath = Path.Combine(dirs.OutputDirectory, "type02-verify-theme.md");
+        File.WriteAllText(mdPath, """
+            # [Jira - schedule (Type02)] Verify Theme Rules
+
+            ## Description
+            **Objective:** Confirm official rules and dates.
+            **Suggested Actions:**
+            * Check announcement blog
+            * Verify timeline dates
+            """);
+
+        var clipboard = new RecordingClipboardService();
+        using var outRaw = new StringWriter();
+        using var errRaw = new StringWriter();
+        var rawExit = Program.Execute(
+            ["-w", _tempRoot, "preview", "type02-verify-theme", "--copy", "raw"],
+            new StringReader(string.Empty),
+            outRaw,
+            errRaw,
+            clipboard);
+
+        Assert.Equal(0, rawExit);
+        Assert.Empty(errRaw.ToString());
+        Assert.Contains("Reading Markdown:", outRaw.ToString());
+        Assert.Contains("Smart Backlog Assistant — Markdown Outcome", outRaw.ToString());
+        Assert.Contains("✓ Copied Raw Text outcome to clipboard", outRaw.ToString());
+
+        Assert.Single(clipboard.CopiedTexts);
+        Assert.Contains("┌", clipboard.CopiedTexts[0]);
+        Assert.Contains("\n", clipboard.CopiedTexts[0]);
+        Assert.Contains("* Check announcement blog", clipboard.CopiedTexts[0]);
+
+        using var outMd = new StringWriter();
+        using var errMd = new StringWriter();
+        var mdExit = Program.Execute(
+            ["-w", _tempRoot, "preview", "--copy", "md"],
+            new StringReader(string.Empty),
+            outMd,
+            errMd,
+            clipboard);
+
+        Assert.Equal(0, mdExit);
+        Assert.Empty(errMd.ToString());
+        Assert.Equal(2, clipboard.CopiedTexts.Count);
+        Assert.StartsWith("# [Jira - schedule (Type02)] Verify Theme Rules", clipboard.CopiedTexts[1]);
+        Assert.Contains("* Verify timeline dates", clipboard.CopiedTexts[1]);
+        Assert.DoesNotContain("┌", clipboard.CopiedTexts[1]);
+    }
+
+    private sealed class RecordingClipboardService : IClipboardService
+    {
+        public List<string> CopiedTexts { get; } = [];
+
+        public ClipboardCopyResult CopyText(string text)
+        {
+            CopiedTexts.Add(text);
+            return new ClipboardCopyResult(true, "fake-clipboard", "Copied via fake-clipboard.");
+        }
     }
 
     public void Dispose()

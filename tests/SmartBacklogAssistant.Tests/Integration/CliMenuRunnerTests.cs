@@ -262,7 +262,8 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.Contains("[Preview] Type01 item 'Implement preview' generated. No files written.", text);
         Assert.Contains("[Preview] Type02 item 'Check Geocaching 2026 hiding movie theme' generated. No files written.", text);
         Assert.Contains("[Preview] Type01 and Type02 items 'Migrate Auth Sessions' generated. No files written.", text);
-        Assert.Contains("Suggested Title & Description Alternatives", text);
+        Assert.Contains("Alternatives", text);
+        Assert.Contains("[Action & Delivery]", text);
         Assert.DoesNotContain("Not specified in discovery notes", text);
     }
 
@@ -727,10 +728,70 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.Contains("**Objective (User Value / Story):**", content);
     }
 
+    [Fact]
+    public void Run_MenuOption4PreviewAndGuidedWizardCopy_ReadsMarkdownPreviewsTableAndCopiesBothFormats()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var clipboard = new FakeClipboardService();
+        var menu = CreateMenuRunner(workspaceService, clipboardService: clipboard);
+
+        // 1) Guided wizard: draft Type02, copy Raw Text [W], copy Markdown [M], Accept & Save [A], Back [0]
+        // 2) Main menu [4] Preview & Copy (.md): select #1, copy Raw Text [1], copy Markdown [2], Back [0]
+        // 3) REPL /copy md, then /exit
+        using var input = new StringReader(
+            "2\n5\n" +
+            "2\n" +
+            "Check Geocaching 2026 hiding movie theme\n" +
+            "\n" +
+            "w\n" +
+            "m\n" +
+            "a\n" +
+            "0\n" +
+            "4\n" +
+            "\n" +
+            "1\n" +
+            "2\n" +
+            "0\n" +
+            "/preview type02-check-geocaching-2026-hiding-movie-theme\n" +
+            "/copy raw\n" +
+            "/exit\n");
+        using var output = new StringWriter();
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        var consoleText = output.ToString();
+        Assert.Contains("=== Preview & Copy Outcome (Markdown) ===", consoleText);
+        Assert.Contains("✓ Copied Raw Text outcome to clipboard", consoleText);
+        Assert.Contains("✓ Copied Markdown outcome to clipboard", consoleText);
+
+        Assert.Equal(5, clipboard.CopiedPayloads.Count);
+        // [0] Raw Text from Guided Wizard
+        Assert.Contains("┌", clipboard.CopiedPayloads[0]);
+        Assert.Contains("* Gather official rules", clipboard.CopiedPayloads[0]);
+        // [1] Markdown from Guided Wizard
+        Assert.StartsWith("# [Jira - schedule (Type02)] Check Geocaching 2026 hiding movie theme", clipboard.CopiedPayloads[1]);
+        Assert.DoesNotContain("┌", clipboard.CopiedPayloads[1]);
+        // [2] Raw Text from Menu [4] reading saved .md
+        Assert.Contains("┌", clipboard.CopiedPayloads[2]);
+        Assert.Contains("* Gather official rules", clipboard.CopiedPayloads[2]);
+        // [3] Markdown from Menu [4] reading saved .md
+        Assert.StartsWith("# [Jira - schedule (Type02)] Check Geocaching 2026 hiding movie theme", clipboard.CopiedPayloads[3]);
+        // [4] Raw Text from /preview + /copy raw
+        Assert.Contains("┌", clipboard.CopiedPayloads[4]);
+    }
+
     private static CliMenuRunner CreateMenuRunner(
         WorkspacePathService workspaceService,
         CliSettingsService? settingsService = null,
-        GeminiApiClient? geminiApiClient = null)
+        GeminiApiClient? geminiApiClient = null,
+        IClipboardService? clipboardService = null)
     {
         var secretProvider = new GeminiSecretProvider(
             environmentReader: _ => null,
@@ -753,7 +814,19 @@ public sealed class CliMenuRunnerTests : IDisposable
             runtimeService,
             secretProvider,
             orchestrator,
-            settingsService ?? new CliSettingsService());
+            settingsService ?? new CliSettingsService(),
+            clipboardService: clipboardService);
+    }
+
+    private sealed class FakeClipboardService : IClipboardService
+    {
+        public List<string> CopiedPayloads { get; } = [];
+
+        public ClipboardCopyResult CopyText(string text)
+        {
+            CopiedPayloads.Add(text);
+            return new ClipboardCopyResult(true, "fake-clipboard", "Copied via fake-clipboard.");
+        }
     }
 
     public void Dispose()

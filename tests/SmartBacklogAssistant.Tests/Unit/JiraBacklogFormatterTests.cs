@@ -102,4 +102,21 @@ public sealed class JiraBacklogFormatterTests
         Assert.Contains("## Title & Description Alternatives", type02.FormattedMarkdown);
         Assert.Contains("**[Verification & Scope] Validate Export SLAs & Access Rules** — Verify 30s SLA and RBAC enforcement.", type02.FormattedMarkdown);
     }
+
+    [Fact]
+    public void Format_WithType02VerboseDescription_LimitsTo57WordsAndUsesAsteriskBullets()
+    {
+        var verboseOutcome = CreateSampleOutcome() with
+        {
+            Description = "**Objective:** " + string.Join(' ', Enumerable.Range(1, 35).Select(i => $"word{i}")) +
+                          "\n**Suggested Actions:**\n- Check item one\n- Check item two\n- Check item three"
+        };
+
+        var ticket = _sut.Format(verboseOutcome, BacklogType.Type02);
+
+        Assert.NotNull(ticket.Description);
+        Assert.True(DescriptionFormatter.CountWords(ticket.Description) <= DescriptionFormatter.MaxDescriptionWords);
+        Assert.Contains("* Check item one", ticket.Description);
+        Assert.DoesNotContain("- Check item", ticket.Description);
+    }
 }

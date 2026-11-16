@@ -13,9 +13,10 @@ public sealed class GoalExpansionSynthesizerTests
         Assert.StartsWith("As a ", expansion.UserStory);
         Assert.Contains("so that ", expansion.UserStory);
         Assert.Contains("**Objective:**", expansion.DiscoverySummary);
-        Assert.Contains("**User Story Framing:**", expansion.DiscoverySummary);
-        Assert.Contains("**Verification / Action Checklist:**", expansion.DiscoverySummary);
+        Assert.Contains("**Suggested Actions:**", expansion.DiscoverySummary);
+        Assert.Contains("* Gather official rules", expansion.DiscoverySummary);
         Assert.DoesNotContain("Not specified in discovery notes", expansion.DiscoverySummary);
+        Assert.True(DescriptionFormatter.CountWords(expansion.DiscoverySummary) <= DescriptionFormatter.MaxDescriptionWords);
 
         Assert.Equal(3, expansion.KeyChecklist.Count);
         Assert.Equal(3, expansion.Alternatives.Count);

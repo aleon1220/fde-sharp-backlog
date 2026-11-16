@@ -5,18 +5,19 @@ The user supplied only a brief **Goal** or topic without full discovery notes. A
 
 ## Expansion Principles
 
-1. **Allow Creative Synthesis from the Goal**:
+1. **Keep It Simple & Concise**:
    - Do **NOT** emit `Not specified in discovery notes` boilerplate or tell the user discovery notes are missing.
-   - Infer the most useful **Actor / Role**, **Target Capability**, **Operational Objective**, and **Verification / Delivery Checklist** implied by the goal, incorporating any user-supplied `Context:` or `Web Research Findings:`.
-   - Do **not** fabricate fake employee names or claim private sprint commitments already occurred; frame unconfirmed external specifics clearly as items to confirm in the checklist.
+   - Infer the most useful **Actor / Role**, **Target Capability**, **Objective**, and **Suggested Actions** implied by the goal, incorporating any user-supplied `Context:` or `Web Research Findings:`.
+   - Keep `discoverySummary` simple and **strictly max 57 words total**, using `*` markdown bullet points (`* action`) for suggested actions.
+   - Do **not** fabricate fake employee names or claim private sprint commitments already occurred.
 2. **Apply User Story Principles to Enhance the Title**:
-   - Transform vague or brief phrases (e.g., `"check Geocaching 2026 hiding movie theme"`) into crisp, action-oriented Titles starting with a strong verb and expressing scope + purpose.
+   - Transform vague or brief phrases (e.g., `"check Geocaching 2026 hiding movie theme"`) into crisp, action-oriented Titles starting with a strong verb.
 3. **Provide 3 Intuitive Title & Description Alternatives**:
-   - Produce **3 distinct creative alternatives** so the engineer/PM can quickly pick or compare angles:
+   - Produce **3 distinct creative alternatives**:
      1. **Action & Delivery**: Focused on concrete execution and deliverables.
      2. **User Value / Story**: Focused on stakeholder/user benefit and experience.
      3. **Verification & Scope**: Focused on validation checks, rules, dates, and criteria.
-   - Keep each alternative's `title` sharp and `description` simple and concise (1–2 sentences).
+   - Keep each alternative's `title` sharp and `description` simple (1 short sentence).
 
 ## Goal & Optional Context Input
 
@@ -32,7 +33,7 @@ Return only a valid JSON object, without Markdown fences or commentary:
 {
   "enhancedTitle": "Action-oriented title refined with User Story principles",
   "userStory": "As a <role>, I want <capability or verification>, so that <clear value or outcome>",
-  "discoverySummary": "Concise structured brief covering Objective, Context & Creative Scope, and Key Verification Points",
+  "discoverySummary": "**Objective:** Simple summary (max 57 words total).\n**Suggested Actions:**\n* Action 1\n* Action 2",
   "keyChecklist": [
     "Actionable step or verification criterion 1",
     "Actionable step or verification criterion 2",

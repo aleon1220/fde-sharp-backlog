@@ -44,8 +44,8 @@ public sealed class AiProviderOrchestrator
     public static string BuildStructuredJsonPrompt(string renderedPrompt, BacklogType backlogType)
     {
         var responseContract = backlogType == BacklogType.Type02
-            ? "Return only a JSON object with string properties `title` and `description` (with Objective, Context/Key Details, and Verification Checklist when drafting from a Goal), plus optional `alternatives` array of 3 `{angle, title, description}` objects. Do not include a user story or acceptance criteria."
-            : "Return only a JSON object with string properties `title`, `description`, `userStory`, a `scenarios` array containing `given`, `when`, and `then`, plus optional `alternatives` array of 3 `{angle, title, description}` objects.";
+            ? "Return only a JSON object with string properties `title` and `description` (Objective, Context/Key Details, and Verification Checklist; keep `description` simple, max 57 words, and use `* ` markdown bullets for suggested actions), plus optional `alternatives` array of 3 `{angle, title, description}` objects. Do not include a user story or acceptance criteria."
+            : "Return only a JSON object with string properties `title`, `description` (keep simple, max 57 words, and use `* ` markdown bullets for suggested actions), `userStory`, a `scenarios` array containing `given`, `when`, and `then`, plus optional `alternatives` array of 3 `{angle, title, description}` objects.";
 
         return $"{renderedPrompt.Trim()}\n\n{responseContract} Do not include Markdown fences or commentary.";
     }
@@ -60,16 +60,16 @@ public sealed class AiProviderOrchestrator
             "You are a Senior Technical Project Manager and Forward Deployed Engineer. " +
             "Zero Hallucination rule: never invent internal owners, sprint dates, ticket IDs, or unstated internal commitments. " +
             "For detailed raw discovery notes, mark absent internal facts as 'Not specified in discovery notes.'. " +
-            "For brief Goal/Title inputs without detailed notes, allow constructive creativity: do NOT write 'Not specified in discovery notes' boilerplate; apply User Story creation principles to enhance the title, write a genuinely helpful structured description (Objective, Context/Key Information, and Actionable Verification Checklist), incorporate any Context, Web Research Findings, Synthesized Goal Brief, or Refinement Instructions, and suggest 3 concise Title + Description alternatives. " +
+            "For brief Goal/Title inputs without detailed notes, allow constructive creativity: do NOT write 'Not specified in discovery notes' boilerplate; apply User Story creation principles to enhance the title, keep `description` simple and strictly max 57 words (using `* ` markdown bullet points for suggested actions), incorporate any Context, Web Research Findings, Synthesized Goal Brief, or Refinement Instructions, and suggest 3 concise Title + Description alternatives. " +
             scopeRule;
     }
 
     public static string BuildGoalExpansionJsonPrompt(string renderedPrompt) =>
-        $"{renderedPrompt.Trim()}\n\nReturn only a valid JSON object with properties `enhancedTitle`, `userStory`, `discoverySummary`, `keyChecklist` (array of strings), and `alternatives` (array of 3 objects with `angle`, `title`, and `description`). Do not include Markdown fences or commentary.";
+        $"{renderedPrompt.Trim()}\n\nReturn only a valid JSON object with properties `enhancedTitle`, `userStory`, `discoverySummary` (simple, max 57 words, using `* ` markdown bullets for suggested actions), `keyChecklist` (array of concise strings), and `alternatives` (array of 3 objects with `angle`, `title`, and `description`). Do not include Markdown fences or commentary.";
 
     public static string BuildGoalExpansionSystemPrompt() =>
         "You are a Senior Product Manager, Agile Coach, and Forward Deployed Engineer. " +
-        "When given a brief Goal without detailed discovery notes, allow constructive creativity and apply User Story creation principles (INVEST: clear Actor, Capability, Business Value, and action-oriented Title) to synthesize rich discovery context and 3 concise, intuitive Title + Description alternatives. Never invent fake employee names or claim private sprint commitments already occurred.";
+        "When given a brief Goal without detailed discovery notes, focus on simplicity and apply User Story creation principles (INVEST: clear Actor, Capability, Business Value, and action-oriented Title) to synthesize concise discovery context (max 57 words with `* ` bullet points for suggested actions) and 3 simple Title + Description alternatives. Never invent fake employee names or claim private sprint commitments already occurred.";
 
     public MultiProviderGenerationResult GenerateGoalExpansion(MultiProviderGenerationRequest request)
     {

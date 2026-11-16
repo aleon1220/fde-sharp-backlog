@@ -51,6 +51,8 @@ public sealed class AiModelOrchestrator
             ? ToDraft(ExtractStructuredDraft(rawData))
             : ParseGeneratedDraft(generatedContent);
 
+        description = DescriptionFormatter.Normalize(description);
+
         var outcome = new ProcessedOutcome(
             ProviderUsed: provider,
             RenderedPrompt: renderedPrompt,
@@ -108,9 +110,11 @@ public sealed class AiModelOrchestrator
         if (string.IsNullOrWhiteSpace(discoverySummary))
         {
             discoverySummary = checklist.Count > 0
-                ? $"**User Story Framing:** {userStory}\n**Verification / Action Checklist:**\n{string.Join('\n', checklist.Select(c => $"- {c}"))}"
+                ? $"**Suggested Actions:**\n{string.Join('\n', checklist.Select(c => $"* {c}"))}"
                 : fallback.DiscoverySummary;
         }
+
+        discoverySummary = DescriptionFormatter.Normalize(discoverySummary);
 
         var alternatives = ParseAlternativesFromJson(root)
             ?? GoalExpansionSynthesizer.BuildFallbackAlternatives(enhancedTitle, discoverySummary, userStory);
@@ -284,7 +288,7 @@ public sealed class AiModelOrchestrator
                 description = $"Alternative focused on {angle.ToLowerInvariant()}.";
             }
 
-            alternatives.Add(new DraftAlternative(angle, title, description));
+            alternatives.Add(new DraftAlternative(angle, title, DescriptionFormatter.Normalize(description)));
             if (alternatives.Count == 3)
             {
                 break;
@@ -399,7 +403,7 @@ public sealed class AiModelOrchestrator
                 var items = value.EnumerateArray()
                     .Select(FormatJsonElementAsText)
                     .Where(item => !string.IsNullOrWhiteSpace(item))
-                    .Select(item => item.StartsWith("- ", StringComparison.Ordinal) ? item : $"- {item}");
+                    .Select(DescriptionFormatter.FormatAsBullet);
                 return string.Join("\n", items);
             }
 

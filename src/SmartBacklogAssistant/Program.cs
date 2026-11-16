@@ -22,7 +22,8 @@ public static class Program
         "--details", "-d", "--context", "-c",
         "--theme",
         "--in",
-        "--out"
+        "--out",
+        "--copy"
     };
 
     private static readonly HashSet<string> OptionalBoolValueFlags = new(StringComparer.OrdinalIgnoreCase)
@@ -40,7 +41,15 @@ public static class Program
         string[] args,
         TextReader input,
         TextWriter output,
-        TextWriter error)
+        TextWriter error) =>
+        Execute(args, input, output, error, clipboardService: null);
+
+    internal static int Execute(
+        string[] args,
+        TextReader input,
+        TextWriter output,
+        TextWriter error,
+        IClipboardService? clipboardService)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(input);
@@ -91,6 +100,17 @@ public static class Program
                     settingsService,
                     diagnosticService,
                     modelOrchestrator,
+                    output);
+            }
+
+            if (options.Subcommand == "preview")
+            {
+                return RunPreviewCommand(
+                    args,
+                    options,
+                    workspaceService,
+                    settingsService,
+                    clipboardService ?? new OsClipboardService(),
                     output);
             }
 
@@ -145,7 +165,8 @@ public static class Program
                     secretProvider,
                     modelOrchestrator,
                     settingsService,
-                    diagnosticService);
+                    diagnosticService,
+                    clipboardService);
 
                 return menuRunner.Run(options, input, output);
             }
@@ -153,6 +174,20 @@ public static class Program
             // Direct / headless execution (uv-style one-shot subcommands or explicit flags)
             var resolvedOptions = ResolveDirectExecutionOptions(args, options, workspaceService, settingsService, collector);
             workflow.Execute(resolvedOptions, input, output);
+
+            var copyMode = GetArgValue(args, "--copy");
+            if (!string.IsNullOrWhiteSpace(copyMode) && workflow.LastMarkdownDocuments.Count > 0)
+            {
+                var colorWriter = new ConsoleColorWriter(output, theme: ConsoleColorWriter.ResolveTheme(resolvedOptions.CliTheme));
+                CopyOutcomeWithMode(
+                    copyMode,
+                    workflow.LastMarkdownDocuments,
+                    workflow.LastSupplementalUserStory,
+                    workflow.LastSupplementalDescription,
+                    clipboardService ?? new OsClipboardService(),
+                    colorWriter);
+            }
+
             return 0;
         }
         catch (Exception ex)
@@ -247,7 +282,7 @@ public static class Program
             options.ShowDoctorStatus ||
             options.ShowVersion ||
             options.ListGeminiModels ||
-            options.Subcommand is "config" or "help")
+            options.Subcommand is "config" or "help" or "preview")
         {
             return false;
         }
@@ -289,6 +324,64 @@ public static class Program
             providerOrchestrator);
 
         return diagnosticService.RenderStatusTable(options, output);
+    }
+
+    public static int RunPreviewCommand(
+        string[] args,
+        WorkflowOptions options,
+        WorkspacePathService workspaceService,
+        CliSettingsService settingsService,
+        IClipboardService clipboardService,
+        TextWriter output)
+    {
+        var baseWorkspace = workspaceService.Resolve(options.WorkspaceRoot);
+        var settings = settingsService.Load(baseWorkspace);
+        var activeWorkspace = workspaceService.ApplySettings(baseWorkspace, settings);
+        var outputDir = HasFlag(args, "--output-dir") && !string.IsNullOrWhiteSpace(options.OutputDirectory)
+            ? workspaceService.ResolveCustomOrRelativePath(options.OutputDirectory, activeWorkspace.IsWindows)
+            : activeWorkspace.OutputDirectory;
+
+        var (_, positionalTarget) = ParseSubcommand(args);
+        var explicitTarget = GetArgValue(args, "--input", "-i") ?? positionalTarget;
+        var resolvedPath = CliMenuRunner.ResolveSavedMarkdownTarget(explicitTarget, outputDir);
+        var markdown = File.ReadAllText(resolvedPath);
+
+        var theme = ConsoleColorWriter.ResolveTheme(options.CliTheme, settings.Theme);
+        var color = new ConsoleColorWriter(output, theme: theme);
+        color.WriteMuted($"  Reading Markdown: {resolvedPath}");
+        MarkdownOutcomeRenderer.WriteOutcomeTable(color, [markdown]);
+
+        var copyMode = GetArgValue(args, "--copy");
+        if (!string.IsNullOrWhiteSpace(copyMode))
+        {
+            CopyOutcomeWithMode(copyMode, [markdown], null, null, clipboardService, color);
+        }
+
+        return 0;
+    }
+
+    private static void CopyOutcomeWithMode(
+        string copyMode,
+        IReadOnlyList<string> markdownDocuments,
+        string? supplementalUserStory,
+        string? supplementalDescription,
+        IClipboardService clipboardService,
+        ConsoleColorWriter color)
+    {
+        var normalized = copyMode.Trim().ToLowerInvariant();
+        if (normalized is not ("md" or "markdown" or "raw" or "text" or "table"))
+        {
+            throw new ArgumentException($"Unsupported --copy format '{copyMode}'. Use 'raw' or 'md'.");
+        }
+
+        var asMarkdown = normalized is "md" or "markdown";
+        MarkdownOutcomeRenderer.CopyOutcomeToClipboard(
+            clipboardService,
+            asMarkdown,
+            markdownDocuments,
+            supplementalUserStory,
+            supplementalDescription,
+            color);
     }
 
     public static int RunConfigCommand(
@@ -550,6 +643,19 @@ public static class Program
                 output.WriteLine();
                 output.WriteLine("Lists models available to your active provider (Google Gemini or GitHub Copilot SDK).");
                 return;
+
+            case "preview":
+                color.WriteHeader("Preview Saved Markdown Outcome");
+                color.WriteMuted("USAGE: backlog preview [filename | latest] [OPTIONS]");
+                output.WriteLine();
+                output.WriteLine("Reads a saved .md outcome from ./out (or explicit path) and previews it in one colored table.");
+                output.WriteLine();
+                output.WriteLine("OPTIONS:");
+                output.WriteLine("  --copy <raw|md>          Copy outcome to clipboard as Raw Text table or Markdown");
+                output.WriteLine("  --output-dir <path>      Override ./out directory to inspect");
+                output.WriteLine("  -w, --workspace <path>   Workspace root override");
+                output.WriteLine("  --theme <agy|uv|kubectl> Table color palette");
+                return;
         }
 
         color.WriteHeader("Smart Backlog Assistant — Hybrid Ergonomic CLI & Interactive REPL");
@@ -562,6 +668,7 @@ public static class Program
         output.WriteLine("SUBCOMMANDS (Astral uv style):");
         output.WriteLine("  process [all | <file>]   Process queued ./in files or a specific file (alias: run)");
         output.WriteLine("  draft \"<Goal or Title>\"  Draft a Type01 User Story and/or Type02 Schedule Item (alias: add)");
+        output.WriteLine("  preview [<file>|latest]  Preview a saved ./out/*.md file in one colored table (alias: view)");
         output.WriteLine("  status                   Show WSL2/Windows paths, queued files, & AI readiness table (alias: doctor)");
         output.WriteLine("  config                   Configure persisted settings (--json, --in, --out, --provider, --theme)");
         output.WriteLine("  models                   List available models for the active AI provider");
@@ -569,8 +676,8 @@ public static class Program
         output.WriteLine("  version                  Print build, .NET runtime, and architecture information");
         output.WriteLine();
         output.WriteLine("INTERACTIVE REPL (run with zero arguments):");
-        output.WriteLine("  Supports numbers [0-3], /slash commands (/process, /draft, /settings, /status, /config,");
-        output.WriteLine("  /provider, /models, /theme, /json, /live, /help, /exit), and @filename context mentions.");
+        output.WriteLine("  Supports numbers [0-4], /slash commands (/process, /draft, /preview, /copy, /settings,");
+        output.WriteLine("  /status, /config, /provider, /models, /theme, /json, /live, /help, /exit), and @filename context mentions.");
         output.WriteLine();
         output.WriteLine("AI PROVIDERS (--provider):");
         output.WriteLine("  gemini (default) | copilot-sdk (GitHub.Copilot.SDK) | azure | claude | manual");
@@ -649,6 +756,7 @@ public static class Program
     {
         "run" or "process" => "run",
         "draft" or "add" => "draft",
+        "preview" or "view" or "show" => "preview",
         "config" => "config",
         "models" => "models",
         "doctor" or "status" => "doctor",

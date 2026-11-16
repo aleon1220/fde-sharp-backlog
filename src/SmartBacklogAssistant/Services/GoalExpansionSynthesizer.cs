@@ -51,62 +51,57 @@ public static class GoalExpansionSynthesizer
 
         summaryBuilder.AppendLine(intentKind switch
         {
-            IntentKind.Verify => $"**Objective:** Investigate, verify, and document all relevant rules, dates, constraints, and requirements for {topicPhrase}.",
-            IntentKind.Migrate => $"**Objective:** Plan, execute, and validate the transition for {topicPhrase} with full compatibility and rollback safety.",
-            _ => $"**Objective:** Design, deliver, and validate {topicPhrase} with clear scope, quality gates, and observable outcomes."
+            IntentKind.Verify => $"**Objective:** Verify rules, dates, and criteria for {topicPhrase}.",
+            IntentKind.Migrate => $"**Objective:** Plan and validate the migration of {topicPhrase}.",
+            _ => $"**Objective:** Deliver and validate {topicPhrase} with clear checks."
         });
-
-        summaryBuilder.AppendLine($"**User Story Framing:** {userStory}");
 
         if (!string.IsNullOrWhiteSpace(userContext))
         {
-            summaryBuilder.AppendLine($"**Context & Key Details:** {userContext.Trim()}");
-        }
-        else
-        {
-            summaryBuilder.AppendLine($"**Context & Key Details:** Initiated from brief goal \"{cleanTitle}\". Explore functional scope, edge cases, external/timing dependencies, and acceptance criteria.");
+            summaryBuilder.AppendLine($"**Context:** {DescriptionFormatter.Normalize(userContext, 20)}");
         }
 
         if (!string.IsNullOrWhiteSpace(webResearchFindings))
         {
             summaryBuilder.AppendLine("**Web Research Insights:**");
-            summaryBuilder.AppendLine(webResearchFindings.Trim());
+            summaryBuilder.AppendLine(DescriptionFormatter.Normalize(webResearchFindings, 18));
         }
 
         IReadOnlyList<string> checklist = intentKind switch
         {
             IntentKind.Verify =>
             [
-                $"Gather authoritative references, rules, and dates for {topicPhrase}",
-                "Identify open questions, edge cases, and stakeholder dependencies",
-                "Summarize verified findings and define follow-up delivery items"
+                "Gather official rules, references, and dates",
+                "Note open questions and dependencies",
+                "Summarize findings and next steps"
             ],
             IntentKind.Migrate =>
             [
-                $"Inventory current components and dependencies impacted by {topicPhrase}",
-                "Define cutover steps, compatibility checks, and rollback criteria",
-                "Validate behavior in staging before production rollout"
+                "List impacted components and dependencies",
+                "Define cutover and rollback steps",
+                "Validate behavior in staging first"
             ],
             _ =>
             [
-                $"Confirm functional requirements and acceptance scope for {topicPhrase}",
-                "Cover error handling, edge cases, and security/reliability boundaries",
-                "Verify end-to-end outcome with automated checks or demo"
+                "Confirm scope and acceptance criteria",
+                "Handle edge cases and errors",
+                "Verify outcome with tests or demo"
             ]
         };
 
-        summaryBuilder.AppendLine("**Verification / Action Checklist:**");
+        summaryBuilder.AppendLine("**Suggested Actions:**");
         foreach (var item in checklist)
         {
-            summaryBuilder.AppendLine($"- {item}");
+            summaryBuilder.AppendLine($"* {item}");
         }
 
-        var alternatives = BuildAlternatives(cleanTitle, topicPhrase, intentKind, userContext);
+        var discoverySummary = DescriptionFormatter.Normalize(summaryBuilder.ToString());
+        var alternatives = BuildAlternatives(cleanTitle, topicPhrase, intentKind);
 
         return new GoalExpansionResult(
             EnhancedTitle: cleanTitle,
             UserStory: userStory,
-            DiscoverySummary: summaryBuilder.ToString().TrimEnd(),
+            DiscoverySummary: discoverySummary,
             KeyChecklist: checklist,
             Alternatives: alternatives);
     }
@@ -134,7 +129,7 @@ public static class GoalExpansionSynthesizer
             sb.AppendLine("Expanded Checklist:");
             foreach (var item in expansion.KeyChecklist)
             {
-                sb.AppendLine($"- {item}");
+                sb.AppendLine($"* {item}");
             }
         }
 
@@ -158,19 +153,14 @@ public static class GoalExpansionSynthesizer
         var cleanTitle = ExtractCleanHeadline(title);
         var (verb, topicPhrase) = SplitLeadingVerb(cleanTitle);
         var intentKind = ClassifyVerb(verb);
-        return BuildAlternatives(cleanTitle, topicPhrase, intentKind, description ?? userStory);
+        return BuildAlternatives(cleanTitle, topicPhrase, intentKind);
     }
 
     private static IReadOnlyList<DraftAlternative> BuildAlternatives(
         string cleanTitle,
         string topicPhrase,
-        IntentKind intentKind,
-        string? contextHint)
+        IntentKind intentKind)
     {
-        var conciseHint = string.IsNullOrWhiteSpace(contextHint)
-            ? string.Empty
-            : $" Incorporating: {TruncateOneLine(contextHint, 70)}";
-
         var alt1Title = intentKind switch
         {
             IntentKind.Verify => $"Verify & Document {CapitalizeWords(topicPhrase)}",
@@ -179,9 +169,9 @@ public static class GoalExpansionSynthesizer
         };
         var alt1Desc = intentKind switch
         {
-            IntentKind.Verify => $"Audit official requirements, rules, and dates for {topicPhrase}, producing a ready-to-act engineering brief.{conciseHint}",
-            IntentKind.Migrate => $"Execute phased migration for {topicPhrase} with compatibility checks and cutover runbook.{conciseHint}",
-            _ => $"Implement {topicPhrase} end-to-end with concrete validation steps and clear operational handoff.{conciseHint}"
+            IntentKind.Verify => $"Audit official rules and dates for {topicPhrase} into an actionable brief.",
+            IntentKind.Migrate => $"Plan phased migration for {topicPhrase} with compatibility checks.",
+            _ => $"Implement {topicPhrase} with clear validation steps and operational handoff."
         };
 
         var alt2Title = intentKind switch
@@ -191,15 +181,15 @@ public static class GoalExpansionSynthesizer
             _ => $"Enable {CapitalizeWords(topicPhrase)} for Target Users"
         };
         var alt2Desc = intentKind == IntentKind.Migrate
-            ? $"Ensure zero-downtime experience and backwards compatibility while shifting {topicPhrase}."
-            : $"Frame {topicPhrase} around actor value, expected outcomes, and user-facing success criteria.";
+            ? $"Keep backwards compatibility and zero downtime while moving {topicPhrase}."
+            : $"Frame {topicPhrase} around user value and clear success criteria.";
 
         var alt3Title = intentKind == IntentKind.Migrate
             ? $"Confirm Cutover, Rollback & Checks for {CapitalizeWords(topicPhrase)}"
             : $"Confirm Scope, Timeline & Checks for {CapitalizeWords(topicPhrase)}";
         var alt3Desc = intentKind == IntentKind.Migrate
-            ? $"Define staging verification gates, observability metrics, and rollback triggers for {topicPhrase}."
-            : $"Establish concrete verification checklist, open questions, and readiness gates for {topicPhrase}.";
+            ? $"Define staging checks, telemetry signals, and rollback triggers for {topicPhrase}."
+            : $"Set verification checks, open questions, and readiness gates for {topicPhrase}.";
 
         if (string.Equals(alt1Title, cleanTitle, StringComparison.OrdinalIgnoreCase))
         {
@@ -208,9 +198,9 @@ public static class GoalExpansionSynthesizer
 
         return
         [
-            new DraftAlternative("Action & Delivery", alt1Title, alt1Desc),
-            new DraftAlternative("User Value / Story", alt2Title, alt2Desc),
-            new DraftAlternative("Verification & Scope", alt3Title, alt3Desc)
+            new DraftAlternative("Action & Delivery", alt1Title, DescriptionFormatter.Normalize(alt1Desc)),
+            new DraftAlternative("User Value / Story", alt2Title, DescriptionFormatter.Normalize(alt2Desc)),
+            new DraftAlternative("Verification & Scope", alt3Title, DescriptionFormatter.Normalize(alt3Desc))
         ];
     }
 
@@ -291,12 +281,6 @@ public static class GoalExpansionSynthesizer
         }
 
         return string.Join(' ', words);
-    }
-
-    private static string TruncateOneLine(string text, int maxLength)
-    {
-        var single = text.Replace("\r\n", " ").Replace('\n', ' ').Trim();
-        return single.Length <= maxLength ? single : single[..(maxLength - 3)] + "...";
     }
 
     private enum IntentKind

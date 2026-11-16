@@ -150,8 +150,9 @@ public sealed class AiModelOrchestratorTests
 
         Assert.Equal("Verify Geocaching 2026 Hiding Movie Theme", outcome.Title);
         Assert.Contains("**Objective:** Confirm theme rules and submission dates.", outcome.Description);
-        Assert.Contains("- Review official Geocaching HQ announcement", outcome.Description);
-        Assert.Contains("- Validate souvenir eligibility dates", outcome.Description);
+        Assert.Contains("* Review official Geocaching HQ announcement", outcome.Description);
+        Assert.Contains("* Validate souvenir eligibility dates", outcome.Description);
+        Assert.True(DescriptionFormatter.CountWords(outcome.Description) <= DescriptionFormatter.MaxDescriptionWords);
     }
 
     [Fact]
@@ -235,10 +236,33 @@ public sealed class AiModelOrchestratorTests
         Assert.Equal("Check Geocaching 2026 hiding movie theme", outcome.Title);
         Assert.Contains("**Objective:**", outcome.Description);
         Assert.Contains("**Web Research Insights:**", outcome.Description);
-        Assert.Contains("**Verification / Action Checklist:**", outcome.Description);
+        Assert.Contains("**Suggested Actions:**", outcome.Description);
+        Assert.Contains("* Gather official rules", outcome.Description);
+        Assert.True(DescriptionFormatter.CountWords(outcome.Description) <= DescriptionFormatter.MaxDescriptionWords);
         Assert.DoesNotContain("Expanded Checklist:", outcome.Description);
         Assert.DoesNotContain("Precondition:", outcome.Description);
         Assert.StartsWith("As a ", outcome.UserStory);
+    }
+
+    [Fact]
+    public void Process_WithVerboseGeneratedDescription_CapsAt57WordsAndUsesAsteriskBullets()
+    {
+        var longSummary = string.Join(' ', Enumerable.Range(1, 70).Select(i => $"detail{i}"));
+        var json = $$"""
+            {
+              "title": "Simplify Backlog Output",
+              "description": "**Objective:** {{longSummary}}\n- Action one\n- Action two"
+            }
+            """;
+
+        var outcome = _sut.Process(
+            rawData: "Goal: Simplify Backlog Output",
+            renderedPrompt: "Type02 prompt",
+            provider: AiProviderType.GoogleGemini,
+            generatedContent: json,
+            backlogType: BacklogType.Type02);
+
+        Assert.True(DescriptionFormatter.CountWords(outcome.Description) <= DescriptionFormatter.MaxDescriptionWords);
     }
 
     [Fact]

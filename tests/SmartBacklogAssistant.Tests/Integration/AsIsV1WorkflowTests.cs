@@ -398,8 +398,8 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Equal("Verify Geocaching 2026 Hiding Movie Theme Campaign", ticket.Title);
         Assert.Contains("cinema-inspired hide criteria", ticket.Description);
         Assert.Equal(3, ticket.Alternatives?.Count);
-        Assert.Contains("Suggested Title & Description Alternatives", output.ToString());
-        Assert.Contains("User Story :", output.ToString());
+        Assert.Contains("Alternatives", output.ToString());
+        Assert.Contains("User Story", output.ToString());
         Assert.Contains("web research from 1 source(s)", output.ToString());
     }
 
@@ -497,15 +497,20 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Equal("Check Geocaching 2026 hiding movie theme", ticket.Title);
         Assert.NotNull(ticket.Description);
         Assert.Contains("**Objective:**", ticket.Description);
-        Assert.Contains("**User Story Framing:**", ticket.Description);
+        Assert.Contains("**Suggested Actions:**", ticket.Description);
+        Assert.Contains("* Gather official rules", ticket.Description);
+        Assert.True(DescriptionFormatter.CountWords(ticket.Description) <= DescriptionFormatter.MaxDescriptionWords);
         Assert.DoesNotContain("Not specified in discovery notes", ticket.Description);
         Assert.Equal(3, ticket.Alternatives?.Count);
         Assert.Contains("## Title & Description Alternatives", ticket.FormattedMarkdown);
 
         var consoleText = output.ToString();
-        Assert.Contains("User Story :", consoleText);
-        Assert.Contains("Suggested Title & Description Alternatives", consoleText);
-        Assert.Contains("[1] Action & Delivery", consoleText);
+        Assert.Contains("Smart Backlog Assistant — Markdown Outcome", consoleText);
+        Assert.Contains("User Story", consoleText);
+        Assert.Contains("Alternatives", consoleText);
+        Assert.Contains("[Action & Delivery]", consoleText);
+        Assert.Contains("┌", consoleText);
+        Assert.Contains("└", consoleText);
     }
 
     private static AsIsV1Workflow CreateWorkflow(

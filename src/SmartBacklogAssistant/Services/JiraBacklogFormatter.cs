@@ -71,11 +71,12 @@ public sealed class JiraBacklogFormatter
 
     private static JiraBacklogTicket FormatType02Schedule(ProcessedOutcome outcome)
     {
+        var description = DescriptionFormatter.Normalize(outcome.Description);
         var sb = new StringBuilder();
         sb.AppendLine($"# [Jira - schedule (Type02)] {outcome.Title}");
         sb.AppendLine();
         sb.AppendLine("## Description");
-        sb.AppendLine(outcome.Description);
+        sb.AppendLine(description);
 
         AppendAlternativesSection(sb, outcome.Alternatives);
 
@@ -83,7 +84,7 @@ public sealed class JiraBacklogFormatter
             BacklogType: BacklogType.Type02,
             JiraStage: "schedule",
             Title: outcome.Title,
-            Description: outcome.Description,
+            Description: description,
             UserStory: null,
             AcceptanceCriteria: [],
             FormattedMarkdown: sb.ToString().TrimEnd().Replace("\r\n", "\n"),

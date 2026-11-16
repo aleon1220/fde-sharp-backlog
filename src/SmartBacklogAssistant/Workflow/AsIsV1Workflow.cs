@@ -85,6 +85,12 @@ public sealed class AsIsV1Workflow
 
     public IReadOnlyList<JiraBacklogTicket> LastGeneratedTickets { get; private set; } = [];
 
+    public IReadOnlyList<string> LastMarkdownDocuments { get; private set; } = [];
+
+    public string? LastSupplementalUserStory { get; private set; }
+
+    public string? LastSupplementalDescription { get; private set; }
+
     public AiProviderOrchestrator ProviderOrchestrator => _providerOrchestrator;
 
     public IReadOnlyList<GeminiModel> ListGeminiModels(string apiKey) =>
@@ -138,7 +144,7 @@ public sealed class AsIsV1Workflow
         return [_formatter.Format(outcome, resolvedType)];
     }
 
-    public void PersistTickets(
+    public IReadOnlyList<string> PersistTickets(
         IReadOnlyList<JiraBacklogTicket> tickets,
         string outputDirectory,
         bool jsonFileOut,
@@ -150,10 +156,13 @@ public sealed class AsIsV1Workflow
         ArgumentNullException.ThrowIfNull(output);
 
         var colorWriter = new ConsoleColorWriter(output, theme: ConsoleColorWriter.ResolveTheme(cliTheme));
+        var savedMdPaths = new List<string>(tickets.Count);
         foreach (var ticket in tickets)
         {
-            SaveTicketArtifacts(ticket, outputDirectory, jsonFileOut, colorWriter);
+            savedMdPaths.Add(SaveTicketArtifacts(ticket, outputDirectory, jsonFileOut, colorWriter));
         }
+
+        return savedMdPaths;
     }
 
     public static string FormatOutcomeContext(ProcessedOutcome outcome, string? webResearchFindings = null)
@@ -595,27 +604,6 @@ public sealed class AsIsV1Workflow
         colorWriter.WriteMuted(outcome.GuidanceMessage);
         colorWriter.WriteSuccess("[3/5 Local -> Validate] Outcome validated successfully.");
 
-        // 4. Review: Review outcome & Decide backlog type
-        output.WriteLine();
-        colorWriter.WriteHeader("[4/5 Review -> Review Outcome]");
-        output.WriteLine($"  Title      : {outcome.Title}");
-        WriteIndentedField(output, "  Description: ", outcome.Description);
-        if (!string.IsNullOrWhiteSpace(outcome.UserStory) &&
-            (isCombinedType || backlogType != BacklogType.Type02 || !outcome.UserStory.Equals("Not specified in discovery notes.", StringComparison.OrdinalIgnoreCase)))
-        {
-            WriteIndentedField(output, "  User Story : ", outcome.UserStory);
-        }
-
-        if (isCombinedType || backlogType != BacklogType.Type02)
-        {
-            foreach (var scenario in outcome.Scenarios)
-            {
-                output.WriteLine($"  Scenario   : Given {scenario.Given} | When {scenario.When} | Then {scenario.Then}");
-            }
-        }
-
-        RenderAlternativesBox(colorWriter, outcome.Alternatives);
-
         IReadOnlyList<JiraBacklogTicket> tickets = isCombinedType
             ? [
                 _formatter.Format(outcome, BacklogType.Type01),
@@ -623,29 +611,44 @@ public sealed class AsIsV1Workflow
             ]
             : [_formatter.Format(outcome, backlogType)];
 
-        foreach (var ticketToOutput in tickets)
+        IReadOnlyList<string> markdownDocuments;
+        if (options.DryRun || string.IsNullOrWhiteSpace(options.OutputDirectory))
         {
-            output.WriteLine();
-            colorWriter.WriteSuccess($"[5/5 Jira -> {ticketToOutput.JiraStage} ({ticketToOutput.BacklogType})]");
-            output.WriteLine(ticketToOutput.FormattedMarkdown);
+            markdownDocuments = tickets.Select(t => t.FormattedMarkdown).ToArray();
         }
+        else
+        {
+            var jsonFileOut = options.JsonFileOut ?? false;
+            var savedPaths = new List<string>(tickets.Count);
+            foreach (var ticketToSave in tickets)
+            {
+                savedPaths.Add(SaveTicketArtifacts(ticketToSave, options.OutputDirectory, jsonFileOut, colorWriter));
+            }
+
+            // Read generated Markdown back from disk so the CLI table previews exact saved Markdown
+            markdownDocuments = savedPaths.Select(File.ReadAllText).ToArray();
+        }
+
+        var supplementalUserStory = ResolveSupplementalUserStory(outcome, backlogType, isCombinedType);
+        var supplementalDescription = ResolveSupplementalDescription(outcome, backlogType, isCombinedType);
+
+        MarkdownOutcomeRenderer.WriteOutcomeTable(
+            colorWriter,
+            markdownDocuments,
+            supplementalUserStory,
+            supplementalDescription);
 
         if (options.DryRun)
         {
             output.WriteLine();
             colorWriter.WriteSuccess($"[Preview / Dry Run] Validated '{tickets[0].Title}' ({tickets[0].BacklogType} -> {tickets[0].JiraStage}). No files written.");
         }
-        else if (!string.IsNullOrWhiteSpace(options.OutputDirectory))
-        {
-            var jsonFileOut = options.JsonFileOut ?? false;
-            foreach (var ticketToSave in tickets)
-            {
-                SaveTicketArtifacts(ticketToSave, options.OutputDirectory, jsonFileOut, colorWriter);
-            }
-        }
 
         LastOutcome = outcome;
         LastGeneratedTickets = tickets;
+        LastMarkdownDocuments = markdownDocuments;
+        LastSupplementalUserStory = supplementalUserStory;
+        LastSupplementalDescription = supplementalDescription;
 
         executionStopwatch.Stop();
         TerminalUx.WriteStepDone(
@@ -656,6 +659,28 @@ public sealed class AsIsV1Workflow
 
         return tickets;
     }
+
+    public static string? ResolveSupplementalUserStory(
+        ProcessedOutcome outcome,
+        BacklogType backlogType,
+        bool isCombinedType) =>
+        !isCombinedType &&
+        backlogType == BacklogType.Type02 &&
+        !string.IsNullOrWhiteSpace(outcome.UserStory) &&
+        !outcome.UserStory.Equals("Not specified in discovery notes.", StringComparison.OrdinalIgnoreCase)
+            ? outcome.UserStory
+            : null;
+
+    public static string? ResolveSupplementalDescription(
+        ProcessedOutcome outcome,
+        BacklogType backlogType,
+        bool isCombinedType) =>
+        !isCombinedType &&
+        backlogType == BacklogType.Type01 &&
+        !string.IsNullOrWhiteSpace(outcome.Description) &&
+        !outcome.Description.Equals("Not specified in discovery notes.", StringComparison.OrdinalIgnoreCase)
+            ? outcome.Description
+            : null;
 
     private static string BuildWebSearchTopic(string? goalTitle, string? goalContext, string rawData)
     {
@@ -695,24 +720,6 @@ public sealed class AsIsV1Workflow
         }
 
         return sb.ToString().TrimEnd();
-    }
-
-    private static void WriteIndentedField(TextWriter output, string labelPrefix, string value)
-    {
-        var normalized = value.Replace("\r\n", "\n");
-        if (!normalized.Contains('\n'))
-        {
-            output.WriteLine($"{labelPrefix}{normalized}");
-            return;
-        }
-
-        var lines = normalized.Split('\n');
-        var indent = new string(' ', labelPrefix.Length);
-        output.WriteLine($"{labelPrefix}{lines[0]}");
-        for (var i = 1; i < lines.Length; i++)
-        {
-            output.WriteLine(string.IsNullOrWhiteSpace(lines[i]) ? string.Empty : $"{indent}{lines[i]}");
-        }
     }
 
     private JiraBacklogTicket ExecuteDirectoryBatch(
@@ -856,7 +863,7 @@ public sealed class AsIsV1Workflow
         return Execute(goalOptions, input, output);
     }
 
-    private static void SaveTicketArtifacts(
+    private static string SaveTicketArtifacts(
         JiraBacklogTicket ticket,
         string outputDirectory,
         bool jsonFileOut,
@@ -890,29 +897,7 @@ public sealed class AsIsV1Workflow
             colorWriter.WriteSuccess($"Saved Jira JSON to    : {jsonPath}");
             colorWriter.WriteMuted($"Ready-to-add JSON     : {slugJsonPath}");
         }
-    }
 
-    internal static void RenderAlternativesBox(ConsoleColorWriter colorWriter, IReadOnlyList<DraftAlternative>? alternatives)
-    {
-        if (alternatives is not { Count: > 0 })
-        {
-            return;
-        }
-
-        var borderColor = colorWriter.GetSubHeaderColor();
-        var keyColor = colorWriter.GetOptionKeyColor();
-        colorWriter.WriteLine();
-        colorWriter.WriteLineColored("  ╭─ Suggested Title & Description Alternatives (User Story Framing) ────────", borderColor);
-        for (var i = 0; i < alternatives.Count; i++)
-        {
-            var alt = alternatives[i];
-            colorWriter.WriteColored("  │  ", borderColor);
-            colorWriter.WriteColored($"[{i + 1}] {alt.Angle}", keyColor);
-            colorWriter.WriteLineColored($": {alt.Title}", ConsoleColor.White);
-            colorWriter.WriteColored("  │      ", borderColor);
-            colorWriter.WriteMuted(alt.Description);
-        }
-
-        colorWriter.WriteLineColored("  ╰──────────────────────────────────────────────────────────────────────────", borderColor);
+        return slugMdPath;
     }
 }
