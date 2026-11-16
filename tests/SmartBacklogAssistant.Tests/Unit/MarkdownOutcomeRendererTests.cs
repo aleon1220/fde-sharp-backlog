@@ -229,4 +229,63 @@ public sealed class MarkdownOutcomeRendererTests
         var matchedFile = Assert.Single(fileMatches);
         Assert.EndsWith("type02-canary-rollout.md", matchedFile);
     }
+
+    [Fact]
+    public void ReconstructOutcomeFromMarkdown_RestoresType01ScenariosAndType02Fields()
+    {
+        var type01Markdown = """
+            # [User Story (Type01)] Improve Onboarding Checklist
+
+            ## Context / Overview
+            Streamline first-run workspace setup and defaults.
+
+            ## Story
+            **As a** CLI user
+            **I want** guided workspace initialization
+            **So that** drafts succeed without manual setup
+
+            ## Acceptance Scenarios
+            1. **Scenario 1: Missing directories**
+               - **Given** a fresh workspace
+               - **When** the user launches the wizard
+               - **Then** `./in` and `./out` are created automatically
+            2. **Scenario 2: Saved default verbosity**
+               - **Given** `settings.json` sets minimalistic mode
+               - **When** a draft runs
+               - **Then** compact descriptions are used
+
+            ## Title & Description Alternatives
+            1. **[Action & Delivery] Streamline Workspace Bootstrap** — Automatically prepare `./in` and `./out`.
+            """;
+
+        var (type01Kind, type01Outcome) = MarkdownOutcomeRenderer.ReconstructOutcomeFromMarkdown(type01Markdown);
+
+        Assert.Equal(SmartBacklogAssistant.Domain.BacklogType.Type01, type01Kind);
+        Assert.Equal("Improve Onboarding Checklist", type01Outcome.Title);
+        Assert.Contains("CLI user", type01Outcome.UserStory);
+        Assert.Contains("guided workspace initialization", type01Outcome.UserStory);
+        Assert.Equal(2, type01Outcome.Scenarios.Count);
+        Assert.Equal("a fresh workspace", type01Outcome.Scenarios[0].Given);
+        Assert.Equal("the user launches the wizard", type01Outcome.Scenarios[0].When);
+        Assert.Equal("`./in` and `./out` are created automatically", type01Outcome.Scenarios[0].Then);
+        Assert.NotNull(type01Outcome.Alternatives);
+        Assert.Single(type01Outcome.Alternatives!);
+
+        var type02Markdown = """
+            # [Jira - schedule (Type02)] Check Geocaching 2026 hiding movie theme
+
+            ## Description
+            **Objective:** Verify official rules and dates.
+            **Suggested Actions:**
+            * Gather official rules and dates
+            * Confirm release timeline
+            """;
+
+        var (type02Kind, type02Outcome) = MarkdownOutcomeRenderer.ReconstructOutcomeFromMarkdown(type02Markdown);
+
+        Assert.Equal(SmartBacklogAssistant.Domain.BacklogType.Type02, type02Kind);
+        Assert.Equal("Check Geocaching 2026 hiding movie theme", type02Outcome.Title);
+        Assert.Contains("Objective:", type02Outcome.Description);
+        Assert.Contains("Gather official rules and dates", type02Outcome.Description);
+    }
 }

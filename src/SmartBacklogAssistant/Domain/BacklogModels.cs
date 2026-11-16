@@ -177,4 +177,5 @@ public sealed record CliSettings(
     bool? GeminiLive = null,
     string? CustomInputDirectory = null,
     string? CustomOutputDirectory = null,
-    AiProviderType? PreferredProvider = null);
+    AiProviderType? PreferredProvider = null,
+    OutcomeVerbosity? DefaultVerbosity = null);

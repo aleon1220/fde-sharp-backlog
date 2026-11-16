@@ -29,10 +29,11 @@ dotnet run --project src/SmartBacklogAssistant -- draft "Check Geocaching 2026 h
 dotnet run --project src/SmartBacklogAssistant -- draft "Add Redis Distributed Cache" --type both --json
 
 # Non-interactively configure persisted settings (stored in smart-backlog-assistant/settings.json)
-dotnet run --project src/SmartBacklogAssistant -- config --json on --in ./in --out ./out --theme uv --provider copilot-sdk
+dotnet run --project src/SmartBacklogAssistant -- config --json on --in ./in --out ./out --theme uv --provider copilot-sdk --verbosity bal
 
-# Preview & interactively fuzzy-select saved outputs or copy clean plain text / Jira fields
+# Preview & interactively fuzzy-select saved outputs or copy simple / clean plain text / Jira fields
 dotnet run --project src/SmartBacklogAssistant -- preview --select
+dotnet run --project src/SmartBacklogAssistant -- preview latest --copy simple
 dotnet run --project src/SmartBacklogAssistant -- preview latest --copy clean
 dotnet run --project src/SmartBacklogAssistant -- preview latest --copy title
 
@@ -46,15 +47,15 @@ Subcommand aliases preserved for backward compatibility: `run` (`process`), `add
 
 Running with zero arguments displays the compact boxed workspace header (`In`, `Out`, `Export`, `Provider`, `Live`, `Theme`) and supports numeric options, single-key quick shortcuts, `/slash` commands, and `@filename` mentions seamlessly from `backlog > `:
 
-* **Numeric Menu `[0-4]` & Quick Shortcuts `[p/d/w/s/v/c/?/q]`:**
-  * `[1]` / `p` **Process Input Files** — Batch or single file from `./in` (`all`, `single`, or `dry` preview).
-  * `[2]` / `d` **Draft Backlog Item** — Draft `Type01` (`complete` — `Title`, `User Story`, concise `<= 57`-word `Description` with `*` bullets, and `Acceptance Criteria (Given/When/Then)`), `Type02` (`schedule` — strictly `Title` and concise `<= 57`-word `Description` with `*` bullets without `User Story` or `GWT` clutter), `Both`, or `[4]` **Preview & Guided Wizard** (`p`/`w`/`/wizard` — unified preview + interactive refinement with 3 Outcome Verbosity levels: `[1] Minimalistic <=25w`, `[2] Balanced <=57w`, `[3] Detailed <=95w`, `[N]` Simple Unformatted Text copy `Title / --- / Description`, `[M]` Markdown, `[W]` Raw Table Text, `[S]` Field & Clean Text copy, `[1-3]` Alternative selection, and `[A]ccept / [R]efine / [T]ype / [P]review / [C]ancel`). Bare Goals automatically trigger two-step INVEST Goal Expansion (`prompts/prompt-goal-expand.md`) with problem-first intent classification (`Simplify`, `Harden/Fix`, `Verify`, `Migrate`).
-  * `w` / `/wizard` **Direct Guided Wizard** — Jump straight into the Guided Draft & Refine Wizard from `backlog > ` and return cleanly to the main menu when finished.
-  * `[3]` / `s` **Workspace & Settings** — Compact 3-line summary (`Paths`, `Active`, `Config`) with `[1]` JSON Export toggle, `[2]` Inspect Directories, `[3]` full Runtime & AI Diagnostics, `[4]` CLI Theme (`agy`, `uv`, `kubectl`), `[5]` Live AI toggle, `[6]` Select AI Model, `[7]` View `settings.json`, and `[8]` Select AI Provider.
-  * `[4]` / `v` **Preview & Copy (.md)** — Fuzzy-filter or pick saved `./out/*.md` outcomes, inspect in a unified 2-column colored table, and copy Raw Text (`raw`), Markdown (`md`), Clean Plain Text (`clean`), or individual Jira fields (`title`, `story`, `desc`, `ac`, `alt1..alt3`). Native clipboards (`Set-Clipboard`/`clip.exe`, `pbcopy`, `wl-copy`/`xclip`/`xsel`) fall back automatically to ANSI **OSC 52** (with `tmux` passthrough) over SSH/headless terminals.
+* **Numeric Menu `[0-5]` & Quick Shortcuts `[w/d/p/v/s/c/?/q]`:**
+  * `[1]` / `w` **Wizard Orchestrator (All Options)** — Unified hub (`wizard > `, `/wizard`) offering ALL interactive flows in one place: `[1]` Draft from Goal / Title, `[2]` Process Input Files (`./in`, with single-file review in the Wizard), `[3]` Preview, Refine & Copy saved `./out/*.md` (`OpenSavedMarkdownInWizardReview`), `[4]` Quick Copy Last Outcome (Simple `[N]`, Markdown, Raw Table, Clean, or Jira fields), `[5]` Workspace & Settings, `[6]` Status & AI Diagnostics, plus direct `@filename` review and `/slash` commands.
+  * `[2]` / `d` **Draft Goal / Title** — Launch the unified Guided Draft & Review Wizard directly from Main Menu: supports `Type01` (`complete`), `Type02` (`schedule`), or `Both`, three Outcome Verbosity levels (`[1] Minimalistic <=25w`, `[2] Balanced <=57w`, `[3] Detailed <=95w`), two-step INVEST Goal Expansion (`prompts/prompt-goal-expand.md`), `[N]` Simple Unformatted Text copy (`Title` / `---` / `Description`), `[M]` Markdown, `[W]` Raw Table Text, `[S]` Field & Clean Text picker, `[1-3]` Alternative selection, `[A]ccept / [R]efine / [V]erbosity / [T]ype / [P]review / [C]ancel`.
+  * `[3]` / `p` **Process Input Files** — Batch or single file from `./in` (`all`, `single` via Wizard Review, or `dry` preview).
+  * `[4]` / `v` **Preview & Copy (.md)** — Fuzzy-filter or pick saved `./out/*.md` outcomes, inspect in a unified 2-column colored table, copy Raw Text (`raw`), Markdown (`md`), Clean Plain Text (`clean`), Simple Unformatted (`simple` — `Title / --- / Description`), or individual Jira fields (`title`, `story`, `desc`, `ac`, `alt1..alt3`), or press `[E]` to promote the file directly into Wizard Review (`Refine/Verbosity in Wizard`). Native clipboards (`Set-Clipboard`/`clip.exe`, `pbcopy`, `wl-copy`/`xclip`/`xsel`) fall back automatically to ANSI **OSC 52** (with `tmux` passthrough) over SSH/headless terminals.
+  * `[5]` / `s` **Workspace & Settings** — Compact 3-line summary (`Paths`, `Active`, `Config`) with `[1]` JSON Export toggle, `[2]` Inspect Directories, `[3]` full Runtime & AI Diagnostics, `[4]` CLI Theme (`agy`, `uv`, `kubectl`), `[5]` Live AI toggle, `[6]` Select AI Model, `[7]` View `settings.json`, `[8]` Select AI Provider, and `[9]` Default Outcome Verbosity (`Minimalistic` / `Balanced` / `Detailed`).
   * `[0]` / `q` **Exit** — Universal navigation across all submenus: enter `0` / `b` / `back` to return to the parent menu, or `q` / `quit` to exit anytime.
 * **`/slash` Commands:**
-  * `/process [all|<file>] [--dry-run] [--json]`, `/draft "<goal>" [-t 01|02|both] [--details "..."] [--search] [--preview]`, `/wizard` (`/guided`), `/preview [<file>]`, `/copy [raw|md|clean|title|story|desc|ac|alt1..]`, `/settings`, `/status`, `/config [--json on|off] [--in <dir>] [--out <dir>]`, `/provider <name>`, `/models`, `/theme <agy|uv|kubectl>`, `/json [on|off]`, `/live [on|off]`, `/help`, `/clear`, `/exit`.
+  * `/wizard` (`/guided`), `/process [all|<file>] [--dry-run] [--json]`, `/draft "<goal>" [-t 01|02|both] [--details "..."] [--search] [--preview]`, `/preview [<file>]`, `/copy [simple|raw|md|clean|title|story|desc|ac|alt1..]`, `/verbosity [min|bal|det]`, `/settings`, `/status`, `/config [--json on|off] [--in <dir>] [--out <dir>] [--verbosity min|bal|det]`, `/provider <name>`, `/models`, `/theme <agy|uv|kubectl>`, `/json [on|off]`, `/live [on|off]`, `/help`, `/clear`, `/exit`.
 * **`@filename` Context Mentions:**
   * Reference queued `./in` or `./samples` files directly in the REPL: `@raw-notes.txt` (processes file) or `@raw-notes.txt Implement OAuth2 PKCE` (attaches discovery context cleanly without hallucination). Type `@` or `@?` to list available context files.
 

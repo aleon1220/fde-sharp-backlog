@@ -89,6 +89,142 @@ public static class MarkdownOutcomeRenderer
         return new ParsedMarkdownOutcome(stageLabel, titleLine, sections);
     }
 
+    public static (BacklogType BacklogType, ProcessedOutcome Outcome) ReconstructOutcomeFromMarkdown(
+        string markdown,
+        AiProviderType provider = AiProviderType.ManualPrompt)
+    {
+        var parsed = ParseMarkdown(markdown);
+        var title = !string.IsNullOrWhiteSpace(parsed.TitleLine)
+            ? ExtractCleanTitle(parsed.TitleLine)
+            : "Saved Backlog Item";
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            title = "Saved Backlog Item";
+        }
+
+        var description = parsed.Sections
+            .FirstOrDefault(s => s.Section.Equals("Description", StringComparison.OrdinalIgnoreCase)).Content
+            ?? parsed.Sections.FirstOrDefault(s => s.Section.Equals("Context / Overview", StringComparison.OrdinalIgnoreCase)).Content
+            ?? parsed.Sections.FirstOrDefault(s => s.Section.Equals("Content", StringComparison.OrdinalIgnoreCase)).Content
+            ?? "Not specified in discovery notes.";
+
+        var userStory = parsed.Sections
+            .FirstOrDefault(s => s.Section.Equals("User Story", StringComparison.OrdinalIgnoreCase) ||
+                                 s.Section.Equals("Story", StringComparison.OrdinalIgnoreCase)).Content
+            ?? "Not specified in discovery notes.";
+
+        var acceptanceContent = parsed.Sections
+            .FirstOrDefault(s => s.Section.Equals("Acceptance", StringComparison.OrdinalIgnoreCase)).Content;
+        var scenarios = string.IsNullOrWhiteSpace(acceptanceContent)
+            ? Array.Empty<GherkinScenario>()
+            : ParseScenarios(acceptanceContent);
+
+        var alternativesContent = parsed.Sections
+            .FirstOrDefault(s => s.Section.Equals("Alternatives", StringComparison.OrdinalIgnoreCase)).Content;
+        var alternatives = string.IsNullOrWhiteSpace(alternativesContent)
+            ? null
+            : ParseAlternatives(alternativesContent)
+                .Select(a => new DraftAlternative(
+                    string.IsNullOrWhiteSpace(a.Angle) ? "Alternative" : a.Angle,
+                    a.Title,
+                    a.Description))
+                .ToArray();
+
+        var headerHint = $"{parsed.StageLabel} {parsed.TitleLine}";
+        var backlogType = (headerHint.Contains("Type02", StringComparison.OrdinalIgnoreCase) ||
+                           headerHint.Contains("schedule", StringComparison.OrdinalIgnoreCase))
+            ? BacklogType.Type02
+            : (headerHint.Contains("Type01", StringComparison.OrdinalIgnoreCase) ||
+               headerHint.Contains("complete", StringComparison.OrdinalIgnoreCase) ||
+               headerHint.Contains("User Story", StringComparison.OrdinalIgnoreCase))
+                ? BacklogType.Type01
+                : scenarios.Count > 0 || !userStory.Equals("Not specified in discovery notes.", StringComparison.OrdinalIgnoreCase)
+                    ? BacklogType.Type01
+                    : BacklogType.Type02;
+
+        var outcome = new ProcessedOutcome(
+            ProviderUsed: provider,
+            RenderedPrompt: "Loaded from saved Markdown",
+            GuidanceMessage: "Loaded saved Markdown outcome into Wizard Orchestrator.",
+            Title: title,
+            Description: description,
+            UserStory: userStory,
+            Scenarios: scenarios,
+            Alternatives: alternatives is { Length: > 0 } ? alternatives : null);
+
+        return (backlogType, outcome);
+    }
+
+    private static IReadOnlyList<GherkinScenario> ParseScenarios(string acceptanceContent)
+    {
+        var lines = acceptanceContent.Replace("\r\n", "\n").Split('\n');
+        var scenarios = new List<GherkinScenario>();
+        string? given = null;
+        string? when = null;
+        string? then = null;
+
+        void FlushScenario()
+        {
+            if (!string.IsNullOrWhiteSpace(given) || !string.IsNullOrWhiteSpace(when) || !string.IsNullOrWhiteSpace(then))
+            {
+                scenarios.Add(new GherkinScenario(
+                    given ?? "Not specified in discovery notes.",
+                    when ?? "Not specified in discovery notes.",
+                    then ?? "Not specified in discovery notes."));
+            }
+
+            given = null;
+            when = null;
+            then = null;
+        }
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.Trim();
+            if (string.IsNullOrEmpty(line))
+            {
+                continue;
+            }
+
+            if (line.StartsWith("###", StringComparison.Ordinal) ||
+                (line.StartsWith("Scenario ", StringComparison.OrdinalIgnoreCase) && line.EndsWith(':')))
+            {
+                FlushScenario();
+                continue;
+            }
+
+            if (line.StartsWith("- ", StringComparison.Ordinal) ||
+                line.StartsWith("* ", StringComparison.Ordinal) ||
+                line.StartsWith("• ", StringComparison.Ordinal))
+            {
+                line = line[2..].TrimStart();
+            }
+
+            line = line.Replace("**", string.Empty, StringComparison.Ordinal).Trim();
+
+            if (line.StartsWith("Given ", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.IsNullOrWhiteSpace(given) || !string.IsNullOrWhiteSpace(when) || !string.IsNullOrWhiteSpace(then))
+                {
+                    FlushScenario();
+                }
+
+                given = line["Given ".Length..].Trim();
+            }
+            else if (line.StartsWith("When ", StringComparison.OrdinalIgnoreCase))
+            {
+                when = line["When ".Length..].Trim();
+            }
+            else if (line.StartsWith("Then ", StringComparison.OrdinalIgnoreCase))
+            {
+                then = line["Then ".Length..].Trim();
+            }
+        }
+
+        FlushScenario();
+        return scenarios;
+    }
+
     public static IReadOnlyList<OutcomeTableRow> BuildTableRows(
         IReadOnlyList<string> markdownDocuments,
         string? supplementalUserStory = null,
@@ -675,13 +811,19 @@ public static class MarkdownOutcomeRenderer
             trimmed = trimmed[2..].Trim();
         }
 
-        const string jiraPrefix = "[Jira - ";
-        if (trimmed.StartsWith(jiraPrefix, StringComparison.OrdinalIgnoreCase))
+        if (trimmed.StartsWith('[') )
         {
-            var closeIdx = trimmed.IndexOf(']', jiraPrefix.Length);
-            if (closeIdx >= 0 && closeIdx + 1 < trimmed.Length)
+            var closeIdx = trimmed.IndexOf(']', 1);
+            if (closeIdx > 0 && closeIdx + 1 < trimmed.Length)
             {
-                trimmed = trimmed[(closeIdx + 1)..].Trim();
+                var bracketTag = trimmed[1..closeIdx];
+                if (bracketTag.Contains("Jira", StringComparison.OrdinalIgnoreCase) ||
+                    bracketTag.Contains("Type01", StringComparison.OrdinalIgnoreCase) ||
+                    bracketTag.Contains("Type02", StringComparison.OrdinalIgnoreCase) ||
+                    bracketTag.Contains("User Story", StringComparison.OrdinalIgnoreCase))
+                {
+                    trimmed = trimmed[(closeIdx + 1)..].Trim();
+                }
             }
         }
 
@@ -966,7 +1108,8 @@ public static class MarkdownOutcomeRenderer
 
     private static string MapHeadingToSectionName(string heading)
     {
-        if (heading.StartsWith("Acceptance Criteria", StringComparison.OrdinalIgnoreCase))
+        if (heading.StartsWith("Acceptance Criteria", StringComparison.OrdinalIgnoreCase) ||
+            heading.StartsWith("Acceptance Scenarios", StringComparison.OrdinalIgnoreCase))
         {
             return "Acceptance";
         }

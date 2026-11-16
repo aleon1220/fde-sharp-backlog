@@ -641,6 +641,18 @@ public static class Program
                 };
                 changed = true;
             }
+
+            if (TryGetRequiredFlagValue(args, out var verbosityValue, "--verbosity"))
+            {
+                var parsedVerbosity = DescriptionFormatter.ResolveVerbosity(verbosityValue, (OutcomeVerbosity)(-1));
+                if (!Enum.IsDefined(parsedVerbosity))
+                {
+                    throw new ArgumentException($"Invalid verbosity '{verbosityValue}'. Valid values: minimalistic (min), balanced (bal), detailed (det).");
+                }
+
+                updated = updated with { DefaultVerbosity = parsedVerbosity };
+                changed = true;
+            }
         }
 
         if (!changed)
@@ -781,6 +793,7 @@ public static class Program
                 output.WriteLine("  -m, --model <name|auto> Pin a model ID or reset to automatic selection");
                 output.WriteLine("  --live <on|off>         Enable/disable live AI generation by default");
                 output.WriteLine("  --theme <agy|uv|kubectl> Set interactive CLI theme palette");
+                output.WriteLine("  --verbosity <min|bal|det> Set default outcome verbosity (Minimalistic, Balanced, Detailed)");
                 output.WriteLine("  --show                  Display current settings summary");
                 output.WriteLine("  --reset                 Reset settings.json back to defaults");
                 output.WriteLine();
@@ -817,7 +830,7 @@ public static class Program
                 output.WriteLine();
                 output.WriteLine("OPTIONS:");
                 output.WriteLine("  -s, --select             Interactively fuzzy-select file & field (prompts on stderr, clean value on stdout)");
-                output.WriteLine("  --copy <target>          Copy to clipboard: raw, md, clean, title, story, desc, ac, alt1..alt3");
+                output.WriteLine("  --copy <target>          Copy to clipboard: raw, md, clean, simple, title, story, desc, ac, alt1..alt3");
                 output.WriteLine("  --output-dir <path>      Override ./out directory to inspect");
                 output.WriteLine("  -w, --workspace <path>   Workspace root override");
                 output.WriteLine("  --theme <agy|uv|kubectl> Table color palette");
@@ -842,8 +855,9 @@ public static class Program
         output.WriteLine("  version                  Print build, .NET runtime, and architecture information");
         output.WriteLine();
         output.WriteLine("INTERACTIVE REPL (run with zero arguments):");
-        output.WriteLine("  Supports numbers [0-4], quick shortcuts [p/d/w/s/v/c/?/q], /slash commands (/process, /draft,");
-        output.WriteLine("  /wizard, /preview, /copy, /settings, /status, /config, /provider, /models, /theme, /json, /live, /help, /exit),");
+        output.WriteLine("  Starts from [1] Wizard Orchestrator (all-in-one: Draft, Process, Preview/Refine, Copy, Settings, & Status),");
+        output.WriteLine("  supporting [0-5], quick shortcuts [w/d/p/v/s/c/?/q], /slash commands (/wizard, /draft, /process, /preview,");
+        output.WriteLine("  /copy, /verbosity, /settings, /status, /config, /provider, /models, /theme, /json, /live, /help, /exit),");
         output.WriteLine("  universal submenu [b]ack/[q]uit navigation, and @filename context mentions.");
         output.WriteLine();
         output.WriteLine("AI PROVIDERS (--provider):");
@@ -1041,6 +1055,8 @@ public static class Program
             effectiveBacklogType = "Type01";
         }
 
+        var hasExplicitVerbosity = HasAnyFlag(args, "--verbosity", "--minimal", "--minimalistic", "--detailed");
+
         return options with
         {
             InputFilePath = inputPath,
@@ -1053,7 +1069,10 @@ public static class Program
             JsonFileOut = effectiveJsonOut,
             CliTheme = effectiveTheme,
             ModelName = options.ModelName ?? persistedSettings.ModelName,
-            GeminiLive = options.GeminiLive ?? persistedSettings.GeminiLive ?? true
+            GeminiLive = options.GeminiLive ?? persistedSettings.GeminiLive ?? true,
+            Verbosity = hasExplicitVerbosity
+                ? options.Verbosity
+                : persistedSettings.DefaultVerbosity ?? options.Verbosity
         };
     }
 

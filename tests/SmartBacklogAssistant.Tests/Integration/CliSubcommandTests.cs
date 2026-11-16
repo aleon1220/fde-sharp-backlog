@@ -53,7 +53,8 @@ public sealed class CliSubcommandTests : IDisposable
                 "--out", customOut,
                 "--theme", "uv",
                 "--provider", "copilot-sdk",
-                "--live", "off"
+                "--live", "off",
+                "--verbosity", "minimalistic"
             ],
             new StringReader(string.Empty),
             output,
@@ -73,6 +74,7 @@ public sealed class CliSubcommandTests : IDisposable
         Assert.Equal(CliThemeStyle.Uv, saved.Theme);
         Assert.Equal(AiProviderType.GitHubCopilot, saved.PreferredProvider);
         Assert.False(saved.GeminiLive);
+        Assert.Equal(OutcomeVerbosity.Minimalistic, saved.DefaultVerbosity);
 
         var text = output.ToString();
         Assert.Contains("✓ Saved", text);
