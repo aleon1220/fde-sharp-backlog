@@ -57,3 +57,24 @@ The following backlog items have been structured in Jira-ready `Type01` (`comple
 
 ### [SBA-105] Developer Environment Bootstrap & SDK Pre-Flight Script (`Type02` — `schedule` | Priority: P2)
 * **Description:** Provide cross-platform bootstrap scripts (`scripts/setup-dev-env.ps1` and `scripts/setup-dev-env.sh`) that verify `.NET 10.0 SDK` availability (configuring `$HOME/.dotnet` on `PATH` if needed), check `GEMINI_API_KEY` registration across OS scopes, and validate Podman/WSL2 virtualization readiness.
+
+### [SBA-106] Unified Wizard Orchestrator & Quick-Action Navigation (`Type01` — `complete` | Priority: P1)
+* **User Story:** As a CLI user running Smart Backlog Assistant interactively, I want `[1] Wizard Orchestrator` at the top of the main menu offering every workflow, preview/refine/copy, settings, and diagnostic option in one cohesive hub with single-key shortcuts (`w/d/p/v/s/c/?/q`) and universal `[b]ack`/`[q]uit` navigation, so that common backlog workflows work end-to-end from one orchestrator.
+* **Acceptance Criteria (Given / When / Then):**
+  * **Given** the user launches the interactive REPL (`dotnet run --project src/SmartBacklogAssistant`)
+  * **When** the user navigates via `[0-5]`, enters `[1] Wizard Orchestrator` (`[0-6]`, `/wizard`, `@filename`), or promotes from `[4] Preview & Copy` via `[E]`
+  * **Then** the Wizard Orchestrator handles goal drafting, single-file review, saved `.md` reconstruction/refinement (`Verbosity`, `Refine`, `Type`), quick copy (`Simple`, `Raw`, `Markdown`, `Clean`, `Fields`), workspace settings (`[9]` Default Verbosity, `/verbosity`), and runtime diagnostics cleanly.
+
+### [SBA-107] Interactive Output Selection, Clean Plain Text & OSC 52 Clipboard (`Type01` — `complete` | Priority: P1 — Issue #12)
+* **User Story:** As a CLI operator, I want to fuzzy-select saved outcomes and individual Jira fields (`simple`, `raw`, `md`, `clean`, `title`, `story`, `desc`, `ac`, `alt1..alt3`) with keyboard navigation, route picker prompts to `stderr`, and copy clean text via native clipboards or OSC 52 fallback, so that pasting into Jira or piping `stdout` requires zero manual cleanup.
+* **Acceptance Criteria (Given / When / Then):**
+  * **Given** generated or saved Markdown outcomes exist in `./out`
+  * **When** the user runs `preview --select`, `--copy <simple|clean|title|story|desc|ac|alt1>`, `/copy <target>`, `[4] Preview & Copy`, or `[S]`/`[N]` in the Guided Wizard
+  * **Then** `InteractiveSelector` fuzzy-matches files and Jira fields (with `stderr` prompt routing in `--select` mode and graceful non-interactive exit), `MarkdownOutcomeRenderer` supports unformatted Simple (`Title / --- / Description`) and border-free clean text, `OsClipboardService` falls back to OSC 52 (`tmux`-aware) when native tools are unavailable, and all automated tests pass.
+
+### [SBA-108] Simpler `Type01` & `Type02` CLI/TUI Output Format & Verbosity Modes (`Type01` — `complete` | Priority: P1 — Issue #8)
+* **User Story:** As a CLI/TUI operator, I want `Type01` (`complete`) and `Type02` (`schedule`) outputs to render with clean terminal cells, selectable verbosity modes (`Minimalistic <=25w`, `Balanced <=57w`, `Detailed <=95w`), zero live-vs-saved drift, and quiet-by-default step chrome, so that reviewing and copying backlog items is immediate and scannable.
+* **Acceptance Criteria (Given / When / Then):**
+  * **Given** a user drafts or processes a `Type01`, `Type02`, or `Both` item via CLI or TUI
+  * **When** the outcome is rendered in the terminal and saved to `./out`
+  * **Then** `Type01` persists and renders `Title`, `User Story`, concise `Description`, `Acceptance`, and `Alternatives`; `Type02` renders strictly `Title`, concise `Description`, and `Alternatives` without injecting `User Story`; verbosity adapts cleanly (`Minimalistic`, `Balanced`, `Detailed`) with persisted `defaultVerbosity`; terminal cells strip `# [Jira - ...]`, `###`, and `**` clutter while preserving full Markdown in `.md` files and `md` copy; and pre-table output condenses to compact `✓ Collected`, `✓ Expanded`, and `✓ Generated` lines.

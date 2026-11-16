@@ -25,25 +25,37 @@ public sealed class JiraBacklogFormatter
         };
     }
 
-    public JiraBacklogTicket Format(ProcessedOutcome outcome, BacklogType backlogType)
+    public JiraBacklogTicket Format(
+        ProcessedOutcome outcome,
+        BacklogType backlogType,
+        OutcomeVerbosity verbosity = OutcomeVerbosity.Balanced)
     {
         ArgumentNullException.ThrowIfNull(outcome);
 
         return backlogType switch
         {
-            BacklogType.Type01 => FormatType01Complete(outcome),
-            BacklogType.Type02 => FormatType02Schedule(outcome),
+            BacklogType.Type01 => FormatType01Complete(outcome, verbosity),
+            BacklogType.Type02 => FormatType02Schedule(outcome, verbosity),
             _ => throw new ArgumentOutOfRangeException(nameof(backlogType), backlogType, "Unsupported backlog type.")
         };
     }
 
-    private static JiraBacklogTicket FormatType01Complete(ProcessedOutcome outcome)
+    private static JiraBacklogTicket FormatType01Complete(ProcessedOutcome outcome, OutcomeVerbosity verbosity)
     {
+        var normalizedDescription = ResolveType01Description(outcome, verbosity);
         var sb = new StringBuilder();
         sb.AppendLine($"# [Jira - complete (Type01)] {outcome.Title}");
         sb.AppendLine();
         sb.AppendLine("## User Story");
         sb.AppendLine(outcome.UserStory);
+
+        if (!string.IsNullOrWhiteSpace(normalizedDescription))
+        {
+            sb.AppendLine();
+            sb.AppendLine("## Description");
+            sb.AppendLine(normalizedDescription);
+        }
+
         sb.AppendLine();
         sb.AppendLine("## Acceptance Criteria (Given / When / Then)");
 
@@ -62,16 +74,34 @@ public sealed class JiraBacklogFormatter
             BacklogType: BacklogType.Type01,
             JiraStage: "complete",
             Title: outcome.Title,
-            Description: null,
+            Description: normalizedDescription,
             UserStory: outcome.UserStory,
             AcceptanceCriteria: outcome.Scenarios,
             FormattedMarkdown: sb.ToString().TrimEnd().Replace("\r\n", "\n"),
             Alternatives: outcome.Alternatives);
     }
 
-    private static JiraBacklogTicket FormatType02Schedule(ProcessedOutcome outcome)
+    private static string? ResolveType01Description(ProcessedOutcome outcome, OutcomeVerbosity verbosity)
     {
-        var description = DescriptionFormatter.Normalize(outcome.Description);
+        if (string.IsNullOrWhiteSpace(outcome.Description))
+        {
+            return null;
+        }
+
+        var trimmed = outcome.Description.Trim();
+        if (trimmed.Equals("Not specified in discovery notes.", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Equals(outcome.UserStory?.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var normalized = DescriptionFormatter.FormatWithVerbosity(trimmed, verbosity);
+        return string.IsNullOrWhiteSpace(normalized) ? null : normalized;
+    }
+
+    private static JiraBacklogTicket FormatType02Schedule(ProcessedOutcome outcome, OutcomeVerbosity verbosity)
+    {
+        var description = DescriptionFormatter.FormatWithVerbosity(outcome.Description, verbosity);
         var sb = new StringBuilder();
         sb.AppendLine($"# [Jira - schedule (Type02)] {outcome.Title}");
         sb.AppendLine();

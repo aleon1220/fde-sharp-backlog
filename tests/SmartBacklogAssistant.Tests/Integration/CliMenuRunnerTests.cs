@@ -40,7 +40,8 @@ public sealed class CliMenuRunnerTests : IDisposable
             Expected Outcome: Traffic routes to standby region automatically.
             """);
 
-        using var input = new StringReader("1\n1\n01\n0\n0\n");
+        // [1] Wizard Orchestrator -> [2] Process Input Files -> [1] Process All Files -> 01 -> [0] Back -> [0] Back -> [0] Exit
+        using var input = new StringReader("1\n2\n1\n01\n0\n0\n0\n");
         using var output = new StringWriter();
 
         var menu = CreateMenuRunner(workspaceService);
@@ -76,7 +77,8 @@ public sealed class CliMenuRunnerTests : IDisposable
         Directory.CreateDirectory(dirs.OutputDirectory);
         File.WriteAllText(Path.Combine(dirs.InputDirectory, "preview.txt"), "Title: Preview only\nContext: Validate dry-run behavior.");
 
-        using var input = new StringReader("1\n3\n01\n0\n0\n");
+        // [3] Process Input Files -> [3] Dry Run (Preview Only) -> 01 -> [0] Back -> [0] Exit
+        using var input = new StringReader("3\n3\n01\n0\n0\n");
         using var output = new StringWriter();
         var menu = CreateMenuRunner(workspaceService);
         var options = new WorkflowOptions(
@@ -101,9 +103,12 @@ public sealed class CliMenuRunnerTests : IDisposable
         var settingsService = new CliSettingsService();
         var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
 
+        // [5] Workspace & Settings -> [1] Toggle JSON ON -> [0] Back
+        // -> [2] Draft Goal -> [1] Type01 -> Goal -> Skip details -> [A] Accept & Save
+        // -> [0] Exit
         using var input = new StringReader(
-            "3\n1\n0\n" +
-            "2\n1\nEnable JSON Export Setting\n0\n" +
+            "5\n1\n0\n" +
+            "2\n1\nEnable JSON Export Setting\n\na\n" +
             "0\n");
         using var output = new StringWriter();
 
@@ -140,11 +145,18 @@ public sealed class CliMenuRunnerTests : IDisposable
         var workspaceService = new WorkspacePathService(environmentReader: _ => null);
         var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
 
+        // [1] Wizard Orchestrator:
+        //   [1] Draft -> Type01 -> Implement OAuth2 PKCE Login -> skip details -> [A] Accept & Save
+        //   [1] Draft -> Type02 -> Migrate Telemetry to OpenTelemetry -> skip details -> [A] Accept & Save
+        //   [1] Draft -> Both -> Generate Both OAuth2 Formats -> skip details -> [A] Accept & Save
+        //   [5] Workspace & Settings -> [3] Runtime & AI Diagnostics -> [0] Back -> [0] Back -> [0] Exit
         using var input = new StringReader(
-            "2\n1\nImplement OAuth2 PKCE Login\n" +
-            "2\nMigrate Telemetry to OpenTelemetry\n" +
-            "3\nGenerate Both OAuth2 Formats\n0\n" +
-            "3\n3\n0\n0\n");
+            "1\n" +
+            "1\n1\nImplement OAuth2 PKCE Login\n\na\n" +
+            "1\n2\nMigrate Telemetry to OpenTelemetry\n\na\n" +
+            "1\n3\nGenerate Both OAuth2 Formats\n\na\n" +
+            "5\n3\n0\n" +
+            "0\n0\n");
         using var output = new StringWriter();
 
         var menu = CreateMenuRunner(workspaceService);
@@ -220,7 +232,8 @@ public sealed class CliMenuRunnerTests : IDisposable
                 """);
         }));
         var menu = CreateMenuRunner(workspaceService, geminiApiClient: new GeminiApiClient(httpClient));
-        using var input = new StringReader("2\n1\nImplement account recovery\n\n0\n0\n");
+        // [2] Draft Goal -> [1] Type01 -> Goal -> skip details -> [n] No search -> [\n] default model -> [a] Accept & Save -> [0] Exit
+        using var input = new StringReader("2\n1\nImplement account recovery\n\nn\n\na\n0\n");
         using var output = new StringWriter();
         var options = new WorkflowOptions(
             InputFilePath: dirs.InputDirectory,
@@ -235,7 +248,7 @@ public sealed class CliMenuRunnerTests : IDisposable
         var generationRequest = Assert.Single(requestBodies);
         Assert.Contains("Goal: Implement account recovery", generationRequest);
         Assert.DoesNotContain("Context: Backlog goal added", generationRequest);
-        Assert.Contains("[2/5 Local -> Process] Calling Google Gemini API", output.ToString());
+        Assert.Contains("✓ Generated structured Type01 draft via Google Gemini", output.ToString());
         Assert.Contains("Account recovery", File.ReadAllText(Path.Combine(dirs.OutputDirectory, "type01-account-recovery.md")));
     }
 
@@ -244,7 +257,8 @@ public sealed class CliMenuRunnerTests : IDisposable
     {
         var workspaceService = new WorkspacePathService(environmentReader: _ => null);
         var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
-        var menu = CreateMenuRunner(workspaceService);
+        var clipboard = new FakeClipboardService();
+        var menu = CreateMenuRunner(workspaceService, clipboardService: clipboard);
         var options = new WorkflowOptions(
             InputFilePath: dirs.InputDirectory,
             PromptFilePath: _promptFilePath,
@@ -252,19 +266,37 @@ public sealed class CliMenuRunnerTests : IDisposable
             GeminiLive: false);
         using var output = new StringWriter();
 
-        var exitCode = menu.Run(options, new StringReader("2\n4\n1\nImplement preview\n2\ncheck Geocaching 2026 hiding movie theme\n3\nMigrate Auth Sessions\n0\n0\n0\n"), output);
+        // [1] Wizard Orchestrator -> [1] Draft from Goal -> [2] Type02 -> Goal -> Skip details
+        // -> [v] Verbosity -> [1] Minimalistic (<=25w) -> [n] Copy Simple Text (Title / --- / Description)
+        // -> [p] Preview only (finish without writing files) -> [0] Back to Main -> [0] Exit
+        var exitCode = menu.Run(
+            options,
+            new StringReader(
+                "1\n1\n" +
+                "2\n" +
+                "check Geocaching 2026 hiding movie theme\n" +
+                "\n" +
+                "v\n1\n" +
+                "n\n" +
+                "p\n" +
+                "0\n0\n"),
+            output);
 
         Assert.Equal(0, exitCode);
         Assert.Empty(Directory.GetFiles(dirs.OutputDirectory));
         var text = output.ToString();
-        Assert.Contains("=== Preview Draft (No Files Saved) ===", text);
-        Assert.Contains("Goal Tips for Better Results:", text);
-        Assert.Contains("[Preview] Type01 item 'Implement preview' generated. No files written.", text);
+        Assert.Contains("=== Wizard Orchestrator ===", text);
+        Assert.Contains("Outcome Verbosity: [1/min] Minimalistic (<=25w)", text);
+        Assert.Contains("✓ Outcome verbosity set to Minimalistic (<=25w).", text);
+        Assert.Contains("✓ Copied Simple Unformatted Text to clipboard", text);
         Assert.Contains("[Preview] Type02 item 'Check Geocaching 2026 hiding movie theme' generated. No files written.", text);
-        Assert.Contains("[Preview] Type01 and Type02 items 'Migrate Auth Sessions' generated. No files written.", text);
-        Assert.Contains("Alternatives", text);
-        Assert.Contains("[Action & Delivery]", text);
         Assert.DoesNotContain("Not specified in discovery notes", text);
+
+        var simpleCopied = Assert.Single(clipboard.CopiedPayloads);
+        var simpleLines = simpleCopied.Replace("\r\n", "\n").Split('\n');
+        Assert.Equal("Check Geocaching 2026 hiding movie theme", simpleLines[0]);
+        Assert.Equal("---", simpleLines[1]);
+        Assert.Contains("Objective:", simpleLines[2]);
     }
 
     [Fact]
@@ -285,15 +317,15 @@ public sealed class CliMenuRunnerTests : IDisposable
             WorkspaceRoot: _tempWorkspaceRoot);
 
         var settingsMenu = CreateMenuRunner(workspaceService, settingsService, new GeminiApiClient(httpClient));
-        settingsMenu.Run(options, new StringReader("3\n5\n0\n0\n"), new StringWriter());
+        settingsMenu.Run(options, new StringReader("5\n5\n0\n0\n"), new StringWriter());
 
         var draftMenu = CreateMenuRunner(workspaceService, settingsService, new GeminiApiClient(httpClient));
         using var output = new StringWriter();
-        draftMenu.Run(options, new StringReader("2\n1\nImplement account recovery\n0\n0\n"), output);
+        draftMenu.Run(options, new StringReader("2\n1\nImplement account recovery\n\na\n0\n"), output);
 
         Assert.False(settingsService.Load(dirs).GeminiLive);
         Assert.Equal(0, apiRequestCount);
-        Assert.Contains("Live Gemini API is OFF", output.ToString());
+        Assert.Contains("✓ Generated deterministic Type01 draft", output.ToString());
         Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type01-implement-account-recovery.md")));
     }
 
@@ -307,7 +339,7 @@ public sealed class CliMenuRunnerTests : IDisposable
         File.WriteAllText(Path.Combine(dirs.InputDirectory, "queued.txt"), "queued");
         File.WriteAllText(Path.Combine(dirs.OutputDirectory, "existing.md"), "artifact");
 
-        using var input = new StringReader("3\n2\n3\n0\n0\n");
+        using var input = new StringReader("5\n2\n3\n0\n0\n");
         using var output = new StringWriter();
         var menu = CreateMenuRunner(workspaceService);
         var options = new WorkflowOptions(
@@ -332,8 +364,8 @@ public sealed class CliMenuRunnerTests : IDisposable
         var settingsService = new CliSettingsService();
         var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
 
-        // 3 (Workspace & Settings) -> 4 (Select CLI Theme) -> 2 (UV Style) -> 4 (Select CLI Theme) -> 3 (Kubectl Style) -> 0 (Back) -> 0 (Exit)
-        using var input = new StringReader("3\n4\n2\n4\n3\n0\n0\n");
+        // 5 (Workspace & Settings) -> 4 (Select CLI Theme) -> 2 (UV Style) -> 4 (Select CLI Theme) -> 3 (Kubectl Style) -> 0 (Back) -> 0 (Exit)
+        using var input = new StringReader("5\n4\n2\n4\n3\n0\n0\n");
         using var output = new StringWriter();
 
         var menu = CreateMenuRunner(workspaceService, settingsService);
@@ -452,8 +484,8 @@ public sealed class CliMenuRunnerTests : IDisposable
         var settingsService = new CliSettingsService();
         var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
 
-        // 3 (Settings) -> 1 (Toggle JSON ON so settings.json exists) -> 7 (View settings.json) -> 8 (Select Provider) -> 2 (copilot-sdk) -> 0 (Back) -> 0 (Exit)
-        using var input = new StringReader("3\n1\n7\n8\n2\n0\n0\n");
+        // 5 (Settings) -> 1 (Toggle JSON ON so settings.json exists) -> 7 (View settings.json) -> 8 (Select Provider) -> 2 (copilot-sdk) -> 0 (Back) -> 0 (Exit)
+        using var input = new StringReader("5\n1\n7\n8\n2\n0\n0\n");
         using var output = new StringWriter();
 
         var menu = CreateMenuRunner(workspaceService, settingsService);
@@ -529,7 +561,7 @@ public sealed class CliMenuRunnerTests : IDisposable
 
         var menu = CreateMenuRunner(workspaceService, geminiApiClient: new GeminiApiClient(httpClient));
         using var input = new StringReader(
-            "2\n2\ncheck Geocaching 2026 hiding movie theme | Verify official HQ rules and submission dates --search\n\n0\n0\n");
+            "2\n2\ncheck Geocaching 2026 hiding movie theme | Verify official HQ rules and submission dates --search\n\na\n0\n");
         using var output = new StringWriter();
         var options = new WorkflowOptions(
             InputFilePath: dirs.InputDirectory,
@@ -621,7 +653,7 @@ public sealed class CliMenuRunnerTests : IDisposable
 
         var menu = CreateMenuRunner(workspaceService, geminiApiClient: new GeminiApiClient(httpClient));
         using var input = new StringReader(
-            "2\n5\n" +
+            "1\n1\n" +
             "2\n" +
             "check Geocaching 2026 hiding movie theme\n" +
             "Verify 2026 movie hiding theme guidelines\n" +
@@ -670,7 +702,7 @@ public sealed class CliMenuRunnerTests : IDisposable
         var menu = CreateMenuRunner(workspaceService);
 
         using var input = new StringReader(
-            "2\n5\n2\nDraft to Cancel\nInitial details\n" +
+            "1\n1\n2\nDraft to Cancel\nInitial details\n" +
             "c\n" +
             "0\n" +
             "/draft \"Slash Draft With Details\" -t 02 -d \"Verify release date & reviewer rules\" --preview\n" +
@@ -700,7 +732,7 @@ public sealed class CliMenuRunnerTests : IDisposable
         var menu = CreateMenuRunner(workspaceService);
 
         using var input = new StringReader(
-            "2\n5\n" +
+            "1\n1\n" +
             "2\n" +
             "check Geocaching 2026 hiding movie theme\n" +
             "\n" +
@@ -736,11 +768,11 @@ public sealed class CliMenuRunnerTests : IDisposable
         var clipboard = new FakeClipboardService();
         var menu = CreateMenuRunner(workspaceService, clipboardService: clipboard);
 
-        // 1) Guided wizard: draft Type02, copy Raw Text [W], copy Markdown [M], Accept & Save [A], Back [0]
+        // 1) Wizard Orchestrator -> Draft: draft Type02, copy Raw Text [W], copy Markdown [M], Accept & Save [A], Back [0]
         // 2) Main menu [4] Preview & Copy (.md): select #1, copy Raw Text [1], copy Markdown [2], Back [0]
-        // 3) REPL /copy md, then /exit
+        // 3) REPL /preview + /copy raw, then /exit
         using var input = new StringReader(
-            "2\n5\n" +
+            "1\n1\n" +
             "2\n" +
             "Check Geocaching 2026 hiding movie theme\n" +
             "\n" +
@@ -785,6 +817,248 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.StartsWith("# [Jira - schedule (Type02)] Check Geocaching 2026 hiding movie theme", clipboard.CopiedPayloads[3]);
         // [4] Raw Text from /preview + /copy raw
         Assert.Contains("┌", clipboard.CopiedPayloads[4]);
+    }
+
+    [Fact]
+    public void Run_MainMenuQuickShortcuts_NavigateToWizardPreviewCopyAndHelpWithMinimalKeystrokes()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var clipboard = new FakeClipboardService();
+        var menu = CreateMenuRunner(workspaceService, clipboardService: clipboard);
+
+        // ? (Help) -> w (Wizard Orchestrator -> Draft -> Type02 -> goal -> accept -> back)
+        // -> v (Preview & Copy -> #1 -> back) -> c (Copy -> Raw Text -> back) -> q (Quit)
+        using var input = new StringReader(
+            "?\n" +
+            "w\n1\n2\nSimplify CLI menu\n\na\n0\n" +
+            "v\n\n0\n" +
+            "c\n1\n0\n" +
+            "q\n");
+        using var output = new StringWriter();
+
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("Tip: [1] or [w] starts Wizard Orchestrator", text);
+        Assert.Contains("Shortcuts      [w] Wizard   [d] Draft   [p] Process   [v] Preview", text);
+        Assert.Contains("=== Wizard Orchestrator ===", text);
+        Assert.Contains("--- Guided Draft & Refine Wizard ---", text);
+        Assert.Contains("Ready-to-add Type02 item 'Simplify CLI menu' saved", text);
+        Assert.Contains("=== Preview & Copy Outcome (Markdown) ===", text);
+        Assert.Contains("✓ Copied Raw Text outcome to clipboard", text);
+        Assert.Single(clipboard.CopiedPayloads);
+        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "type02-simplify-cli-menu.md")));
+    }
+
+    [Fact]
+    public void Run_UniversalBackAndQuitShortcuts_WorkAcrossSubmenus()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var menu = CreateMenuRunner(workspaceService);
+
+        // p -> b (Process -> Back), d -> b (Draft -> Back), /wizard -> 1 (Draft) -> Cancel -> 0 (Main),
+        // s -> q (Settings compact header -> Quit directly from submenu)
+        using var input = new StringReader(
+            "p\nb\n" +
+            "d\nb\n" +
+            "/wizard\n1\n\nCancelled Draft\n\nc\n0\n" +
+            "s\nq\n");
+        using var output = new StringWriter();
+
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        Assert.Empty(Directory.GetFiles(dirs.OutputDirectory));
+        var text = output.ToString();
+        Assert.Contains("=== Process Input Files ===", text);
+        Assert.Contains("=== Wizard Orchestrator ===", text);
+        Assert.Contains("--- Guided Draft & Refine Wizard ---", text);
+        Assert.Contains("Draft cancelled. No files written.", text);
+        Assert.Contains("=== Workspace & Settings ===", text);
+        Assert.Contains("  Paths  : In:", text);
+        Assert.Contains("  Active : Provider:", text);
+        Assert.Contains("  Config :", text);
+        Assert.DoesNotContain("Windows Root    :", text);
+        Assert.Contains("Goodbye! Backlog artifacts are ready in:", text);
+    }
+
+    [Fact]
+    public void Run_PreviewFuzzyFilterAndUnifiedFieldCopy_CopiesCleanTextAndIndividualFields()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var clipboard = new FakeClipboardService();
+        var menu = CreateMenuRunner(workspaceService, clipboardService: clipboard);
+
+        // 1) Wizard Orchestrator from Main Menu: [1] Draft Type02, [S] select & copy 'clean' and 'title', [0] back to review, [A] save
+        // 2) Still in Wizard: [1] Draft another file so multiple .md files exist in ./out, then [0] Back to Main
+        // 3) [v] Preview & Copy -> fuzzy filter 'osc52' -> copy 'desc' and 'alt1' -> [0] back
+        // 4) /copy title -> q (Exit)
+        using var input = new StringReader(
+            "w\n1\n2\nBuild OSC52 Clipboard\n\ns\nclean\ntitle\n0\na\n" +
+            "1\n2\nAudit Release Gates\n\na\n0\n" +
+            "v\nosc52\ndesc\nalt1\n0\n" +
+            "/copy title\n" +
+            "q\n");
+        using var output = new StringWriter();
+
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("Selectable Output Formats & Jira Fields:", text);
+        Assert.Contains("✓ Matched 'type02-build-osc52-clipboard.md'", text);
+        Assert.Contains("✓ Copied Clean Plain Text outcome to clipboard", text);
+        Assert.Contains("✓ Copied Title to clipboard", text);
+        Assert.Contains("✓ Copied Description to clipboard", text);
+        Assert.Contains("✓ Copied Alternative #1 to clipboard", text);
+
+        Assert.Equal(5, clipboard.CopiedPayloads.Count);
+        // [0] Clean Plain Text (no box borders or markdown markers)
+        Assert.DoesNotContain("┌", clipboard.CopiedPayloads[0]);
+        Assert.DoesNotContain("**", clipboard.CopiedPayloads[0]);
+        Assert.Contains("Build OSC52 Clipboard", clipboard.CopiedPayloads[0]);
+        // [1] Clean Title from Wizard [S]
+        Assert.Equal("Build OSC52 Clipboard", clipboard.CopiedPayloads[1]);
+        // [2] Clean Description from [v] fuzzy preview
+        Assert.Contains("Objective:", clipboard.CopiedPayloads[2]);
+        Assert.DoesNotContain("**", clipboard.CopiedPayloads[2]);
+        // [3] Alternative #1 from [v] fuzzy preview
+        Assert.Contains("\n", clipboard.CopiedPayloads[3]);
+        // [4] Title from /copy title
+        Assert.Equal("Build OSC52 Clipboard", clipboard.CopiedPayloads[4]);
+    }
+
+    [Fact]
+    public void Run_WizardOrchestrator_OffersAllOptionsIncludingSingleFileReviewSavedMdRefinementQuickCopySettingsAndStatus()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var settingsService = new CliSettingsService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        Directory.CreateDirectory(dirs.InputDirectory);
+        var inputNotePath = Path.Combine(dirs.InputDirectory, "note.txt");
+        File.WriteAllText(
+            inputNotePath,
+            "Migrate cache layer to Redis cluster for lower tail latency and zero-downtime failover.");
+
+        var clipboard = new FakeClipboardService();
+        var menu = CreateMenuRunner(workspaceService, settingsService, clipboardService: clipboard);
+
+        // 1 (Wizard Orchestrator)
+        // -> @note.txt -> 2 (Type02) -> n (Simple Copy) -> a (Save & back to Wizard)
+        // -> 3 (Preview, Refine & Copy .md in Wizard) -> Enter (#1) -> v -> 3 (Detailed) -> t -> 1 (Type01) -> n (Simple Copy) -> a (Save)
+        // -> 4 (Quick Copy Last Outcome) -> 4 (Simple Copy) -> 0 (Back to Wizard)
+        // -> 5 (Workspace & Settings) -> 9 -> 1 (Default Verbosity: Minimalistic) -> 0 (Back to Wizard)
+        // -> 6 (Status & AI Diagnostics)
+        // -> /verbosity det (persists Detailed)
+        // -> 0 (Back to Main) -> 0 (Exit)
+        using var input = new StringReader(
+            "1\n" +
+            "@note.txt\n2\nn\na\n" +
+            "3\n\nv\n3\nt\n1\nn\na\n" +
+            "4\n4\n0\n" +
+            "5\n9\n1\n0\n" +
+            "6\n" +
+            "/verbosity det\n" +
+            "0\n0\n");
+        using var output = new StringWriter();
+
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("=== Wizard Orchestrator ===", text);
+        Assert.Contains("--- Wizard Orchestrator: Reviewing 'note.txt' ---", text);
+        Assert.Contains("Outcome verbosity set to Detailed (<=95w)", text);
+        Assert.Contains("Type01", text);
+        Assert.Contains("Default Outcome Verbosity set to Minimalistic (<=25w)", text);
+        Assert.Contains("AI Provider Matrix:", text);
+        Assert.Equal(SmartBacklogAssistant.Domain.OutcomeVerbosity.Detailed, settingsService.Load(dirs).DefaultVerbosity);
+
+        Assert.Equal(3, clipboard.CopiedPayloads.Count);
+        foreach (var copied in clipboard.CopiedPayloads)
+        {
+            Assert.Contains("\n---\n", copied);
+            Assert.DoesNotContain("┌", copied);
+            Assert.DoesNotContain("**", copied);
+        }
+
+        Assert.NotEmpty(Directory.GetFiles(dirs.OutputDirectory, "type02-*.md"));
+        Assert.NotEmpty(Directory.GetFiles(dirs.OutputDirectory, "type01-*.md"));
+    }
+
+    [Fact]
+    public void Run_MenuOption4Preview_CanPromoteToWizardReviewAndUseSimpleCopy()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        var savedMdPath = Path.Combine(dirs.OutputDirectory, "type02-release-check.md");
+        File.WriteAllText(
+            savedMdPath,
+            """
+            # [Jira - schedule (Type02)] Release Check
+
+            ## Description
+            **Objective:** Verify deployment readiness and rollback plan.
+            **Suggested Actions:**
+            * Confirm health check endpoints
+            * Verify canary metrics
+            * Sign off release notes
+            """);
+
+        var clipboard = new FakeClipboardService();
+        var menu = CreateMenuRunner(workspaceService, clipboardService: clipboard);
+
+        // 4 (Preview & Copy .md) -> Enter (#1) -> 4 (Simple Copy) -> e (Promote to Wizard Review) -> v -> 1 (Minimalistic) -> n (Simple Copy) -> a (Save) -> 0 (Exit)
+        using var input = new StringReader(
+            "4\n\n4\ne\nv\n1\nn\na\n0\n");
+        using var output = new StringWriter();
+
+        var options = new WorkflowOptions(
+            InputFilePath: dirs.InputDirectory,
+            PromptFilePath: _promptFilePath,
+            WorkspaceRoot: _tempWorkspaceRoot,
+            GeminiLive: false);
+
+        var exitCode = menu.Run(options, input, output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("=== Preview & Copy Outcome (Markdown) ===", text);
+        Assert.Contains("[4/5 Review Decision]", text);
+        Assert.Equal(2, clipboard.CopiedPayloads.Count);
+        Assert.StartsWith("Release Check\n---\n", clipboard.CopiedPayloads[0]);
+        Assert.StartsWith("Release Check\n---\n", clipboard.CopiedPayloads[1]);
+        // Second Simple copy after switching verbosity to Minimalistic should be strictly shorter or equal word count.
+        Assert.True(clipboard.CopiedPayloads[1].Length <= clipboard.CopiedPayloads[0].Length);
     }
 
     private static CliMenuRunner CreateMenuRunner(

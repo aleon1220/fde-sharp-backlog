@@ -1,14 +1,89 @@
 using System.Text;
+using SmartBacklogAssistant.Domain;
 
 namespace SmartBacklogAssistant.Services;
 
 /// <summary>
-/// Keeps backlog item descriptions simple, concise (at most 57 words),
+/// Keeps backlog item descriptions simple, concise (at most 57 words by default),
 /// and consistently formatted with <c>*</c> markdown bullet points for suggested actions.
 /// </summary>
 public static class DescriptionFormatter
 {
+    public const int MaxMinimalisticWords = 25;
     public const int MaxDescriptionWords = 57;
+    public const int MaxDetailedWords = 95;
+
+    public static int ResolveMaxWords(OutcomeVerbosity verbosity) => verbosity switch
+    {
+        OutcomeVerbosity.Minimalistic => MaxMinimalisticWords,
+        OutcomeVerbosity.Detailed => MaxDetailedWords,
+        _ => MaxDescriptionWords
+    };
+
+    public static string FormatVerbosityLabel(OutcomeVerbosity verbosity) => verbosity switch
+    {
+        OutcomeVerbosity.Minimalistic => $"Minimalistic (<={MaxMinimalisticWords}w)",
+        OutcomeVerbosity.Detailed => $"Detailed (<={MaxDetailedWords}w)",
+        _ => $"Balanced (<={MaxDescriptionWords}w)"
+    };
+
+    public static OutcomeVerbosity ResolveVerbosity(string? input, OutcomeVerbosity fallback = OutcomeVerbosity.Balanced)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return fallback;
+        }
+
+        return input.Trim().ToLowerInvariant() switch
+        {
+            "1" or "min" or "minimal" or "minimalistic" or "short" or "brief" => OutcomeVerbosity.Minimalistic,
+            "2" or "bal" or "balanced" or "standard" or "default" or "normal" => OutcomeVerbosity.Balanced,
+            "3" or "det" or "detailed" or "full" or "verbose" or "expanded" => OutcomeVerbosity.Detailed,
+            _ => fallback
+        };
+    }
+
+    public static string FormatWithVerbosity(string? description, OutcomeVerbosity verbosity)
+    {
+        if (string.IsNullOrWhiteSpace(description))
+        {
+            return string.Empty;
+        }
+
+        if (verbosity == OutcomeVerbosity.Minimalistic)
+        {
+            var lines = NormalizeBulletAndBlankLines(description);
+            var compactLines = new List<string>();
+            var bulletCount = 0;
+
+            foreach (var line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line) || IsHeaderOnlyLine(line))
+                {
+                    continue;
+                }
+
+                if (line.TrimStart().StartsWith("* ", StringComparison.Ordinal))
+                {
+                    if (bulletCount >= 2)
+                    {
+                        continue;
+                    }
+
+                    bulletCount++;
+                }
+
+                compactLines.Add(line);
+            }
+
+            var joinedCompact = compactLines.Count > 0
+                ? string.Join('\n', compactLines)
+                : description;
+            return Normalize(joinedCompact, MaxMinimalisticWords);
+        }
+
+        return Normalize(description, ResolveMaxWords(verbosity));
+    }
 
     public static int CountWords(string? text)
     {
@@ -19,6 +94,9 @@ public static class DescriptionFormatter
 
         return text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
     }
+
+    public static string FormatWordBudgetBadge(string? description, int maxWords = MaxDescriptionWords) =>
+        $"{CountWords(description)}/{maxWords} words";
 
     public static string FormatAsBullet(string item)
     {

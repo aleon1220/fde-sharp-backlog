@@ -87,9 +87,8 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Single(ticket.AcceptanceCriteria);
 
         var consoleOutput = output.ToString();
-        Assert.Contains("OS Running", consoleOutput);
-        Assert.Contains("Build Info", consoleOutput);
-        Assert.Contains("AI Model Enabled : Google Gemini", consoleOutput);
+        Assert.Contains("✓ Collected", consoleOutput);
+        Assert.Contains("✓ Generated structured Type01 draft via Google Gemini", consoleOutput);
         Assert.Contains("https://aistudio.google.com/api-keys", consoleOutput);
         Assert.Contains("Enter your Gemini API key to proceed", consoleOutput);
         Assert.Contains("****5566", consoleOutput);
@@ -271,8 +270,8 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         var ticket = workflow.Execute(options, input, output);
 
         Assert.Equal(BacklogType.Type01, ticket.BacklogType);
-        Assert.Contains("Jira - complete (Type01)", output.ToString());
-        Assert.Contains("Jira - schedule (Type02)", output.ToString());
+        Assert.Contains("complete (Type01) + schedule (Type02)", output.ToString());
+        Assert.DoesNotContain("# [Jira -", output.ToString());
         Assert.True(File.Exists(Path.Combine(_outputDir, "type01-webhook-retry-policy.md")));
         Assert.True(File.Exists(Path.Combine(_outputDir, "type02-webhook-retry-policy.md")));
     }
@@ -398,8 +397,8 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Equal("Verify Geocaching 2026 Hiding Movie Theme Campaign", ticket.Title);
         Assert.Contains("cinema-inspired hide criteria", ticket.Description);
         Assert.Equal(3, ticket.Alternatives?.Count);
-        Assert.Contains("Alternatives", output.ToString());
-        Assert.Contains("User Story", output.ToString());
+        Assert.DoesNotContain("│ Alternatives", output.ToString());
+        Assert.DoesNotContain("│ User Story", output.ToString());
         Assert.Contains("web research from 1 source(s)", output.ToString());
     }
 
@@ -506,11 +505,40 @@ public sealed class AsIsV1WorkflowTests : IDisposable
 
         var consoleText = output.ToString();
         Assert.Contains("Smart Backlog Assistant — Markdown Outcome", consoleText);
-        Assert.Contains("User Story", consoleText);
-        Assert.Contains("Alternatives", consoleText);
-        Assert.Contains("[Action & Delivery]", consoleText);
+        Assert.DoesNotContain("User Story", consoleText);
+        Assert.DoesNotContain("Acceptance", consoleText);
+        Assert.DoesNotContain("# [Jira -", consoleText);
+        Assert.Contains("Objective:", consoleText);
+        Assert.DoesNotContain("**Objective:**", consoleText);
+        Assert.DoesNotContain("│ Alternatives", consoleText);
+        Assert.Contains("--alternatives", consoleText);
         Assert.Contains("┌", consoleText);
         Assert.Contains("└", consoleText);
+    }
+
+    [Fact]
+    public void Execute_WithVerboseFlagEnabled_PrintsFullRuntimeBannerAndWordBudgetTelemetry()
+    {
+        var workflow = CreateWorkflow();
+        using var output = new StringWriter();
+
+        workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _inputFilePath,
+                PromptFilePath: _promptFilePath,
+                BacklogTypeInput: "Type01",
+                DryRun: true,
+                NonInteractive: true,
+                GeminiLive: false,
+                Verbose: true),
+            new StringReader(string.Empty),
+            output);
+
+        var consoleText = output.ToString();
+        Assert.Contains("OS Running", consoleText);
+        Assert.Contains("Build Info", consoleText);
+        Assert.Contains("Description word budget:", consoleText);
+        Assert.Contains("/57 words", consoleText);
     }
 
     private static AsIsV1Workflow CreateWorkflow(

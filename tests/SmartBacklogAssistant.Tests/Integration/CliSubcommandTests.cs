@@ -53,7 +53,8 @@ public sealed class CliSubcommandTests : IDisposable
                 "--out", customOut,
                 "--theme", "uv",
                 "--provider", "copilot-sdk",
-                "--live", "off"
+                "--live", "off",
+                "--verbosity", "minimalistic"
             ],
             new StringReader(string.Empty),
             output,
@@ -73,6 +74,7 @@ public sealed class CliSubcommandTests : IDisposable
         Assert.Equal(CliThemeStyle.Uv, saved.Theme);
         Assert.Equal(AiProviderType.GitHubCopilot, saved.PreferredProvider);
         Assert.False(saved.GeminiLive);
+        Assert.Equal(OutcomeVerbosity.Minimalistic, saved.DefaultVerbosity);
 
         var text = output.ToString();
         Assert.Contains("✓ Saved", text);
@@ -209,8 +211,8 @@ public sealed class CliSubcommandTests : IDisposable
         Assert.Equal(0, exitCode);
         Assert.Empty(Directory.GetFiles(dirs.OutputDirectory));
         var text = output.ToString();
-        Assert.Contains("Jira - complete (Type01)", text);
-        Assert.Contains("Jira - schedule (Type02)", text);
+        Assert.Contains("complete (Type01) + schedule (Type02)", text);
+        Assert.DoesNotContain("# [Jira -", text);
         Assert.Contains("[Preview / Dry Run]", text);
         Assert.Empty(error.ToString());
     }
@@ -324,13 +326,33 @@ public sealed class CliSubcommandTests : IDisposable
 
         var consoleText = output.ToString();
         Assert.Contains("Smart Backlog Assistant — Markdown Outcome", consoleText);
-        Assert.Contains("**Objective:**", consoleText);
-        Assert.Contains("User Story", consoleText);
-        Assert.Contains("Alternatives", consoleText);
-        Assert.Contains("[Action & Delivery]", consoleText);
-        Assert.Contains("[User Value / Story]", consoleText);
-        Assert.Contains("[Verification & Scope]", consoleText);
+        Assert.Contains("Objective:", consoleText);
+        Assert.DoesNotContain("**Objective:**", consoleText);
+        Assert.DoesNotContain("# [Jira -", consoleText);
+        Assert.DoesNotContain("User Story", consoleText);
+        Assert.DoesNotContain("Acceptance", consoleText);
+        Assert.DoesNotContain("│ Alternatives", consoleText);
+        Assert.Contains("--alternatives", consoleText);
         Assert.DoesNotContain("Not specified in discovery notes", consoleText);
+
+        using var altOutput = new StringWriter();
+        using var altError = new StringWriter();
+        var altExit = Program.Execute(
+            [
+                "-w", _tempRoot,
+                "draft",
+                "check Geocaching 2026 hiding movie theme",
+                "-t", "02",
+                "--alternatives",
+                "--preview",
+                "--offline"
+            ],
+            new StringReader(string.Empty),
+            altOutput,
+            altError);
+        Assert.Equal(0, altExit);
+        Assert.Contains("Alternatives", altOutput.ToString());
+        Assert.Contains("[Action & Delivery]", altOutput.ToString());
 
         var tableLines = consoleText
             .Replace("\r\n", "\n")
@@ -405,6 +427,113 @@ public sealed class CliSubcommandTests : IDisposable
         Assert.StartsWith("# [Jira - schedule (Type02)] Verify Theme Rules", clipboard.CopiedTexts[1]);
         Assert.Contains("* Verify timeline dates", clipboard.CopiedTexts[1]);
         Assert.DoesNotContain("┌", clipboard.CopiedTexts[1]);
+    }
+
+    [Fact]
+    public void Execute_PreviewCopyCleanAndTitle_CopiesCleanTextAndFieldsWithoutBorders()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempRoot);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        File.WriteAllText(Path.Combine(dirs.OutputDirectory, "type02-verify-theme.md"), """
+            # [Jira - schedule (Type02)] Verify Theme Rules
+
+            ## Description
+            **Objective:** Confirm official rules and dates.
+            * Check announcement blog
+            """);
+
+        var clipboard = new RecordingClipboardService();
+        using var outClean = new StringWriter();
+        using var errClean = new StringWriter();
+        var cleanExit = Program.Execute(
+            ["-w", _tempRoot, "preview", "type02-verify-theme", "--copy", "clean"],
+            new StringReader(string.Empty),
+            outClean,
+            errClean,
+            clipboard);
+
+        Assert.Equal(0, cleanExit);
+        Assert.Empty(errClean.ToString());
+        Assert.Contains("✓ Copied Clean Plain Text outcome to clipboard", outClean.ToString());
+
+        using var outTitle = new StringWriter();
+        using var errTitle = new StringWriter();
+        var titleExit = Program.Execute(
+            ["-w", _tempRoot, "preview", "type02-verify-theme", "--copy", "title"],
+            new StringReader(string.Empty),
+            outTitle,
+            errTitle,
+            clipboard);
+
+        Assert.Equal(0, titleExit);
+        Assert.Empty(errTitle.ToString());
+        Assert.Contains("✓ Copied Title to clipboard", outTitle.ToString());
+
+        Assert.Equal(2, clipboard.CopiedTexts.Count);
+        Assert.DoesNotContain("┌", clipboard.CopiedTexts[0]);
+        Assert.DoesNotContain("**", clipboard.CopiedTexts[0]);
+        Assert.Contains("Objective: Confirm official rules and dates.", clipboard.CopiedTexts[0]);
+        Assert.Equal("Verify Theme Rules", clipboard.CopiedTexts[1]);
+    }
+
+    [Fact]
+    public void Execute_PreviewSelect_RoutesPromptsToStderrAndEmitsCleanValueToStdout()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempRoot);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+
+        var alphaPath = Path.Combine(dirs.OutputDirectory, "alpha-story.md");
+        var betaPath = Path.Combine(dirs.OutputDirectory, "beta-schedule.md");
+        File.WriteAllText(alphaPath, "# [Jira - complete (Type01)] Alpha Story\n\n## User Story\nAs a user, I want alpha.");
+        File.WriteAllText(betaPath, "# [Jira - schedule (Type02)] Verify Beta Theme\n\n## Description\n**Objective:** Confirm beta scope.");
+
+        var clipboard = new RecordingClipboardService();
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = Program.Execute(
+            ["-w", _tempRoot, "preview", "--select"],
+            new StringReader("beta\ntitle\n"),
+            output,
+            error,
+            clipboard);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("Verify Beta Theme", output.ToString().Trim());
+        Assert.Equal("Verify Beta Theme", Assert.Single(clipboard.CopiedTexts));
+
+        var stderr = error.ToString();
+        Assert.Contains("Select a saved Markdown file:", stderr);
+        Assert.Contains("Select output format or Jira field to copy:", stderr);
+        Assert.Contains("✓ Copied Title to clipboard", stderr);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Execute_PreviewSelectInNonInteractiveOrEmptyStream_ExitsGracefullyWithActionableHint(bool nonInteractiveFlag)
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempRoot);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        File.WriteAllText(Path.Combine(dirs.OutputDirectory, "type02-sample.md"), "# [Jira - schedule (Type02)] Sample");
+
+        var args = nonInteractiveFlag
+            ? new[] { "-w", _tempRoot, "preview", "--select", "--non-interactive" }
+            : new[] { "-w", _tempRoot, "preview", "--select" };
+
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = Program.Execute(args, new StringReader(string.Empty), output, error);
+
+        Assert.Equal(1, exitCode);
+        Assert.Empty(output.ToString());
+        Assert.Contains("error:", error.ToString());
+        Assert.Contains("hint :", error.ToString());
+        Assert.Contains("--copy", error.ToString());
     }
 
     private sealed class RecordingClipboardService : IClipboardService

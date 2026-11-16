@@ -44,7 +44,7 @@ public sealed class JiraBacklogFormatterTests
     }
 
     [Fact]
-    public void Format_WithType01_FormatsAsCompleteWithGivenWhenThen()
+    public void Format_WithType01_FormatsAsCompleteWithDescriptionAndGivenWhenThen()
     {
         var outcome = CreateSampleOutcome();
 
@@ -53,12 +53,28 @@ public sealed class JiraBacklogFormatterTests
         Assert.Equal(BacklogType.Type01, ticket.BacklogType);
         Assert.Equal("complete", ticket.JiraStage);
         Assert.Equal("Export Audit Logs", ticket.Title);
-        Assert.Null(ticket.Description);
+        Assert.Equal("Support async CSV export for over 5,000 rows.", ticket.Description);
         Assert.NotNull(ticket.UserStory);
         Assert.Single(ticket.AcceptanceCriteria);
+        Assert.Contains("## Description", ticket.FormattedMarkdown);
+        Assert.Contains("Support async CSV export for over 5,000 rows.", ticket.FormattedMarkdown);
         Assert.Contains("**Given** An admin selects a monthly date range", ticket.FormattedMarkdown);
         Assert.Contains("**When** The admin clicks Export CSV", ticket.FormattedMarkdown);
         Assert.Contains("**Then** A download link is generated within 30 seconds", ticket.FormattedMarkdown);
+    }
+
+    [Fact]
+    public void Format_WithType01WhenDescriptionNotSpecified_OmitsDescriptionSection()
+    {
+        var outcome = CreateSampleOutcome() with
+        {
+            Description = "Not specified in discovery notes."
+        };
+
+        var ticket = _sut.Format(outcome, BacklogType.Type01);
+
+        Assert.Null(ticket.Description);
+        Assert.DoesNotContain("## Description", ticket.FormattedMarkdown);
     }
 
     [Fact]

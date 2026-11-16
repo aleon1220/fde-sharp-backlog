@@ -113,12 +113,14 @@ public sealed class WorkspaceDiagnosticService
         ConsoleColorWriter color)
     {
         var activeProvider = settings.PreferredProvider ?? AiProviderType.GoogleGemini;
+        var effectiveVerbosity = settings.DefaultVerbosity ?? OutcomeVerbosity.Balanced;
         var rows = new List<(string Section, string Setting, string Value, ConsoleColor ValueColor)>
         {
             ("Export", "JSON Export (--json)", settings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)", settings.JsonFileOut ? ConsoleColor.Green : ConsoleColor.Yellow),
             ("Paths", "Input Dir (--in)", activeWorkspace.InputDirectory, ConsoleColor.Cyan),
             ("Paths", "Output Dir (--out)", activeWorkspace.OutputDirectory, ConsoleColor.Cyan),
             ("UI", "CLI Theme (--theme)", ConsoleColorWriter.FormatThemeDisplay(settings.Theme), ConsoleColor.Cyan),
+            ("UI", "Verbosity", DescriptionFormatter.FormatVerbosityLabel(effectiveVerbosity), ConsoleColor.Cyan),
             ("AI", "Provider (--provider)", RuntimeEnvironmentService.FormatProviderCode(activeProvider), ConsoleColor.Green),
             ("AI", "Live AI (--live)", (settings.GeminiLive ?? true) ? "ON" : "OFF", (settings.GeminiLive ?? true) ? ConsoleColor.Green : ConsoleColor.Yellow),
             ("AI", "Model (--model)", settings.ModelName ?? "automatic", ConsoleColor.Gray),

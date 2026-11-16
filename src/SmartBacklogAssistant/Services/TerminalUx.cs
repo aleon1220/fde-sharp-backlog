@@ -163,6 +163,12 @@ public static class TerminalUx
     {
         var msg = ex.Message;
 
+        if (msg.Contains("Interactive selection", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("--select", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Pass an explicit target with '--copy <clean|title|desc|story|ac|raw|md>' when running with '--non-interactive' or in a headless pipeline.";
+        }
+
         if (ex is FileNotFoundException)
         {
             return "Run 'backlog status' to inspect ./in paths, or pass an explicit file with '-i <path>'.";
