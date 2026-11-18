@@ -7,7 +7,7 @@
 **Smart Backlog Assistant** (`fde-sharp-backlog`) combines deterministic .NET 10 ingestion, schema validation, and cross-platform Windows/WSL workspace management with a multi-provider AI orchestrator (**Google Gemini REST** and **`Microsoft.Copilot.SDK` v2.0.1** supporting native FFI in-process, spawned stdio, attached TCP, and BYOK providers).
 
 1. **Astral `uv`-Style Headless Subcommands:** Verb-driven commands (`process`, `draft`, `preview`, `status`, `config`, `models`) with step timers, progress spinners, actionable `error:` / `hint:` diagnostics, and per-command `--help`.
-2. **Gemini CLI / Agy Interactive REPL:** Zero-arg execution opens a boxed workspace bar (`In: ./in | Out: ./out | Export: .md`), `[0-5]` menu navigation, quick shortcuts (`[w/d/p/v/s/c/?/q]`), `/slash` commands (`/wizard`, `/provider`, `/status`), and `@filename` mentions.
+2. **Gemini CLI / Agy Interactive REPL:** Zero-arg execution opens a boxed workspace bar (`In: ./in | Out: ./out | Export: .md`), theme-matched option highlights (`↑`/`↓` + `Enter` or `[0-4]`), quick shortcuts (`[w/g/d/p/v/s/c/?/q]`), `/slash` commands (`/wizard`, `/generate`, `/preview`, `/provider`, `/status`), and `@filename` mentions.
 
 * **GitHub Repository & Backlog**: [aleon1220/fde-sharp-backlog](https://github.com/aleon1220/fde-sharp-backlog) · [Issues](https://github.com/aleon1220/fde-sharp-backlog/issues) · [Milestone #1 (`release-fde-version`)](https://github.com/aleon1220/fde-sharp-backlog/milestone/1)
 
@@ -16,7 +16,7 @@
 ### 1. Prerequisites
 
 * **.NET 10 SDK** (`dotnet --version` >= `10.0`)
-* **Build & Verify Locally** (runs all 262 unit & integration tests with zero warnings):
+* **Build & Verify Locally** (runs all 261 unit & integration tests with zero warnings):
 
 ```bash
 dotnet test
@@ -90,14 +90,13 @@ Aliases preserved: `run` (`process`), `add` (`draft`), `doctor` (`status`), `vie
 
 ## Interactive REPL & Menu (Gemini CLI / Agy Style)
 
-Running with zero arguments displays the compact boxed workspace header and supports numeric options (`[0-5]`), single-key shortcuts (`[w/d/p/v/s/c/?/q]`), `/slash` commands, and `@filename` mentions from `backlog > `:
+Running with zero arguments displays the compact boxed workspace header and supports theme-matched highlight selection (`↑`/`↓` + `Enter`), numeric options (`[0-4]`), single-key shortcuts (`[w/g/d/p/v/s/c/?/q]`), `/slash` commands, and `@filename` mentions from `backlog > `:
 
-* **`[1]` / `w` Wizard Orchestrator:** Unified hub (`wizard > `, `/wizard`) for drafting from Goals/Titles, processing `./in` files, reviewing/refining saved `./out/*.md`, copying formats (`simple`, `clean`, `raw`, `md`, `title`, `story`, `desc`, `ac`, `alt1..alt3`), settings, and diagnostics.
-* **`[2]` / `d` Draft Goal / Title:** Launches the Guided Draft & Review Wizard directly (`Type01`, `Type02`, `Both`; `Minimalistic <=25w`, `Balanced <=57w`, `Detailed <=95w`).
-* **`[3]` / `p` Process Input Files:** Batch or single file from `./in` (`all`, `single`, or `dry`).
-* **`[4]` / `v` Preview & Copy (.md):** Fuzzy-filter saved outcomes, copy via native clipboards or ANSI **OSC 52** (`tmux` passthrough supported), or press `[E]` to refine in the Wizard.
-* **`[5]` / `s` Workspace & Settings:** Colourfully highlights the active/selected option (`↑`/`↓` + `Enter` or `[0-9]`) and setting badges (`provider • model`, `ON`/`OFF`, verbosity, theme) in a streamlined order: `[1]` **Select AI Provider** (with curated recommendations and a dedicated **AI Model Selection** submenu that flags unsupported/retired/wrong-modality models with reasons, recommendations, and links to official provider docs), `[2]` Toggle Live AI API, `[3]` Default Outcome Verbosity, `[4]` Toggle JSON Export, `[5]` Select CLI Theme (`agy`, `uv`, `kubectl`), `[6]` Inspect Directories, `[7]` Runtime & AI Diagnostics, `[8]` View `settings.json`, `[0]` Back.
-* **`/slash` Commands & `@filename` Mentions:** `/wizard`, `/process`, `/draft`, `/preview`, `/copy`, `/verbosity`, `/settings`, `/status`, `/config`, `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`, plus `@raw-notes.txt ...`.
+* **`[1]` / `w` Backlog Assisted Orchestrator:** Unified end-to-end hub (`orchestrator > `, `/wizard`, `/orchestrator`, `/bao`) for drafting from Goals/Titles, processing `./in` files, previewing workspace artifacts, copying formats (`simple`, `clean`, `raw`, `md`, `title`, `story`, `desc`, `ac`, `alt1..alt3`), settings, and diagnostics.
+* **`[2]` / `g` Create / Generate Backlog:** Combines creation entry points into a single source selector (`/generate`): `[1]` Draft from Goal / Title (`Type01`, `Type02`, `Both`; `Minimalistic <=25w`, `Balanced <=57w`, `Detailed <=95w`, or `[d]` direct), `[2]` Process Input Files (`./in` batch, single review, or dry run, or `[p]` direct), and `[3]` Dry Run / Scan Workspace.
+* **`[3]` / `v` Preview:** General workspace previewer across active in-memory session drafts (`[session]`), saved Markdown outcomes (`./out/*.md`), JSON exports (`./out/*.json`), and raw input notes (`./in/*.txt`, `./in/*.md`) with fuzzy filtering, native/ANSI **OSC 52** clipboard copy, and `[E]` Orchestrator refinement/processing actions.
+* **`[4]` / `s` Workspace & Settings:** Colourfully highlights the active/selected option (`↑`/`↓` + `Enter` or `[0-8]`, matched to `agy` Cyan, `uv` Green, or `kubectl` DarkCyan themes) and setting badges (`provider • model`, `ON`/`OFF`, verbosity, theme): `[1]` **Select AI Provider** (with curated recommendations and a dedicated **AI Model Selection** submenu that flags unsupported/retired/wrong-modality models with reasons, recommendations, and links to official provider docs), `[2]` Toggle Live AI API, `[3]` Default Outcome Verbosity, `[4]` Toggle JSON Export, `[5]` Select CLI Theme (`agy`, `uv`, `kubectl`), `[6]` Inspect Directories, `[7]` Runtime & AI Diagnostics, `[8]` View `settings.json`, `[0]` Back.
+* **`/slash` Commands & `@filename` Mentions:** `/wizard` (`/orchestrator`, `/bao`), `/generate`, `/process`, `/draft`, `/preview`, `/copy`, `/verbosity`, `/settings`, `/status`, `/config`, `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`, plus `@raw-notes.txt ...`.
 
 ## Multi-Provider AI Orchestration (`Gemini` & `Microsoft.Copilot.SDK`)
 

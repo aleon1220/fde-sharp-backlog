@@ -201,6 +201,30 @@ public static class InteractiveSelector
             allowInteractiveKeys: allowInteractiveKeys);
     }
 
+    public static int FindOptionIndexByKey(
+        IReadOnlyList<HighlightedMenuOption> options,
+        string? key,
+        int fallbackIndex = 0)
+    {
+        if (options.Count == 0)
+        {
+            return 0;
+        }
+
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            for (var i = 0; i < options.Count; i++)
+            {
+                if (string.Equals(options[i].Key, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+        }
+
+        return Math.Clamp(fallbackIndex, 0, options.Count - 1);
+    }
+
     public static string? SelectMenuOptionWithHighlight(
         IReadOnlyList<HighlightedMenuOption> options,
         int initialIndex,
@@ -233,7 +257,7 @@ public static class InteractiveSelector
                 color.WriteSelectableMenuRow(options[i], isCursorHighlighted: i == selectedIndex);
             }
 
-            color.WriteColored(promptText, ConsoleColor.Yellow);
+            color.WriteColored(promptText, color.GetOptionKeyColor());
             return input.ReadLine();
         }
 
@@ -256,7 +280,7 @@ public static class InteractiveSelector
             color.WriteSelectableMenuRow(options[i], i == selectedIndex, barWidth, maxWidth);
         }
 
-        color.WriteColored(promptText, ConsoleColor.Yellow);
+        color.WriteColored(promptText, color.GetOptionKeyColor());
 
         var topRow = -1;
         try
@@ -333,7 +357,7 @@ public static class InteractiveSelector
                 }
 
                 var currentPromptText = $"{promptText}{buffer}";
-                color.WriteColored(promptText, ConsoleColor.Yellow);
+                color.WriteColored(promptText, color.GetOptionKeyColor());
                 color.Write(buffer.ToString());
                 var (endLeft, endTop) = Console.GetCursorPosition();
                 var clearTrailing = Math.Max(0, previousPromptLength - currentPromptText.Length);
@@ -438,16 +462,14 @@ public static class InteractiveSelector
                 {
                     var (keyHint, label, detail) = formatRow(filtered[i]);
                     var displayKey = string.IsNullOrEmpty(keyHint) ? (i + 1).ToString() : keyHint;
-                    var marker = i == selectedIndex ? "❯ " : "  ";
-                    promptColor.WriteColored(marker, i == selectedIndex ? ConsoleColor.Green : ConsoleColor.DarkGray);
-                    promptColor.WriteColored($"[{displayKey}] ", promptColor.GetOptionKeyColor());
-                    promptColor.WriteColored(label, i == selectedIndex ? ConsoleColor.Cyan : ConsoleColor.White);
-                    if (!string.IsNullOrWhiteSpace(detail))
-                    {
-                        promptColor.WriteColored($" — {detail}", ConsoleColor.DarkGray);
-                    }
-
-                    promptColor.WriteLine();
+                    promptColor.WriteSelectableMenuRow(
+                        new HighlightedMenuOption(
+                            displayKey,
+                            label,
+                            Description: string.IsNullOrWhiteSpace(detail) ? null : detail,
+                            IsSelectedValue: i == selectedIndex),
+                        isCursorHighlighted: i == selectedIndex,
+                        minRowWidth: 64);
                 }
             }
 
@@ -518,11 +540,18 @@ public static class InteractiveSelector
             {
                 var (keyHint, label, detail) = formatRow(currentItems[i]);
                 var displayKey = string.IsNullOrEmpty(keyHint) ? (i + 1).ToString() : keyHint;
-                promptColor.WriteMenuOption(displayKey, label, detail);
+                promptColor.WriteSelectableMenuRow(
+                    new HighlightedMenuOption(
+                        displayKey,
+                        label,
+                        Description: string.IsNullOrWhiteSpace(detail) ? null : detail,
+                        IsSelectedValue: i == 0),
+                    isCursorHighlighted: i == 0,
+                    minRowWidth: 64);
             }
 
-            promptColor.WriteMenuOption("0", "Cancel");
-            promptColor.WriteColored($"Enter number (1-{currentItems.Count}), name, or fuzzy filter [0 to cancel]: ", ConsoleColor.Yellow);
+            promptColor.WriteSelectableMenuRow(new HighlightedMenuOption("0", "Cancel"), isCursorHighlighted: false, minRowWidth: 64);
+            promptColor.WriteColored($"Enter number (1-{currentItems.Count}), name, or fuzzy filter [0 to cancel]: ", promptColor.GetOptionKeyColor());
 
             var line = input.ReadLine();
             if (line is null)

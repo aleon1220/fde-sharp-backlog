@@ -41,10 +41,9 @@ public sealed class PromptTemplateServiceTests
         string expectedTitle)
     {
         var resolvedPath = _sut.ResolvePromptFilePath(PromptTemplateService.DefaultPromptFilePath, backlogType);
-        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
 
         Assert.Equal(expectedPath, resolvedPath);
-        Assert.Contains(expectedTitle, File.ReadAllText(Path.Combine(repositoryRoot, resolvedPath)));
+        Assert.Contains(expectedTitle, ReadRepoPrompt(resolvedPath));
     }
 
     [Fact]
@@ -74,23 +73,24 @@ public sealed class PromptTemplateServiceTests
     [Theory]
     [InlineData(PromptTemplateService.Type01PromptFilePath)]
     [InlineData(PromptTemplateService.Type02PromptFilePath)]
-    public void GoalPrompts_EnforceActionableGoalModeWithoutEmptyBoilerplate(string promptRelativePath)
+    public void GoalPrompts_EnforceActionableModeGoalBriefCreativityAndAlternatives(string promptRelativePath)
     {
-        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
-        var content = File.ReadAllText(Path.Combine(repositoryRoot, promptRelativePath));
+        var content = ReadRepoPrompt(promptRelativePath);
 
         Assert.Contains("Goal / Brief Topic Mode", content);
         Assert.Contains("Discovery Notes Mode", content);
         Assert.Contains("Refinement Rule", content);
         Assert.Contains("Objective", content);
         Assert.Contains("Web Research Findings:", content);
+        Assert.Contains("Synthesized Goal Brief (Goal Expansion):", content);
+        Assert.Contains("constructive creativity", content);
+        Assert.Contains("alternatives", content);
     }
 
     [Fact]
     public void Type02GoalPrompt_ProhibitsAddingUserStoryAndBoilerplateDismissals()
     {
-        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
-        var content = File.ReadAllText(Path.Combine(repositoryRoot, PromptTemplateService.Type02PromptFilePath));
+        var content = ReadRepoPrompt(PromptTemplateService.Type02PromptFilePath);
 
         Assert.Contains("Do **NOT** dismiss the request with `Not specified in discovery notes` boilerplate", content);
         Assert.Contains("Do not add a user story", content);
@@ -99,8 +99,7 @@ public sealed class PromptTemplateServiceTests
     [Fact]
     public void GoalExpandPrompt_ContainsInvestPrinciplesTitleEnhancementAndAlternatives()
     {
-        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
-        var content = File.ReadAllText(Path.Combine(repositoryRoot, PromptTemplateService.GoalExpandPromptFilePath));
+        var content = ReadRepoPrompt(PromptTemplateService.GoalExpandPromptFilePath);
 
         Assert.Contains("Goal-to-Notes Expansion", content);
         Assert.Contains("User Story creation principles", content);
@@ -109,19 +108,6 @@ public sealed class PromptTemplateServiceTests
         Assert.Contains("userStory", content);
         Assert.Contains("discoverySummary", content);
         Assert.Contains("keyChecklist", content);
-        Assert.Contains("alternatives", content);
-    }
-
-    [Theory]
-    [InlineData(PromptTemplateService.Type01PromptFilePath)]
-    [InlineData(PromptTemplateService.Type02PromptFilePath)]
-    public void GoalPrompts_ReferenceSynthesizedGoalBriefCreativityAndAlternatives(string promptRelativePath)
-    {
-        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
-        var content = File.ReadAllText(Path.Combine(repositoryRoot, promptRelativePath));
-
-        Assert.Contains("Synthesized Goal Brief (Goal Expansion):", content);
-        Assert.Contains("constructive creativity", content);
         Assert.Contains("alternatives", content);
     }
 
@@ -136,5 +122,11 @@ public sealed class PromptTemplateServiceTests
     public void IsBuiltInPromptPath_DistinguishesBuiltInPromptsFromCustomTemplates(string path, bool expected)
     {
         Assert.Equal(expected, _sut.IsBuiltInPromptPath(path));
+    }
+
+    private static string ReadRepoPrompt(string relativePath)
+    {
+        var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));
+        return File.ReadAllText(Path.Combine(repositoryRoot, relativePath));
     }
 }

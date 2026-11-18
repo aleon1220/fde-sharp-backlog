@@ -16,7 +16,8 @@ public sealed class CliMenuRunner
     private enum MenuState
     {
         Main,
-        WizardOrchestrator,
+        BacklogOrchestrator,
+        CreateBacklog,
         ProcessFiles,
         DraftItem,
         Settings,
@@ -40,7 +41,12 @@ public sealed class CliMenuRunner
     private string? _lastSupplementalUserStory;
     private string? _lastSupplementalDescription;
     private MenuState _subMenuReturnState = MenuState.Main;
-    private bool _wizardPreviewReturnToWizard;
+    private MenuState _createBacklogReturnState = MenuState.Main;
+    private bool _previewReturnToOrchestrator;
+    private string _lastSelectedMainKey = "1";
+    private string _lastSelectedOrchestratorKey = "1";
+    private string _lastSelectedCreateKey = "1";
+    private string _lastSelectedProcessKey = "1";
     private string _lastSelectedSettingsKey = "1";
 
     public CliMenuRunner(
@@ -128,14 +134,15 @@ public sealed class CliMenuRunner
             state = state switch
             {
                 MenuState.Main => ShowMainMenu(baseWorkspace, ref workspace, ref sessionOptions, ref currentSettings, input, output, color),
-                MenuState.WizardOrchestrator => ShowWizardOrchestratorMenu(baseWorkspace, ref workspace, ref sessionOptions, ref currentSettings, input, output, color),
+                MenuState.BacklogOrchestrator => ShowBacklogOrchestratorMenu(baseWorkspace, ref workspace, ref sessionOptions, ref currentSettings, input, output, color),
+                MenuState.CreateBacklog => ShowCreateGenerateBacklogMenu(baseWorkspace, workspace, ref sessionOptions, ref currentSettings, input, output, color, _createBacklogReturnState),
                 MenuState.ProcessFiles => ShowProcessFilesMenu(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color, _subMenuReturnState),
                 MenuState.DraftItem => RunGuidedDraftWizard(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color, _subMenuReturnState),
                 MenuState.Settings => ShowSettingsMenu(baseWorkspace, ref workspace, ref sessionOptions, ref currentSettings, input, color, _subMenuReturnState),
                 MenuState.ThemeSelector => ShowThemeMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.ProviderSelector => ShowProviderMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.ModelSelector => ShowModelMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
-                MenuState.PreviewOutcome => ShowPreviewOutcomeMenu(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color, _subMenuReturnState, _wizardPreviewReturnToWizard),
+                MenuState.PreviewOutcome => ShowPreviewOutcomeMenu(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color, _subMenuReturnState, _previewReturnToOrchestrator),
                 _ => MenuState.Exit
             };
         }
@@ -155,6 +162,7 @@ public sealed class CliMenuRunner
         ConsoleColorWriter color)
     {
         var files = _workspaceService.GetInputFiles(workspace.InputDirectory);
+        var previewArtifacts = CollectPreviewArtifacts(workspace, sessionOptions);
         var themeCode = ConsoleColorWriter.GetThemeCode(currentSettings.Theme);
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
         var providerCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
@@ -191,19 +199,32 @@ public sealed class CliMenuRunner
         color.WriteLineColored($"└{new string('─', boxInnerWidth)}┘", borderColor);
 
         color.WriteMuted($"  Provider: {providerCode} ({modelLabel}) │ Live: {(currentSettings.GeminiLive == true ? "ON" : "OFF")} │ Verbosity: {DescriptionFormatter.FormatVerbosityLabel(sessionOptions.Verbosity)} │ Theme: {themeCode}");
+        color.WriteMuted("  Tip: ↑/↓ + Enter or [0-4] │ Shortcuts [w/g/d/p/v/s/c/?/q] │ /commands │ @filename");
         color.WriteLine();
 
-        color.WriteMenuOptionWithSlash("1", "Wizard Orchestrator", "All-in-one: Draft, Process, Preview, Copy & Settings", "/wizard");
-        color.WriteMenuOptionWithSlash("2", "Draft Goal / Title", "Quick Type01 / Type02 / Both via Wizard", "/draft");
-        color.WriteMenuOptionWithSlash("3", "Process Input Files", "Batch or single ./in file via Wizard", "/process");
-        color.WriteMenuOptionWithSlash("4", "Preview & Copy (.md)", "View ./out/*.md, tweak verbosity & copy", "/preview");
-        color.WriteMenuOptionWithSlash("5", "Workspace & Settings", "Provider, model, verbosity, JSON & status", "/settings");
-        color.WriteMenuOptionWithSlash("0", "Exit", null, "/exit");
-        color.WriteLine();
-        color.WriteMuted("  Tip: [1] or [w] starts Wizard Orchestrator │ [0-5] [d/p/v/s/c/?/q] │ /commands │ @filename");
-        color.WriteColored("backlog > ", color.GetOptionKeyColor());
+        var (valueBadgeFg, valueBadgeBg) = color.GetValueBadgeColors();
+        var previewBadge = _lastMarkdownDocuments.Count > 0
+            ? "session ready"
+            : previewArtifacts.Count > 0
+                ? $"{previewArtifacts.Count} ready"
+                : "empty";
 
-        var choice = input.ReadLine();
+        var options = new List<HighlightedMenuOption>
+        {
+            new("1", "Backlog Assisted Orchestrator", "recommended", ConsoleColor.Black, ConsoleColor.Yellow, "All-in-one: Draft, Process, Preview, Copy & Settings (/wizard)", IsSelectedValue: string.Equals(_lastSelectedMainKey, "1", StringComparison.Ordinal)),
+            new("2", "Create / Generate Backlog", $"{files.Count} in ./in", valueBadgeFg, valueBadgeBg, "Draft from Goal/Title or process ./in files (/generate)", IsSelectedValue: string.Equals(_lastSelectedMainKey, "2", StringComparison.Ordinal)),
+            new("3", "Preview", previewBadge, valueBadgeFg, valueBadgeBg, "Active draft, ./out/*.md, .json & ./in notes (/preview)", IsSelectedValue: string.Equals(_lastSelectedMainKey, "3", StringComparison.Ordinal)),
+            new("4", "Workspace & Settings", $"{providerCode} • {modelLabel}", valueBadgeFg, valueBadgeBg, "Provider, model, live AI, verbosity, JSON & theme (/settings)", IsSelectedValue: string.Equals(_lastSelectedMainKey, "4", StringComparison.Ordinal)),
+            new("0", "Exit", null, null, null, "Close CLI session (/exit)")
+        };
+
+        var initialIndex = InteractiveSelector.FindOptionIndexByKey(options, _lastSelectedMainKey);
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            initialIndex,
+            "backlog > ",
+            input,
+            color);
         if (choice is null)
         {
             return MenuState.Exit;
@@ -247,19 +268,28 @@ public sealed class CliMenuRunner
         {
             case "0" or "q" or "quit" or "exit":
                 return MenuState.Exit;
-            case "1" or "w" or "wizard":
-                return MenuState.WizardOrchestrator;
-            case "2" or "d" or "draft":
+            case "1" or "w" or "wizard" or "orchestrator" or "bao":
+                _lastSelectedMainKey = "1";
+                return MenuState.BacklogOrchestrator;
+            case "2" or "g" or "generate" or "create":
+                _lastSelectedMainKey = "2";
+                _createBacklogReturnState = MenuState.Main;
+                return MenuState.CreateBacklog;
+            case "d" or "draft":
+                _lastSelectedMainKey = "2";
                 _subMenuReturnState = MenuState.Main;
                 return MenuState.DraftItem;
-            case "3" or "p" or "process":
+            case "p" or "process":
+                _lastSelectedMainKey = "2";
                 _subMenuReturnState = MenuState.Main;
                 return MenuState.ProcessFiles;
-            case "4" or "v" or "preview" or "view":
+            case "3" or "v" or "preview" or "view":
+                _lastSelectedMainKey = "3";
                 _subMenuReturnState = MenuState.Main;
-                _wizardPreviewReturnToWizard = false;
+                _previewReturnToOrchestrator = false;
                 return MenuState.PreviewOutcome;
-            case "5" or "s" or "settings":
+            case "4" or "s" or "settings":
+                _lastSelectedMainKey = "4";
                 _subMenuReturnState = MenuState.Main;
                 return MenuState.Settings;
             case "c" or "copy":
@@ -268,11 +298,11 @@ public sealed class CliMenuRunner
                 WriteReplHelp(color);
                 return MenuState.Main;
             default:
-                return WarnAndStay(color, trimmed, "0-5, [w/d/p/v/s/c/q], /command, or @filename", MenuState.Main);
+                return WarnAndStay(color, trimmed, "0-4, [w/g/d/p/v/s/c/q], /command, or @filename", MenuState.Main);
         }
     }
 
-    private MenuState ShowWizardOrchestratorMenu(
+    private MenuState ShowBacklogOrchestratorMenu(
         WorkspaceDirectories baseWorkspace,
         ref WorkspaceDirectories workspace,
         ref WorkflowOptions sessionOptions,
@@ -290,7 +320,7 @@ public sealed class CliMenuRunner
             : "auto");
 
         color.WriteLine();
-        color.WriteHeader("=== Wizard Orchestrator ===");
+        color.WriteHeader("=== Backlog Assisted Orchestrator ===");
         color.WriteMuted($"  Workspace : In ./in ({inputFiles.Count} queued) │ Out ./out ({savedFiles.Count} saved) │ JSON: {(currentSettings.JsonFileOut ? "ON" : "OFF")}");
         color.WriteMuted($"  Pipeline  : {providerCode} ({modelLabel}) │ Live: {(currentSettings.GeminiLive == true ? "ON" : "OFF")} │ Verbosity: {DescriptionFormatter.FormatVerbosityLabel(sessionOptions.Verbosity)} │ Theme: {ConsoleColorWriter.GetThemeCode(currentSettings.Theme)}");
         if (_lastMarkdownDocuments.Count > 0)
@@ -302,19 +332,28 @@ public sealed class CliMenuRunner
             color.WriteMuted($"  Session   : Active -> '{lastTitle}'");
         }
 
+        color.WriteMuted("  Tip: ↑/↓ + Enter or [0-6] [d/p/v/c/s/?/q] │ '@filename' to review file │ '/command'");
         color.WriteLine();
-        color.WriteMenuOption("1", "Draft from Goal / Title", "Type 01 / 02 / Both -> Verbosity, Refine & Copy");
-        color.WriteMenuOption("2", "Process Input Files (./in)", "All files, Single (Wizard Review), or Dry Run");
-        color.WriteMenuOption("3", "Preview, Refine & Copy (.md)", "Open ./out/*.md -> Verbosity, Refine, Type & Copy");
-        color.WriteMenuOption("4", "Quick Copy Last Outcome", "Simple [N], Markdown, Raw Table, Clean, or Field");
-        color.WriteMenuOption("5", "Workspace & Settings", "Provider, model, verbosity, JSON, theme & files");
-        color.WriteMenuOption("6", "Status & AI Diagnostics", "WSL2/Windows paths & AI Provider Matrix (/status)");
-        color.WriteMenuOption("0", "Back to Main Menu", "Return to root prompt (or [q]uit)");
-        color.WriteLine();
-        color.WriteMuted("  Tip: [0-6] or [d/p/v/c/s/?/q] │ '@filename' to review file │ '/command' (/verbosity, /copy, /status)");
-        color.WriteColored("wizard > ", color.GetOptionKeyColor());
 
-        var choice = input.ReadLine();
+        var (valueBadgeFg, valueBadgeBg) = color.GetValueBadgeColors();
+        var options = new List<HighlightedMenuOption>
+        {
+            new("1", "Draft from Goal / Title", null, null, null, "Type 01 / 02 / Both -> Verbosity, Refine & Copy", IsSelectedValue: string.Equals(_lastSelectedOrchestratorKey, "1", StringComparison.Ordinal)),
+            new("2", "Process Input Files (./in)", $"{inputFiles.Count} queued", valueBadgeFg, valueBadgeBg, "All files, Single (Review), or Dry Run", IsSelectedValue: string.Equals(_lastSelectedOrchestratorKey, "2", StringComparison.Ordinal)),
+            new("3", "Preview Workspace & Outcomes", $"{savedFiles.Count} saved", valueBadgeFg, valueBadgeBg, "Active draft, ./out/*.md, .json & ./in notes", IsSelectedValue: string.Equals(_lastSelectedOrchestratorKey, "3", StringComparison.Ordinal)),
+            new("4", "Quick Copy Last Outcome", _lastMarkdownDocuments.Count > 0 ? "ready" : null, ConsoleColor.Black, ConsoleColor.Green, "Simple [N], Markdown, Raw Table, Clean, or Field", IsSelectedValue: string.Equals(_lastSelectedOrchestratorKey, "4", StringComparison.Ordinal)),
+            new("5", "Workspace & Settings", $"{providerCode} • {modelLabel}", valueBadgeFg, valueBadgeBg, "Provider, model, verbosity, JSON, theme & files", IsSelectedValue: string.Equals(_lastSelectedOrchestratorKey, "5", StringComparison.Ordinal)),
+            new("6", "Status & AI Diagnostics", null, null, null, "WSL2/Windows paths & AI Provider Matrix (/status)", IsSelectedValue: string.Equals(_lastSelectedOrchestratorKey, "6", StringComparison.Ordinal)),
+            new("0", "Back to Main Menu", null, null, null, "Return to root prompt (or [q]uit)")
+        };
+
+        var initialIndex = InteractiveSelector.FindOptionIndexByKey(options, _lastSelectedOrchestratorKey);
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            initialIndex,
+            "orchestrator > ",
+            input,
+            color);
         if (choice is null)
         {
             return MenuState.Exit;
@@ -323,7 +362,7 @@ public sealed class CliMenuRunner
         var trimmed = choice.Trim();
         if (string.IsNullOrEmpty(trimmed))
         {
-            return MenuState.WizardOrchestrator;
+            return MenuState.BacklogOrchestrator;
         }
 
         if (trimmed.StartsWith('/'))
@@ -337,7 +376,7 @@ public sealed class CliMenuRunner
                 input,
                 output,
                 color,
-                returnState: MenuState.WizardOrchestrator);
+                returnState: MenuState.BacklogOrchestrator);
         }
 
         if (trimmed.Contains('@'))
@@ -357,11 +396,11 @@ public sealed class CliMenuRunner
                         input,
                         output,
                         color,
-                        returnState: MenuState.WizardOrchestrator);
+                        returnState: MenuState.BacklogOrchestrator);
                 }
 
                 WarnMissingContextFiles([tokens[0]], workspace, color);
-                return MenuState.WizardOrchestrator;
+                return MenuState.BacklogOrchestrator;
             }
 
             ExecuteContextMentionInput(
@@ -373,7 +412,7 @@ public sealed class CliMenuRunner
                 input,
                 output,
                 color);
-            return MenuState.WizardOrchestrator;
+            return MenuState.BacklogOrchestrator;
         }
 
         switch (trimmed.ToLowerInvariant())
@@ -383,36 +422,172 @@ public sealed class CliMenuRunner
             case "q" or "quit" or "exit":
                 return MenuState.Exit;
             case "1" or "d" or "draft":
-                _subMenuReturnState = MenuState.WizardOrchestrator;
+                _lastSelectedOrchestratorKey = "1";
+                _subMenuReturnState = MenuState.BacklogOrchestrator;
                 return MenuState.DraftItem;
             case "2" or "p" or "process":
-                _subMenuReturnState = MenuState.WizardOrchestrator;
+                _lastSelectedOrchestratorKey = "2";
+                _subMenuReturnState = MenuState.BacklogOrchestrator;
                 return MenuState.ProcessFiles;
             case "3" or "v" or "preview" or "view":
-                _subMenuReturnState = MenuState.WizardOrchestrator;
-                _wizardPreviewReturnToWizard = true;
+                _lastSelectedOrchestratorKey = "3";
+                _subMenuReturnState = MenuState.BacklogOrchestrator;
+                _previewReturnToOrchestrator = true;
                 return MenuState.PreviewOutcome;
             case "4" or "c" or "copy":
+                _lastSelectedOrchestratorKey = "4";
                 if (_lastMarkdownDocuments.Count == 0 && savedFiles.Count > 0)
                 {
                     PreviewMarkdownFilePath(savedFiles[0], color, includeAlternatives: sessionOptions.ShowAlternatives);
                 }
 
-                return ExecuteInlineCopyCommand([], input, color, returnState: MenuState.WizardOrchestrator);
+                return ExecuteInlineCopyCommand([], input, color, returnState: MenuState.BacklogOrchestrator);
             case "5" or "s" or "settings":
-                _subMenuReturnState = MenuState.WizardOrchestrator;
+                _lastSelectedOrchestratorKey = "5";
+                _subMenuReturnState = MenuState.BacklogOrchestrator;
                 return MenuState.Settings;
             case "6" or "status" or "doctor":
+                _lastSelectedOrchestratorKey = "6";
                 color.WriteLine();
                 _diagnosticService.RenderStatusTable(sessionOptions, output, currentSettings);
-                return MenuState.WizardOrchestrator;
+                return MenuState.BacklogOrchestrator;
             case "?" or "h" or "help":
                 WriteReplHelp(color);
-                return MenuState.WizardOrchestrator;
+                return MenuState.BacklogOrchestrator;
             default:
-                return WarnAndStay(color, trimmed, "0-6, [d/p/v/c/s/b/q], /command, or @filename", MenuState.WizardOrchestrator);
+                return WarnAndStay(color, trimmed, "0-6, [d/p/v/c/s/b/q], /command, or @filename", MenuState.BacklogOrchestrator);
         }
     }
+
+    private MenuState ShowCreateGenerateBacklogMenu(
+        WorkspaceDirectories baseWorkspace,
+        WorkspaceDirectories workspace,
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        TextReader input,
+        TextWriter output,
+        ConsoleColorWriter color,
+        MenuState returnState = MenuState.Main)
+    {
+        _workspaceService.EnsureDirectoriesExist(workspace);
+        var files = _workspaceService.GetInputFiles(workspace.InputDirectory);
+        var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
+        var providerCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
+        var modelLabel = currentSettings.ModelName ?? (activeProvider == AiProviderType.GitHubCopilot
+            ? RuntimeEnvironmentService.DefaultCopilotModel
+            : "auto");
+
+        color.WriteLine();
+        color.WriteHeader("=== Create / Generate Backlog ===");
+        color.WriteMuted($"  Source    : In ./in ({files.Count} file(s)) │ Out ./out │ Provider: {providerCode} ({modelLabel})");
+        color.WriteMuted("  Tip: ↑/↓ + Enter or [1-3, d=draft, p=process, @filename, 0/b=back]");
+        color.WriteLine();
+
+        var (valueBadgeFg, valueBadgeBg) = color.GetValueBadgeColors();
+        var options = new List<HighlightedMenuOption>
+        {
+            new("1", "Draft from Goal / Title", "goal", valueBadgeFg, valueBadgeBg, "Quick Type 01 Story, Type 02 Schedule, or Both (/draft)", IsSelectedValue: string.Equals(_lastSelectedCreateKey, "1", StringComparison.Ordinal)),
+            new("2", "Process Input Files (./in)", $"{files.Count} queued", valueBadgeFg, valueBadgeBg, "Batch all, pick single file review, or Dry Run (/process)", IsSelectedValue: string.Equals(_lastSelectedCreateKey, "2", StringComparison.Ordinal)),
+            new("3", "Dry Run / Scan Workspace", "preview only", valueBadgeFg, valueBadgeBg, "Scan & preview ./in items without writing files", IsSelectedValue: string.Equals(_lastSelectedCreateKey, "3", StringComparison.Ordinal)),
+            new("0", BackToLabel(returnState))
+        };
+
+        var initialIndex = InteractiveSelector.FindOptionIndexByKey(options, _lastSelectedCreateKey);
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            initialIndex,
+            "Select creation source (1-3, ↑/↓, b=back, q=quit, or @filename): ",
+            input,
+            color);
+        if (choice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var trimmed = choice.Trim();
+        var normalized = trimmed.ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back")
+        {
+            return returnState;
+        }
+
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
+        }
+
+        if (trimmed.StartsWith('/'))
+        {
+            return ExecuteSlashCommand(
+                trimmed,
+                baseWorkspace,
+                ref workspace,
+                ref sessionOptions,
+                ref currentSettings,
+                input,
+                output,
+                color,
+                returnState: MenuState.CreateBacklog);
+        }
+
+        if (trimmed.Contains('@'))
+        {
+            var tokens = TokenizeCommandLine(trimmed);
+            if (tokens.Count == 1 && tokens[0].StartsWith('@') && tokens[0].Length > 1)
+            {
+                var resolved = _workspaceService.TryResolveContextFile(tokens[0], workspace);
+                if (resolved is not null)
+                {
+                    return ProcessSingleFileInWizard(
+                        resolved,
+                        workspace,
+                        ref sessionOptions,
+                        ref currentSettings,
+                        baseWorkspace,
+                        input,
+                        output,
+                        color,
+                        returnState: MenuState.CreateBacklog);
+                }
+            }
+
+            ExecuteContextMentionInput(
+                trimmed,
+                workspace,
+                ref sessionOptions,
+                ref currentSettings,
+                baseWorkspace,
+                input,
+                output,
+                color);
+            return MenuState.CreateBacklog;
+        }
+
+        switch (normalized)
+        {
+            case "1" or "d" or "draft" or "goal":
+                _lastSelectedCreateKey = "1";
+                _subMenuReturnState = MenuState.CreateBacklog;
+                return MenuState.DraftItem;
+            case "2" or "p" or "process" or "files" or "file":
+                _lastSelectedCreateKey = "2";
+                _subMenuReturnState = MenuState.CreateBacklog;
+                return MenuState.ProcessFiles;
+            case "3" or "dry" or "scan" or "dry-run":
+                _lastSelectedCreateKey = "3";
+                ProcessFiles(files, dryRun: true, baseWorkspace, ref sessionOptions, ref currentSettings, input, output, color);
+                return MenuState.CreateBacklog;
+            default:
+                return WarnAndStay(color, choice, "0-3, d=draft, p=process, b=back, or @filename", MenuState.CreateBacklog);
+        }
+    }
+
+    private static string BackToLabel(MenuState returnState) => returnState switch
+    {
+        MenuState.BacklogOrchestrator => "Back to Backlog Assisted Orchestrator",
+        MenuState.CreateBacklog => "Back to Create / Generate Backlog",
+        _ => "Back to Main Menu"
+    };
 
     private MenuState ExecuteSlashCommand(
         string commandLine,
@@ -486,8 +661,12 @@ public sealed class CliMenuRunner
                     return returnState;
                 }
 
-                case "/wizard" or "/guided":
-                    return MenuState.WizardOrchestrator;
+                case "/generate" or "/create" or "/new":
+                    _createBacklogReturnState = returnState;
+                    return MenuState.CreateBacklog;
+
+                case "/wizard" or "/guided" or "/orchestrator" or "/bao":
+                    return MenuState.BacklogOrchestrator;
 
                 case "/theme":
                 {
@@ -607,7 +786,7 @@ public sealed class CliMenuRunner
                     if (args.Length == 0)
                     {
                         _subMenuReturnState = returnState;
-                        _wizardPreviewReturnToWizard = returnState == MenuState.WizardOrchestrator;
+                        _previewReturnToOrchestrator = returnState == MenuState.BacklogOrchestrator;
                         return MenuState.PreviewOutcome;
                     }
 
@@ -997,13 +1176,22 @@ public sealed class CliMenuRunner
         }
 
         color.WriteLine();
-        color.WriteMenuOption("1", "Process All Files", "Batch run all queued ./in files");
-        color.WriteMenuOption("2", "Select Single File (Wizard Review)", "Pick one file -> Preview, Verbosity, Refine & Copy");
-        color.WriteMenuOption("3", "Dry Run (Preview Only)", "Preview all files without writing");
-        color.WriteMenuOption("0", returnState == MenuState.WizardOrchestrator ? "Back to Wizard Orchestrator" : "Back to Main Menu");
-        color.WriteColored("Select an option (0-3, b=back, q=quit, or @filename): ", ConsoleColor.Yellow);
+        var (valueBadgeFg, valueBadgeBg) = color.GetValueBadgeColors();
+        var options = new List<HighlightedMenuOption>
+        {
+            new("1", "Process All Files", $"{files.Count} queued", valueBadgeFg, valueBadgeBg, "Batch run all queued ./in files", IsSelectedValue: string.Equals(_lastSelectedProcessKey, "1", StringComparison.Ordinal)),
+            new("2", "Select Single File (Orchestrator Review)", null, null, null, "Pick one file -> Preview, Verbosity, Refine & Copy", IsSelectedValue: string.Equals(_lastSelectedProcessKey, "2", StringComparison.Ordinal)),
+            new("3", "Dry Run (Preview Only)", null, null, null, "Preview all files without writing", IsSelectedValue: string.Equals(_lastSelectedProcessKey, "3", StringComparison.Ordinal)),
+            new("0", BackToLabel(returnState))
+        };
 
-        var choice = input.ReadLine();
+        var initialIndex = InteractiveSelector.FindOptionIndexByKey(options, _lastSelectedProcessKey);
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            initialIndex,
+            "Select an option (0-3, ↑/↓, b=back, q=quit, or @filename): ",
+            input,
+            color);
         if (choice is null)
         {
             return MenuState.Exit;
@@ -1045,9 +1233,11 @@ public sealed class CliMenuRunner
         switch (normalized)
         {
             case "1" or "a" or "all":
+                _lastSelectedProcessKey = "1";
                 ProcessFiles(files, false, baseWorkspace, ref sessionOptions, ref currentSettings, input, output, color);
                 return MenuState.ProcessFiles;
             case "2" or "s" or "single":
+                _lastSelectedProcessKey = "2";
                 var selectedFile = SelectSingleFile(files, input, color);
                 if (selectedFile is not null)
                 {
@@ -1065,6 +1255,7 @@ public sealed class CliMenuRunner
 
                 return MenuState.ProcessFiles;
             case "3" or "p" or "preview" or "dry":
+                _lastSelectedProcessKey = "3";
                 ProcessFiles(files, true, baseWorkspace, ref sessionOptions, ref currentSettings, input, output, color);
                 return MenuState.ProcessFiles;
             default:
@@ -1080,15 +1271,22 @@ public sealed class CliMenuRunner
             return null;
         }
 
+        var options = new List<HighlightedMenuOption>(files.Count + 1);
         for (var index = 0; index < files.Count; index++)
         {
-            color.WriteMenuOption((index + 1).ToString(), Path.GetFileName(files[index]));
+            var size = new FileInfo(files[index]).Length;
+            options.Add(new HighlightedMenuOption((index + 1).ToString(), Path.GetFileName(files[index]), Description: $"{size:N0} bytes"));
         }
 
-        color.WriteMenuOption("0", "Cancel");
-        color.WriteColored($"Select a file (1-{files.Count}, or 0 to cancel): ", ConsoleColor.Yellow);
-        var selection = input.ReadLine()?.Trim();
-        if (selection == "0")
+        options.Add(new HighlightedMenuOption("0", "Cancel"));
+
+        var selection = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            0,
+            $"Select a file (1-{files.Count}, ↑/↓, or 0 to cancel): ",
+            input,
+            color)?.Trim();
+        if (string.IsNullOrEmpty(selection) || selection is "0" or "b" or "back" or "q" or "quit")
         {
             return null;
         }
@@ -1175,10 +1373,10 @@ public sealed class CliMenuRunner
         TextReader input,
         TextWriter output,
         ConsoleColorWriter color,
-        MenuState returnState = MenuState.WizardOrchestrator)
+        MenuState returnState = MenuState.BacklogOrchestrator)
     {
         color.WriteLine();
-        color.WriteSubHeader("--- Guided Draft & Refine Wizard --- (Preview & Tweak)");
+        color.WriteSubHeader("--- Backlog Assisted Orchestrator: Draft & Refine --- (Preview & Tweak)");
         color.WriteMuted("  Outcome Verbosity: [1/min] Minimalistic (<=25w)  │  [2/bal] Balanced (<=57w, default)  │  [3/det] Detailed (<=95w)");
         color.WriteColored("Format ([1] Type01 Story, [2] Type02 Schedule, [3] Both; optional 'min|bal|det') [default: 1]: ", ConsoleColor.Yellow);
         var formatChoice = input.ReadLine();
@@ -1288,7 +1486,7 @@ public sealed class CliMenuRunner
         MenuState returnState)
     {
         color.WriteLine();
-        color.WriteSubHeader($"--- Wizard Orchestrator: Reviewing '{Path.GetFileName(filePath)}' ---");
+        color.WriteSubHeader($"--- Backlog Assisted Orchestrator: Reviewing '{Path.GetFileName(filePath)}' ---");
         color.WriteMuted("  Outcome Verbosity: [1/min] Minimalistic (<=25w)  │  [2/bal] Balanced (<=57w, default)  │  [3/det] Detailed (<=95w)");
         color.WriteColored("Format ([1] Type01 Story, [2] Type02 Schedule, [3] Both; optional 'min|bal|det') [default: 1]: ", ConsoleColor.Yellow);
         var formatChoice = input.ReadLine();
@@ -1409,32 +1607,51 @@ public sealed class CliMenuRunner
                 runWebSearchThisPass = false;
             }
 
+            var lastDecisionKey = "A";
             while (true)
             {
                 color.WriteLine();
                 color.WriteHeader($"[4/5 Review Decision] (Verbosity: {DescriptionFormatter.FormatVerbosityLabel(verbosity)})");
                 var hasAlternatives = latestOutcome?.Alternatives is { Count: > 0 };
+                var (valBadgeFg, valBadgeBg) = color.GetValueBadgeColors();
+                var decisionOptions = new List<HighlightedMenuOption>();
                 if (hasAlternatives)
                 {
-                    color.WriteMenuOption($"1-{latestOutcome!.Alternatives!.Count}", $"Adopt Alternative Title & Description (#1..#{latestOutcome.Alternatives.Count})");
+                    for (var altIdx = 0; altIdx < latestOutcome!.Alternatives!.Count; altIdx++)
+                    {
+                        var alt = latestOutcome.Alternatives[altIdx];
+                        decisionOptions.Add(new HighlightedMenuOption(
+                            (altIdx + 1).ToString(),
+                            $"Adopt Alternative #{altIdx + 1} ({alt.Angle})",
+                            Description: alt.Title));
+                    }
                 }
 
-                color.WriteMenuOption("A", $"Accept & Save to '{sessionOptions.OutputDirectory}' (default)");
-                color.WriteMenuOption("N", "Copy Simple Text (no format: Title / --- / Description)");
-                color.WriteMenuOption("M", "Copy Markdown to clipboard");
-                color.WriteMenuOption("W", "Copy Raw Text (table) to clipboard");
-                color.WriteMenuOption("S", "Select & Copy field / Clean Text (Title, Story, Desc, AC)");
-                color.WriteMenuOption("V", $"Outcome Verbosity [{DescriptionFormatter.FormatVerbosityLabel(verbosity)}: Minimalistic / Balanced / Detailed]");
-                color.WriteMenuOption("R", "Refine Title / Description with feedback");
-                color.WriteMenuOption("T", "Switch format (Type01 / Type02 / Both)");
-                color.WriteMenuOption("P", "Preview only (finish without writing files)");
-                color.WriteMenuOption("C", "Cancel / Back");
-                var actionPrompt = hasAlternatives
-                    ? $"Choose action (1-{latestOutcome!.Alternatives!.Count}/A/N/M/W/S/V/R/T/P/C) [A]: "
-                    : "Choose action (A/N/M/W/S/V/R/T/P/C) [A]: ";
-                color.WriteColored(actionPrompt, ConsoleColor.Yellow);
+                decisionOptions.Add(new("A", $"Accept & Save to '{sessionOptions.OutputDirectory}'", "default", ConsoleColor.Black, ConsoleColor.Green, "Save artifacts to workspace", IsSelectedValue: true));
+                decisionOptions.Add(new("N", "Copy Simple Text", null, null, null, "No format: Title / --- / Description"));
+                decisionOptions.Add(new("M", "Copy Markdown to clipboard"));
+                decisionOptions.Add(new("W", "Copy Raw Text (table) to clipboard"));
+                decisionOptions.Add(new("S", "Select & Copy field / Clean Text", null, null, null, "Title, Story, Desc, AC"));
+                decisionOptions.Add(new("V", "Outcome Verbosity", DescriptionFormatter.FormatVerbosityLabel(verbosity), valBadgeFg, valBadgeBg, "Minimalistic / Balanced / Detailed", IsSelectedValue: true));
+                decisionOptions.Add(new("R", "Refine Title / Description with feedback"));
+                decisionOptions.Add(new("T", "Switch format (Type01 / Type02 / Both)", combinedOutput ? "Both" : backlogType, valBadgeFg, valBadgeBg, IsSelectedValue: true));
+                decisionOptions.Add(new("P", "Preview only", null, null, null, "Finish without writing files"));
+                decisionOptions.Add(new("C", "Cancel / Back"));
 
-                var action = input.ReadLine();
+                var initialDecisionIndex = InteractiveSelector.FindOptionIndexByKey(
+                    decisionOptions,
+                    lastDecisionKey,
+                    fallbackIndex: hasAlternatives ? latestOutcome!.Alternatives!.Count : 0);
+                var actionPrompt = hasAlternatives
+                    ? $"Choose action (1-{latestOutcome!.Alternatives!.Count}/A/N/M/W/S/V/R/T/P/C, ↑/↓) [A]: "
+                    : "Choose action (A/N/M/W/S/V/R/T/P/C, ↑/↓) [A]: ";
+
+                var action = InteractiveSelector.SelectMenuOptionWithHighlight(
+                    decisionOptions,
+                    initialDecisionIndex,
+                    actionPrompt,
+                    input,
+                    color);
                 if (action is null)
                 {
                     return MenuState.Exit;
@@ -1451,6 +1668,7 @@ public sealed class CliMenuRunner
                     altChoice >= 1 &&
                     altChoice <= availableAlternatives.Count)
                 {
+                    lastDecisionKey = altChoice.ToString();
                     var chosenAlt = availableAlternatives[altChoice - 1];
                     latestOutcome = ApplyAlternativeToOutcome(latestOutcome, chosenAlt, verbosity);
                     baseFullDescription = latestOutcome.Description;
@@ -1463,6 +1681,7 @@ public sealed class CliMenuRunner
 
                 if (normalizedAction is "n" or "simple" or "noformat" or "no-format")
                 {
+                    lastDecisionKey = "N";
                     CacheWizardTickets(latestOutcome!, latestTickets!, combinedOutput);
                     MarkdownOutcomeRenderer.CopySimpleUnformattedToClipboard(
                         _clipboardService,
@@ -1475,18 +1694,21 @@ public sealed class CliMenuRunner
 
                 if (normalizedAction is "m" or "md" or "markdown")
                 {
+                    lastDecisionKey = "M";
                     CopyCurrentOutcomeToClipboard(asMarkdown: true, color);
                     continue;
                 }
 
                 if (normalizedAction is "w" or "raw" or "text")
                 {
+                    lastDecisionKey = "W";
                     CopyCurrentOutcomeToClipboard(asMarkdown: false, color);
                     continue;
                 }
 
                 if (normalizedAction is "s" or "select")
                 {
+                    lastDecisionKey = "S";
                     CacheWizardTickets(latestOutcome!, latestTickets!, combinedOutput);
                     var selectResult = PromptCopyFormatLoop(input, color, returnState: MenuState.Main, allowWizardPromotion: false);
                     if (selectResult == MenuState.Exit)
@@ -1499,16 +1721,18 @@ public sealed class CliMenuRunner
 
                 if (normalizedAction is "v" or "verbosity" or "min" or "minimal" or "minimalistic" or "bal" or "balanced" or "det" or "detailed")
                 {
+                    lastDecisionKey = "V";
                     OutcomeVerbosity nextVerbosity;
                     if (normalizedAction is "v" or "verbosity")
                     {
                         color.WriteLine();
                         color.WriteSubHeader("Select Outcome Verbosity:");
-                        color.WriteMenuOption("1", "Minimalistic (<= 25 words)", "1-line objective + at most 2 action bullets (no extras)");
-                        color.WriteMenuOption("2", "Balanced (<= 57 words)", "Standard Objective + 3 action bullets (default)");
-                        color.WriteMenuOption("3", "Detailed (<= 95 words)", "Full Objective, Context/Web insights, bullets & 3 Alternatives");
-                        color.WriteColored("Choose verbosity (1=Minimalistic, 2=Balanced, 3=Detailed) [2]: ", ConsoleColor.Yellow);
-                        var vChoice = input.ReadLine();
+                        var vChoice = InteractiveSelector.SelectMenuOptionWithHighlight(
+                            BuildVerbosityOptions(verbosity),
+                            ResolveVerbosityCursorIndex(verbosity),
+                            "Choose verbosity (1-3, ↑/↓): ",
+                            input,
+                            color);
                         if (vChoice is null)
                         {
                             return MenuState.Exit;
@@ -1575,6 +1799,7 @@ public sealed class CliMenuRunner
 
                 if (normalizedAction is "r" or "refine")
                 {
+                    lastDecisionKey = "R";
                     color.WriteColored("What info should be added, changed, or emphasized? ", ConsoleColor.Yellow);
                     var feedback = input.ReadLine();
                     if (feedback is null)
@@ -1595,8 +1820,22 @@ public sealed class CliMenuRunner
 
                 if (normalizedAction is "t" or "type")
                 {
-                    color.WriteColored("Switch format ([1] Type01 Story, [2] Type02 Schedule, [3] Both): ", ConsoleColor.Yellow);
-                    var switchChoice = input.ReadLine();
+                    lastDecisionKey = "T";
+                    color.WriteLine();
+                    color.WriteSubHeader("Switch Backlog Format:");
+                    var formatOptions = new List<HighlightedMenuOption>
+                    {
+                        BuildSelectableValueOption("1", "Type01 Complete User Story", "User story + Given/When/Then scenarios", !combinedOutput && !backlogType.Equals("Type02", StringComparison.OrdinalIgnoreCase)),
+                        BuildSelectableValueOption("2", "Type02 Schedule Item", "Concise Title + Objective/Checklist description", !combinedOutput && backlogType.Equals("Type02", StringComparison.OrdinalIgnoreCase)),
+                        BuildSelectableValueOption("3", "Both (Type01 + Type02)", "Generate both story and schedule outputs", combinedOutput)
+                    };
+                    var currentFmtIdx = combinedOutput ? 2 : backlogType.Equals("Type02", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+                    var switchChoice = InteractiveSelector.SelectMenuOptionWithHighlight(
+                        formatOptions,
+                        currentFmtIdx,
+                        "Switch format (1-3, ↑/↓): ",
+                        input,
+                        color);
                     if (switchChoice is null)
                     {
                         return MenuState.Exit;
@@ -1684,14 +1923,10 @@ public sealed class CliMenuRunner
             new("6", "Inspect Directories", null, null, null, "List files & byte sizes in ./in and ./out"),
             new("7", "Runtime & AI Diagnostics", null, null, null, "Windows/WSL paths, env vars, & status table"),
             new("8", "View settings.json", null, null, null, "Show persisted JSON configuration"),
-            new("0", returnState == MenuState.WizardOrchestrator ? "Back to Wizard Orchestrator" : "Back to Main Menu")
+            new("0", BackToLabel(returnState))
         };
 
-        var initialIndex = options.FindIndex(o => string.Equals(o.Key, _lastSelectedSettingsKey, StringComparison.OrdinalIgnoreCase));
-        if (initialIndex < 0)
-        {
-            initialIndex = 0;
-        }
+        var initialIndex = InteractiveSelector.FindOptionIndexByKey(options, _lastSelectedSettingsKey);
 
         var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
             options,
@@ -1739,21 +1974,9 @@ public sealed class CliMenuRunner
             case "3":
                 color.WriteLine();
                 color.WriteSubHeader("Select Default Outcome Verbosity:");
-                var verbosityOptions = new List<HighlightedMenuOption>
-                {
-                    BuildSelectableValueOption("1", "Minimalistic (<= 25 words)", "1-line objective + at most 2 action bullets", sessionOptions.Verbosity == OutcomeVerbosity.Minimalistic),
-                    BuildSelectableValueOption("2", "Balanced (<= 57 words)", "Standard Objective + 3 action bullets (default)", sessionOptions.Verbosity == OutcomeVerbosity.Balanced),
-                    BuildSelectableValueOption("3", "Detailed (<= 95 words)", "Full context, bullets & 3 Alternatives", sessionOptions.Verbosity == OutcomeVerbosity.Detailed)
-                };
-                var activeVerbosityIndex = sessionOptions.Verbosity switch
-                {
-                    OutcomeVerbosity.Minimalistic => 0,
-                    OutcomeVerbosity.Detailed => 2,
-                    _ => 1
-                };
                 var vSelection = InteractiveSelector.SelectMenuOptionWithHighlight(
-                    verbosityOptions,
-                    activeVerbosityIndex,
+                    BuildVerbosityOptions(sessionOptions.Verbosity, includeCancel: false),
+                    ResolveVerbosityCursorIndex(sessionOptions.Verbosity),
                     "Choose verbosity (1-3, ↑/↓, 0=cancel): ",
                     input,
                     color);
@@ -1794,6 +2017,31 @@ public sealed class CliMenuRunner
                 return WarnAndStay(color, choice, "0-8, b=back, or q=quit", MenuState.Settings);
         }
     }
+
+    private static List<HighlightedMenuOption> BuildVerbosityOptions(
+        OutcomeVerbosity activeVerbosity,
+        bool includeCancel = false)
+    {
+        var list = new List<HighlightedMenuOption>(4)
+        {
+            BuildSelectableValueOption("1", "Minimalistic (<= 25 words)", "1-line objective + at most 2 action bullets", activeVerbosity == OutcomeVerbosity.Minimalistic),
+            BuildSelectableValueOption("2", "Balanced (<= 57 words)", "Standard Objective + 3 action bullets (default)", activeVerbosity == OutcomeVerbosity.Balanced),
+            BuildSelectableValueOption("3", "Detailed (<= 95 words)", "Full Objective, Context/Web insights, bullets & 3 Alternatives", activeVerbosity == OutcomeVerbosity.Detailed)
+        };
+        if (includeCancel)
+        {
+            list.Add(new HighlightedMenuOption("0", "Cancel"));
+        }
+
+        return list;
+    }
+
+    private static int ResolveVerbosityCursorIndex(OutcomeVerbosity verbosity) => verbosity switch
+    {
+        OutcomeVerbosity.Minimalistic => 0,
+        OutcomeVerbosity.Detailed => 2,
+        _ => 1
+    };
 
     private MenuState ShowThemeMenu(
         WorkspaceDirectories baseWorkspace,
@@ -2535,6 +2783,21 @@ public sealed class CliMenuRunner
         }
     }
 
+    private enum PreviewArtifactKind
+    {
+        ActiveSession,
+        MarkdownOutcome,
+        JsonExport,
+        InputNote
+    }
+
+    private sealed record PreviewArtifact(
+        PreviewArtifactKind Kind,
+        string CategoryBadge,
+        string DisplayName,
+        string FullPath,
+        long SizeBytes);
+
     private MenuState ShowPreviewOutcomeMenu(
         WorkspaceDirectories workspace,
         ref WorkflowOptions sessionOptions,
@@ -2544,33 +2807,53 @@ public sealed class CliMenuRunner
         TextWriter output,
         ConsoleColorWriter color,
         MenuState returnState = MenuState.Main,
-        bool openInWizardReview = false)
+        bool openInOrchestratorReview = false)
     {
-        var outputDir = sessionOptions.OutputDirectory ?? workspace.OutputDirectory;
-        var mdFiles = GetSavedMarkdownFiles(outputDir);
+        var allArtifacts = CollectPreviewArtifacts(workspace, sessionOptions);
 
         color.WriteLine();
-        color.WriteHeader(openInWizardReview
-            ? "=== Preview, Refine & Copy Outcome (Wizard) ==="
-            : "=== Preview & Copy Outcome (Markdown) ===");
-        if (mdFiles.Count == 0)
+        color.WriteHeader(openInOrchestratorReview
+            ? "=== Preview, Refine & Copy Outcome (Backlog Assisted Orchestrator) ==="
+            : "=== Preview Workspace & Outcomes ===");
+        if (allArtifacts.Count == 0)
         {
-            color.WriteWarning($"  [!] No saved Markdown outcomes found in '{outputDir}'. Run Draft or Process first.");
+            var outputDir = sessionOptions.OutputDirectory ?? workspace.OutputDirectory;
+            color.WriteWarning($"  [!] No active draft, saved outcomes (.md/.json in '{outputDir}'), or notes (in '{workspace.InputDirectory}') found.");
             return returnState;
         }
 
-        IReadOnlyList<string> candidates = mdFiles;
+        color.WriteMuted("  Includes: active session outcome, ./out/*.md, ./out/*.json & ./in input notes.");
+        IReadOnlyList<PreviewArtifact> candidates = allArtifacts;
+        var highlightedKey = "1";
         while (true)
         {
+            var options = new List<HighlightedMenuOption>(candidates.Count + 1);
             for (var i = 0; i < candidates.Count; i++)
             {
-                var info = new FileInfo(candidates[i]);
-                color.WriteMenuOption((i + 1).ToString(), info.Name, $"{info.Length:N0} bytes");
+                var artifact = candidates[i];
+                var (badgeFg, badgeBg) = GetPreviewBadgeColors(artifact.Kind, color);
+                var detail = artifact.Kind == PreviewArtifactKind.ActiveSession
+                    ? "in-memory active draft / outcome"
+                    : $"{artifact.SizeBytes:N0} bytes";
+                options.Add(new HighlightedMenuOption(
+                    (i + 1).ToString(),
+                    artifact.DisplayName,
+                    artifact.CategoryBadge,
+                    badgeFg,
+                    badgeBg,
+                    detail,
+                    IsSelectedValue: artifact.Kind == PreviewArtifactKind.ActiveSession));
             }
 
-            color.WriteMenuOption("0", returnState == MenuState.WizardOrchestrator ? "Back to Wizard Orchestrator" : "Back to Main Menu");
-            color.WriteColored("Select file [Enter=#1, number, fuzzy name, b=back, q=quit]: ", ConsoleColor.Yellow);
-            var selection = input.ReadLine();
+            options.Add(new HighlightedMenuOption("0", BackToLabel(returnState)));
+            var initialIndex = InteractiveSelector.FindOptionIndexByKey(options, highlightedKey);
+
+            var selection = InteractiveSelector.SelectMenuOptionWithHighlight(
+                options,
+                initialIndex,
+                "Select item to preview [Enter=#1, ↑/↓, number, fuzzy name, b=back, q=quit]: ",
+                input,
+                color);
             if (selection is null)
             {
                 return MenuState.Exit;
@@ -2588,10 +2871,10 @@ public sealed class CliMenuRunner
                 return MenuState.Exit;
             }
 
-            string? chosenPath = null;
+            PreviewArtifact? chosenArtifact = null;
             if (string.IsNullOrEmpty(trimmed))
             {
-                chosenPath = candidates[0];
+                chosenArtifact = candidates[0];
             }
             else if (int.TryParse(trimmed, out var chosen))
             {
@@ -2601,66 +2884,105 @@ public sealed class CliMenuRunner
                     continue;
                 }
 
-                chosenPath = candidates[chosen - 1];
+                chosenArtifact = candidates[chosen - 1];
             }
             else
             {
-                var matches = InteractiveSelector.FilterFilePaths(candidates, trimmed);
+                var matches = FilterPreviewArtifacts(candidates, trimmed);
                 if (matches.Count == 1)
                 {
-                    color.WriteSuccess($"  ✓ Matched '{Path.GetFileName(matches[0])}'");
-                    chosenPath = matches[0];
+                    color.WriteSuccess($"  ✓ Matched '{matches[0].DisplayName}'");
+                    chosenArtifact = matches[0];
                 }
                 else if (matches.Count > 1)
                 {
                     candidates = matches;
-                    color.WriteMuted($"  Filtered to {matches.Count} matching file(s):");
+                    highlightedKey = "1";
+                    color.WriteMuted($"  Filtered to {matches.Count} matching item(s):");
                     continue;
                 }
                 else
                 {
-                    color.WriteWarning($"  [!] No saved Markdown files matched '{trimmed}'.");
-                    candidates = mdFiles;
+                    color.WriteWarning($"  [!] No preview items matched '{trimmed}'.");
+                    candidates = allArtifacts;
+                    highlightedKey = "1";
                     continue;
                 }
             }
 
-            PreviewMarkdownFilePath(chosenPath, color, includeAlternatives: openInWizardReview || sessionOptions.ShowAlternatives);
-            if (openInWizardReview)
+            if (chosenArtifact.Kind is PreviewArtifactKind.ActiveSession or PreviewArtifactKind.MarkdownOutcome)
             {
-                return OpenSavedMarkdownInWizardReview(
-                    chosenPath,
-                    workspace,
-                    ref sessionOptions,
-                    ref currentSettings,
-                    baseWorkspace,
-                    input,
-                    output,
-                    color,
-                    returnState);
+                string markdownContent;
+                if (chosenArtifact.Kind == PreviewArtifactKind.ActiveSession)
+                {
+                    markdownContent = _lastMarkdownDocuments[0];
+                    MarkdownOutcomeRenderer.WriteOutcomeTable(
+                        color,
+                        _lastMarkdownDocuments,
+                        _lastSupplementalUserStory,
+                        _lastSupplementalDescription,
+                        includeAlternatives: openInOrchestratorReview || sessionOptions.ShowAlternatives);
+                }
+                else
+                {
+                    markdownContent = File.ReadAllText(chosenArtifact.FullPath);
+                    PreviewMarkdownFilePath(chosenArtifact.FullPath, color, includeAlternatives: openInOrchestratorReview || sessionOptions.ShowAlternatives);
+                }
+
+                if (openInOrchestratorReview)
+                {
+                    return OpenMarkdownContentInOrchestratorReview(
+                        markdownContent,
+                        workspace,
+                        ref sessionOptions,
+                        ref currentSettings,
+                        baseWorkspace,
+                        input,
+                        output,
+                        color,
+                        returnState);
+                }
+
+                var copyOutcomeState = PromptCopyFormatLoop(input, color, returnState: returnState, allowWizardPromotion: true);
+                if (copyOutcomeState == MenuState.BacklogOrchestrator)
+                {
+                    return OpenMarkdownContentInOrchestratorReview(
+                        markdownContent,
+                        workspace,
+                        ref sessionOptions,
+                        ref currentSettings,
+                        baseWorkspace,
+                        input,
+                        output,
+                        color,
+                        returnState);
+                }
+
+                return copyOutcomeState;
             }
 
-            var copyOutcomeState = PromptCopyFormatLoop(input, color, returnState: returnState, allowWizardPromotion: true);
-            if (copyOutcomeState == MenuState.WizardOrchestrator)
+            var rawActionState = PreviewRawArtifactWithActions(
+                chosenArtifact,
+                workspace,
+                ref sessionOptions,
+                ref currentSettings,
+                baseWorkspace,
+                input,
+                output,
+                color,
+                returnState);
+            if (rawActionState != MenuState.PreviewOutcome)
             {
-                return OpenSavedMarkdownInWizardReview(
-                    chosenPath,
-                    workspace,
-                    ref sessionOptions,
-                    ref currentSettings,
-                    baseWorkspace,
-                    input,
-                    output,
-                    color,
-                    returnState);
+                return rawActionState;
             }
 
-            return copyOutcomeState;
+            candidates = allArtifacts;
+            highlightedKey = "1";
         }
     }
 
-    private MenuState OpenSavedMarkdownInWizardReview(
-        string filePath,
+    private MenuState PreviewRawArtifactWithActions(
+        PreviewArtifact artifact,
         WorkspaceDirectories workspace,
         ref WorkflowOptions sessionOptions,
         ref CliSettings currentSettings,
@@ -2670,7 +2992,99 @@ public sealed class CliMenuRunner
         ConsoleColorWriter color,
         MenuState returnState)
     {
-        var markdown = File.ReadAllText(filePath);
+        var content = File.ReadAllText(artifact.FullPath);
+        color.WriteLine();
+        color.WriteHeader($"=== Preview ({artifact.CategoryBadge.ToUpperInvariant()}): {artifact.DisplayName} ===");
+        color.WriteMuted($"  Path: {artifact.FullPath} ({artifact.SizeBytes:N0} bytes)");
+        color.WriteLine();
+        color.WriteLine(content);
+        color.WriteLine();
+
+        var options = new List<HighlightedMenuOption>();
+        if (artifact.Kind == PreviewArtifactKind.InputNote)
+        {
+            options.Add(new("1", "Process Note in Backlog Assisted Orchestrator", "workflow", ConsoleColor.Black, ConsoleColor.Yellow, "Review & format into Type01 / Type02 / Both"));
+            options.Add(new("2", "Copy Raw Note to Clipboard"));
+        }
+        else
+        {
+            options.Add(new("1", $"Copy {artifact.CategoryBadge.ToUpperInvariant()} Content to Clipboard"));
+        }
+
+        options.Add(new("0", "Back to Preview List"));
+        options.Add(new("B", BackToLabel(returnState)));
+
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            0,
+            "Preview action (↑/↓, 0=list, b=back, q=quit): ",
+            input,
+            color);
+        if (choice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var normalized = choice.Trim().ToLowerInvariant();
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
+        }
+
+        if (normalized is "b" or "back" or "/back")
+        {
+            return returnState;
+        }
+
+        if (normalized is "" or "0" or "list")
+        {
+            return MenuState.PreviewOutcome;
+        }
+
+        if (artifact.Kind == PreviewArtifactKind.InputNote && normalized is "1" or "process")
+        {
+            return ProcessSingleFileInWizard(
+                artifact.FullPath,
+                workspace,
+                ref sessionOptions,
+                ref currentSettings,
+                baseWorkspace,
+                input,
+                output,
+                color,
+                returnState: MenuState.PreviewOutcome);
+        }
+
+        if ((artifact.Kind == PreviewArtifactKind.InputNote && normalized is "2" or "c" or "copy") ||
+            (artifact.Kind == PreviewArtifactKind.JsonExport && normalized is "1" or "c" or "copy"))
+        {
+            var copyResult = _clipboardService.CopyText(content);
+            if (copyResult.Succeeded)
+            {
+                color.WriteSuccess($"  ✓ Copied '{artifact.DisplayName}' to clipboard ({copyResult.Method}).");
+            }
+            else
+            {
+                color.WriteWarning($"  [!] {copyResult.Message}");
+            }
+
+            return MenuState.PreviewOutcome;
+        }
+
+        return MenuState.PreviewOutcome;
+    }
+
+    private MenuState OpenMarkdownContentInOrchestratorReview(
+        string markdown,
+        WorkspaceDirectories workspace,
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        WorkspaceDirectories baseWorkspace,
+        TextReader input,
+        TextWriter output,
+        ConsoleColorWriter color,
+        MenuState returnState)
+    {
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
         var (detectedType, reconstructed) = MarkdownOutcomeRenderer.ReconstructOutcomeFromMarkdown(markdown, activeProvider);
         var typeCode = detectedType == BacklogType.Type02 ? "Type02" : "Type01";
@@ -2705,10 +3119,135 @@ public sealed class CliMenuRunner
         var outputDir = sessionOptions.OutputDirectory ?? workspace.OutputDirectory;
         var showAlts = args.Any(a => a.Equals("--alternatives", StringComparison.OrdinalIgnoreCase) || a.Equals("--alts", StringComparison.OrdinalIgnoreCase));
         var targetArg = args.FirstOrDefault(a => !a.StartsWith('-'));
-        var targetPath = ResolveSavedMarkdownTarget(targetArg, outputDir);
-        PreviewMarkdownFilePath(targetPath, color, includeAlternatives: showAlts || sessionOptions.ShowAlternatives);
+
+        if (string.IsNullOrWhiteSpace(targetArg) && _lastMarkdownDocuments.Count > 0)
+        {
+            MarkdownOutcomeRenderer.WriteOutcomeTable(
+                color,
+                _lastMarkdownDocuments,
+                _lastSupplementalUserStory,
+                _lastSupplementalDescription,
+                includeAlternatives: showAlts || sessionOptions.ShowAlternatives);
+            color.WriteMuted("  Tip: Run '/copy simple', '/copy raw', '/copy md', '/copy clean', or '/copy <field>' to copy.");
+            return;
+        }
+
+        var allArtifacts = CollectPreviewArtifacts(workspace, sessionOptions);
+        if (!string.IsNullOrWhiteSpace(targetArg))
+        {
+            try
+            {
+                var mdPath = ResolveSavedMarkdownTarget(targetArg, outputDir);
+                PreviewMarkdownFilePath(mdPath, color, includeAlternatives: showAlts || sessionOptions.ShowAlternatives);
+                color.WriteMuted("  Tip: Run '/copy simple', '/copy raw', '/copy md', '/copy clean', or '/copy <field>' to copy.");
+                return;
+            }
+            catch (FileNotFoundException)
+            {
+                var matches = FilterPreviewArtifacts(allArtifacts, targetArg);
+                if (matches.Count > 0)
+                {
+                    var match = matches[0];
+                    if (match.Kind == PreviewArtifactKind.MarkdownOutcome)
+                    {
+                        PreviewMarkdownFilePath(match.FullPath, color, includeAlternatives: showAlts || sessionOptions.ShowAlternatives);
+                        color.WriteMuted("  Tip: Run '/copy simple', '/copy raw', '/copy md', '/copy clean', or '/copy <field>' to copy.");
+                        return;
+                    }
+
+                    if (match.Kind is PreviewArtifactKind.JsonExport or PreviewArtifactKind.InputNote)
+                    {
+                        color.WriteLine();
+                        color.WriteHeader($"=== Preview ({match.CategoryBadge.ToUpperInvariant()}): {match.DisplayName} ===");
+                        color.WriteMuted($"  Path: {match.FullPath}");
+                        color.WriteLine(File.ReadAllText(match.FullPath));
+                        return;
+                    }
+                }
+
+                throw;
+            }
+        }
+
+        var fallbackPath = ResolveSavedMarkdownTarget(null, outputDir);
+        PreviewMarkdownFilePath(fallbackPath, color, includeAlternatives: showAlts || sessionOptions.ShowAlternatives);
         color.WriteMuted("  Tip: Run '/copy simple', '/copy raw', '/copy md', '/copy clean', or '/copy <field>' to copy.");
     }
+
+    private IReadOnlyList<PreviewArtifact> CollectPreviewArtifacts(
+        WorkspaceDirectories workspace,
+        WorkflowOptions sessionOptions)
+    {
+        var outputDir = sessionOptions.OutputDirectory ?? workspace.OutputDirectory;
+        var list = new List<PreviewArtifact>();
+
+        if (_lastMarkdownDocuments.Count > 0)
+        {
+            var parsed = MarkdownOutcomeRenderer.ParseMarkdown(_lastMarkdownDocuments[0]);
+            var activeTitle = !string.IsNullOrWhiteSpace(parsed.TitleLine)
+                ? MarkdownOutcomeRenderer.StripMarkdownFormatting(parsed.TitleLine)
+                : "Current Session Draft / Outcome";
+            list.Add(new PreviewArtifact(
+                PreviewArtifactKind.ActiveSession,
+                "session",
+                $"Active: {activeTitle}",
+                string.Empty,
+                _lastMarkdownDocuments[0].Length));
+        }
+
+        foreach (var mdPath in GetSortedWorkspaceFiles(outputDir, "*.md"))
+        {
+            var info = new FileInfo(mdPath);
+            list.Add(new PreviewArtifact(PreviewArtifactKind.MarkdownOutcome, "md", info.Name, mdPath, info.Length));
+        }
+
+        foreach (var jsonPath in GetSortedWorkspaceFiles(outputDir, "*.json"))
+        {
+            var info = new FileInfo(jsonPath);
+            list.Add(new PreviewArtifact(PreviewArtifactKind.JsonExport, "json", info.Name, jsonPath, info.Length));
+        }
+
+        foreach (var inputPath in GetSortedWorkspaceFiles(workspace.InputDirectory, "*.txt", "*.md"))
+        {
+            var info = new FileInfo(inputPath);
+            list.Add(new PreviewArtifact(PreviewArtifactKind.InputNote, "input", info.Name, inputPath, info.Length));
+        }
+
+        return list;
+    }
+
+    private static IReadOnlyList<PreviewArtifact> FilterPreviewArtifacts(
+        IReadOnlyList<PreviewArtifact> items,
+        string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return items;
+        }
+
+        var cleanQuery = query.Trim().TrimStart('@');
+        return items
+            .Select(item => (
+                Item: item,
+                Score: Math.Max(
+                    InteractiveSelector.ScoreFuzzyMatch(item.DisplayName, cleanQuery),
+                    InteractiveSelector.ScoreFuzzyMatch(item.CategoryBadge, cleanQuery))))
+            .Where(x => x.Score > 0)
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.Item.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .Select(x => x.Item)
+            .ToArray();
+    }
+
+    private static (ConsoleColor Fg, ConsoleColor Bg) GetPreviewBadgeColors(
+        PreviewArtifactKind kind,
+        ConsoleColorWriter color) => kind switch
+    {
+        PreviewArtifactKind.ActiveSession => (ConsoleColor.Black, ConsoleColor.Green),
+        PreviewArtifactKind.MarkdownOutcome => color.GetValueBadgeColors(),
+        PreviewArtifactKind.JsonExport => (ConsoleColor.Black, ConsoleColor.Cyan),
+        _ => (ConsoleColor.White, ConsoleColor.DarkGray)
+    };
 
     private MenuState ExecuteInlineCopyCommand(
         string[] args,
@@ -2767,26 +3306,36 @@ public sealed class CliMenuRunner
             _lastSupplementalUserStory,
             _lastSupplementalDescription);
         var currentItems = allItems;
-        var showList = true;
+        var highlightedKey = "1";
 
         while (true)
         {
-            if (showList)
+            color.WriteLine();
+            color.WriteSubHeader("Selectable Output Formats & Jira Fields:");
+            var copyOptions = new List<HighlightedMenuOption>(currentItems.Count + 2);
+            foreach (var item in currentItems)
             {
-                color.WriteLine();
-                color.WriteSubHeader("Selectable Output Formats & Jira Fields:");
-                foreach (var item in currentItems)
-                {
-                    color.WriteMenuOption(item.NumberKey, item.Label, item.PreviewSummary);
-                }
-
-                showList = false;
+                copyOptions.Add(new HighlightedMenuOption(
+                    item.NumberKey,
+                    item.Label,
+                    Description: item.PreviewSummary));
             }
 
-            color.WriteLine();
-            var wizardOptionHint = allowWizardPromotion ? "  [E] Refine/Verbosity in Wizard" : string.Empty;
-            color.WriteColored($"Copy [1] Raw  [2] Markdown  [3] Clean Text  [4/n] Simple (Title/---/Desc)  [5..N/name] Field{wizardOptionHint}  [0/b] Back  [q] Quit: ", ConsoleColor.Yellow);
-            var copyChoice = input.ReadLine();
+            if (allowWizardPromotion)
+            {
+                copyOptions.Add(new HighlightedMenuOption("E", "Refine / Verbosity in Backlog Assisted Orchestrator"));
+            }
+
+            copyOptions.Add(new HighlightedMenuOption("0", "Done / Back"));
+
+            var initialIndex = InteractiveSelector.FindOptionIndexByKey(copyOptions, highlightedKey);
+            var wizardOptionHint = allowWizardPromotion ? "  [E] Refine/Verbosity" : string.Empty;
+            var copyChoice = InteractiveSelector.SelectMenuOptionWithHighlight(
+                copyOptions,
+                initialIndex,
+                $"Copy [1..{allItems.Count}, 4/n=Simple, field{wizardOptionHint}, ↑/↓, 0/b=Back, q=Quit]: ",
+                input,
+                color);
             if (copyChoice is null)
             {
                 return MenuState.Exit;
@@ -2803,15 +3352,15 @@ public sealed class CliMenuRunner
                 return MenuState.Exit;
             }
 
-            if (allowWizardPromotion && normalized is "e" or "edit" or "refine" or "wizard" or "verbosity")
+            if (allowWizardPromotion && normalized is "e" or "edit" or "refine" or "wizard" or "orchestrator" or "verbosity")
             {
-                return MenuState.WizardOrchestrator;
+                return MenuState.BacklogOrchestrator;
             }
 
             if (normalized is "?" or "list" or "all")
             {
                 currentItems = allItems;
-                showList = true;
+                highlightedKey = "1";
                 continue;
             }
 
@@ -2820,18 +3369,20 @@ public sealed class CliMenuRunner
             {
                 MarkdownOutcomeRenderer.CopySelectableItemToClipboard(_clipboardService, matches[0], color);
                 currentItems = allItems;
+                highlightedKey = matches[0].NumberKey;
                 continue;
             }
 
             if (matches.Count > 1)
             {
                 currentItems = matches;
-                showList = true;
+                highlightedKey = matches[0].NumberKey;
                 continue;
             }
 
             color.WriteWarning($"  [!] No format or field matched '{copyChoice.Trim()}'. Choose 1-{allItems.Count}, field name, 0/b, or q.");
             currentItems = allItems;
+            highlightedKey = "1";
         }
     }
 
@@ -2888,15 +3439,19 @@ public sealed class CliMenuRunner
             _lastSupplementalDescription,
             color);
 
-    public static IReadOnlyList<string> GetSavedMarkdownFiles(string outputDirectory)
+    public static IReadOnlyList<string> GetSavedMarkdownFiles(string outputDirectory) =>
+        GetSortedWorkspaceFiles(outputDirectory, "*.md");
+
+    private static IReadOnlyList<string> GetSortedWorkspaceFiles(string directory, params string[] patterns)
     {
-        if (string.IsNullOrWhiteSpace(outputDirectory) || !Directory.Exists(outputDirectory))
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
         {
             return [];
         }
 
-        return Directory
-            .EnumerateFiles(outputDirectory, "*.md")
+        return patterns
+            .SelectMany(pattern => Directory.EnumerateFiles(directory, pattern))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderByDescending(File.GetLastWriteTimeUtc)
             .ThenBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -3046,13 +3601,14 @@ public sealed class CliMenuRunner
     {
         color.WriteLine();
         color.WriteHeader("Interactive REPL Commands & Context Mentions");
-        color.WriteLine("  Numbers        [1] Wizard Orchestrator  [2] Draft Goal  [3] Process Files  [4] Preview (.md)  [5] Settings  [0] Exit");
-        color.WriteLine("  Shortcuts      [w] Wizard   [d] Draft   [p] Process   [v] Preview   [s] Settings   [c] Copy   [?] Help   [q] Quit");
-        color.WriteLine("  Navigation     Enter [0/b/back] in any submenu to go back, or [q/quit] to exit anytime");
-        color.WriteLine("  /wizard        Open the unified Wizard Orchestrator hub offering ALL workflow, preview, copy & settings options");
+        color.WriteLine("  Numbers        [1] Backlog Assisted Orchestrator  [2] Create / Generate Backlog  [3] Preview  [4] Settings  [0] Exit");
+        color.WriteLine("  Shortcuts      [w] Orchestrator  [g] Generate  [d] Draft  [p] Process  [v] Preview  [s] Settings  [c] Copy  [?] Help  [q] Quit");
+        color.WriteLine("  Navigation     Use ↑/↓ + Enter or enter [0/b/back] in any submenu to go back, or [q/quit] anytime");
+        color.WriteLine("  /wizard        Open Backlog Assisted Orchestrator hub (/orchestrator, /bao) with all workflows & tools");
+        color.WriteLine("  /generate      Open Create / Generate Backlog submenu (Draft from Goal or Process ./in files)");
         color.WriteLine("  /process       Open Process menu, or run inline: /process [all|<file>] [--dry-run] [--json]");
-        color.WriteLine("  /draft         Open Guided Draft Wizard, or inline: /draft \"<goal>\" [-t 01|02|both] [--details \"...\"] [--search] [--preview]");
-        color.WriteLine("  /preview       Fuzzy-pick or preview saved './out/*.md' outcome table & copy/refine: /preview [filename]");
+        color.WriteLine("  /draft         Open Guided Draft flow, or inline: /draft \"<goal>\" [-t 01|02|both] [--details \"...\"] [--search] [--preview]");
+        color.WriteLine("  /preview       Preview active session, './out/*.md', './out/*.json', or './in' notes: /preview [filename]");
         color.WriteLine("  /copy          Copy outcome or field: /copy [simple|raw|md|clean|title|story|desc|ac|alt1..]");
         color.WriteLine("  /verbosity     Set persisted default verbosity: /verbosity [min|bal|det]");
         color.WriteLine("  /status        Show crisp WSL2/Windows paths, queued files, & AI provider readiness table");
