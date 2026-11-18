@@ -199,7 +199,7 @@ public static class TerminalUx
              msg.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
              msg.Contains("login", StringComparison.OrdinalIgnoreCase)))
         {
-            return "Install GitHub Copilot CLI and run 'copilot login', set GITHUB_TOKEN / COPILOT_CLI_PATH, configure BYOK (AZURE_OPENAI_ENDPOINT), or pass '--offline'.";
+            return "Run 'copilot login', set COPILOT_GITHUB_TOKEN / GITHUB_TOKEN + COPILOT_CLI_PATH / COPILOT_CLI_URL, build with '-p:CopilotSkipCliDownload=false', or pass '--offline'.";
         }
 
         return null;

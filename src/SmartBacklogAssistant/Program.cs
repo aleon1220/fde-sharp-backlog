@@ -861,7 +861,7 @@ public static class Program
         output.WriteLine("  universal submenu [b]ack/[q]uit navigation, and @filename context mentions.");
         output.WriteLine();
         output.WriteLine("AI PROVIDERS (--provider):");
-        output.WriteLine("  gemini (default) | copilot-sdk (GitHub.Copilot.SDK) | azure | claude | manual");
+        output.WriteLine("  gemini (default) | copilot-sdk (Microsoft.Copilot.SDK) | azure | claude | manual");
         output.WriteLine();
         output.WriteLine("GLOBAL OPTIONS:");
         output.WriteLine("  -w, --workspace <path>       Workspace root override (c:\\workspace on Win, /mnt/c/workspace on WSL)");

@@ -1822,7 +1822,7 @@ public sealed class CliMenuRunner
         color.WriteMuted($"Active Provider: {RuntimeEnvironmentService.FormatProviderCode(activeProvider)}");
         color.WriteLine();
         color.WriteMenuOption("1", "Google Gemini (gemini)", "Live REST generateContent or offline deterministic mode");
-        color.WriteMenuOption("2", "GitHub Copilot SDK (copilot-sdk)", "Official GitHub.Copilot.SDK agent runtime & BYOK");
+        color.WriteMenuOption("2", "GitHub Copilot SDK (copilot-sdk)", "Official Microsoft.Copilot.SDK agent runtime & BYOK");
         color.WriteMenuOption("3", "Azure OpenAI / Foundry (azure)", "Copilot SDK BYOK when configured, else mock fallback");
         color.WriteMenuOption("4", "Anthropic Claude (claude)", "Copilot SDK BYOK when configured, else mock fallback");
         color.WriteMenuOption("5", "Manual Prompt (manual)", "Render Markdown prompt for copy/paste into Copilot or any AI");
