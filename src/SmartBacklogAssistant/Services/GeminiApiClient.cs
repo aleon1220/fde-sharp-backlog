@@ -9,6 +9,10 @@ public sealed record GeminiModel(
     string DisplayName,
     string Description);
 
+public sealed record GeminiModelCatalogResult(
+    IReadOnlyList<GeminiModel> SupportedModels,
+    IReadOnlyDictionary<string, IReadOnlyList<string>> UnsupportedModelMethods);
+
 public sealed record GeminiWebSource(
     string Title,
     string Uri);
@@ -29,11 +33,15 @@ public sealed class GeminiApiClient
         _httpClient = httpClient ?? new HttpClient();
     }
 
-    public IReadOnlyList<GeminiModel> ListGenerateContentModels(string apiKey)
+    public IReadOnlyList<GeminiModel> ListGenerateContentModels(string apiKey) =>
+        ListModelCatalog(apiKey).SupportedModels;
+
+    public GeminiModelCatalogResult ListModelCatalog(string apiKey)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
 
         var models = new List<GeminiModel>();
+        var unsupportedMethods = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
         string? pageToken = null;
 
         do
@@ -53,11 +61,6 @@ public sealed class GeminiApiClient
             {
                 foreach (var modelElement in modelElements.EnumerateArray())
                 {
-                    if (!SupportsGenerateContent(modelElement))
-                    {
-                        continue;
-                    }
-
                     var modelName = GetString(modelElement, "baseModelId");
                     if (string.IsNullOrWhiteSpace(modelName))
                     {
@@ -73,6 +76,13 @@ public sealed class GeminiApiClient
                         continue;
                     }
 
+                    var methods = ExtractGenerationMethods(modelElement);
+                    if (!methods.Any(m => string.Equals(m, "generateContent", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        unsupportedMethods.TryAdd(modelName, methods);
+                        continue;
+                    }
+
                     models.Add(new GeminiModel(
                         ModelId: modelName,
                         DisplayName: GetString(modelElement, "displayName"),
@@ -84,11 +94,13 @@ public sealed class GeminiApiClient
         }
         while (!string.IsNullOrWhiteSpace(pageToken));
 
-        return models
-            .DistinctBy(model => model.ModelId, StringComparer.OrdinalIgnoreCase)
-            .OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(model => model.ModelId, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        return new GeminiModelCatalogResult(
+            SupportedModels: models
+                .DistinctBy(model => model.ModelId, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(model => model.ModelId, StringComparer.OrdinalIgnoreCase)
+                .ToArray(),
+            UnsupportedModelMethods: unsupportedMethods);
     }
 
     public string GenerateContent(string apiKey, string modelId, string prompt)
@@ -271,13 +283,18 @@ public sealed class GeminiApiClient
             .ToArray();
     }
 
-    private static bool SupportsGenerateContent(JsonElement model)
+    private static IReadOnlyList<string> ExtractGenerationMethods(JsonElement model)
     {
-        return model.TryGetProperty("supportedGenerationMethods", out var methods) &&
-               methods.ValueKind == JsonValueKind.Array &&
-               methods.EnumerateArray().Any(method =>
-                   method.ValueKind == JsonValueKind.String &&
-                   string.Equals(method.GetString(), "generateContent", StringComparison.OrdinalIgnoreCase));
+        if (!model.TryGetProperty("supportedGenerationMethods", out var methods) ||
+            methods.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return methods.EnumerateArray()
+            .Where(m => m.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(m.GetString()))
+            .Select(m => m.GetString()!)
+            .ToArray();
     }
 
     private static string GetString(JsonElement element, string propertyName)

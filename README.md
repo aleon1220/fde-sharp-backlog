@@ -16,7 +16,7 @@
 ### 1. Prerequisites
 
 * **.NET 10 SDK** (`dotnet --version` >= `10.0`)
-* **Build & Verify Locally** (runs all 234 unit & integration tests with zero warnings):
+* **Build & Verify Locally** (runs all 262 unit & integration tests with zero warnings):
 
 ```bash
 dotnet test
@@ -96,7 +96,7 @@ Running with zero arguments displays the compact boxed workspace header and supp
 * **`[2]` / `d` Draft Goal / Title:** Launches the Guided Draft & Review Wizard directly (`Type01`, `Type02`, `Both`; `Minimalistic <=25w`, `Balanced <=57w`, `Detailed <=95w`).
 * **`[3]` / `p` Process Input Files:** Batch or single file from `./in` (`all`, `single`, or `dry`).
 * **`[4]` / `v` Preview & Copy (.md):** Fuzzy-filter saved outcomes, copy via native clipboards or ANSI **OSC 52** (`tmux` passthrough supported), or press `[E]` to refine in the Wizard.
-* **`[5]` / `s` Workspace & Settings:** Toggle `.json` export, inspect directories, switch CLI theme (`agy`, `uv`, `kubectl`), toggle live AI, pick provider/model, or set default verbosity.
+* **`[5]` / `s` Workspace & Settings:** Colourfully highlights the active/selected option (`↑`/`↓` + `Enter` or `[0-9]`) and setting badges (`provider • model`, `ON`/`OFF`, verbosity, theme) in a streamlined order: `[1]` **Select AI Provider** (with curated recommendations and a dedicated **AI Model Selection** submenu that flags unsupported/retired/wrong-modality models with reasons, recommendations, and links to official provider docs), `[2]` Toggle Live AI API, `[3]` Default Outcome Verbosity, `[4]` Toggle JSON Export, `[5]` Select CLI Theme (`agy`, `uv`, `kubectl`), `[6]` Inspect Directories, `[7]` Runtime & AI Diagnostics, `[8]` View `settings.json`, `[0]` Back.
 * **`/slash` Commands & `@filename` Mentions:** `/wizard`, `/process`, `/draft`, `/preview`, `/copy`, `/verbosity`, `/settings`, `/status`, `/config`, `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`, plus `@raw-notes.txt ...`.
 
 ## Multi-Provider AI Orchestration (`Gemini` & `Microsoft.Copilot.SDK`)

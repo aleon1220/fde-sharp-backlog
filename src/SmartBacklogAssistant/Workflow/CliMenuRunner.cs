@@ -22,6 +22,7 @@ public sealed class CliMenuRunner
         Settings,
         ThemeSelector,
         ProviderSelector,
+        ModelSelector,
         PreviewOutcome,
         Exit
     }
@@ -40,6 +41,7 @@ public sealed class CliMenuRunner
     private string? _lastSupplementalDescription;
     private MenuState _subMenuReturnState = MenuState.Main;
     private bool _wizardPreviewReturnToWizard;
+    private string _lastSelectedSettingsKey = "1";
 
     public CliMenuRunner(
         AsIsV1Workflow workflow,
@@ -132,6 +134,7 @@ public sealed class CliMenuRunner
                 MenuState.Settings => ShowSettingsMenu(baseWorkspace, ref workspace, ref sessionOptions, ref currentSettings, input, color, _subMenuReturnState),
                 MenuState.ThemeSelector => ShowThemeMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.ProviderSelector => ShowProviderMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
+                MenuState.ModelSelector => ShowModelMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.PreviewOutcome => ShowPreviewOutcomeMenu(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color, _subMenuReturnState, _wizardPreviewReturnToWizard),
                 _ => MenuState.Exit
             };
@@ -1665,19 +1668,37 @@ public sealed class CliMenuRunner
     {
         WriteSettingsHeader(baseWorkspace, workspace, sessionOptions, currentSettings, color);
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
-        color.WriteMenuOption("1", $"Toggle JSON Export [{(currentSettings.JsonFileOut ? "ON" : "OFF")}]", "Write .md + .json vs .md only");
-        color.WriteMenuOption("2", "Inspect Directories", "List files & byte sizes in ./in and ./out");
-        color.WriteMenuOption("3", "Runtime & AI Diagnostics", "Windows/WSL paths, env vars, & status table");
-        color.WriteMenuOption("4", $"Select CLI Theme [{ConsoleColorWriter.GetThemeCode(currentSettings.Theme)}]", "Switch agy, uv, or kubectl palette");
-        color.WriteMenuOption("5", $"Toggle Live AI API [{(currentSettings.GeminiLive == true ? "ON" : "OFF")}]", "Live provider calls vs offline draft");
-        color.WriteMenuOption("6", $"Select AI Model [{currentSettings.ModelName ?? "automatic"}]", "Pick model for active provider");
-        color.WriteMenuOption("7", "View settings.json", "Show persisted JSON configuration");
-        color.WriteMenuOption("8", $"Select AI Provider [{RuntimeEnvironmentService.FormatProviderCode(activeProvider)}]", "gemini, copilot-sdk, azure, claude, manual");
-        color.WriteMenuOption("9", $"Default Outcome Verbosity [{DescriptionFormatter.FormatVerbosityLabel(sessionOptions.Verbosity)}]", "Minimalistic (<=25w) / Balanced / Detailed");
-        color.WriteMenuOption("0", returnState == MenuState.WizardOrchestrator ? "Back to Wizard Orchestrator" : "Back to Main Menu");
-        color.WriteColored("Select an option (0-9, b=back, q=quit): ", ConsoleColor.Yellow);
+        var (jsonBadgeFg, jsonBadgeBg) = ConsoleColorWriter.GetToggleBadgeColors(currentSettings.JsonFileOut);
+        var liveEnabled = currentSettings.GeminiLive == true;
+        var (liveBadgeFg, liveBadgeBg) = ConsoleColorWriter.GetToggleBadgeColors(liveEnabled);
+        var (valueBadgeFg, valueBadgeBg) = color.GetValueBadgeColors();
+        var providerModelBadge = $"{RuntimeEnvironmentService.FormatProviderCode(activeProvider)} • {currentSettings.ModelName ?? "automatic"}";
 
-        var choice = input.ReadLine();
+        var options = new List<HighlightedMenuOption>
+        {
+            new("1", "Select AI Provider", providerModelBadge, ConsoleColor.Black, ConsoleColor.Cyan, "Choose AI provider & model submenu (with recommendations)", IsSelectedValue: true),
+            new("2", "Toggle Live AI API", liveEnabled ? "ON" : "OFF", liveBadgeFg, liveBadgeBg, "Live provider calls vs offline draft", IsSelectedValue: liveEnabled),
+            new("3", "Default Outcome Verbosity", DescriptionFormatter.FormatVerbosityLabel(sessionOptions.Verbosity), valueBadgeFg, valueBadgeBg, "Minimalistic (<=25w) / Balanced / Detailed", IsSelectedValue: true),
+            new("4", "Toggle JSON Export", currentSettings.JsonFileOut ? "ON" : "OFF", jsonBadgeFg, jsonBadgeBg, "Write .md + .json vs .md only", IsSelectedValue: currentSettings.JsonFileOut),
+            new("5", "Select CLI Theme", ConsoleColorWriter.GetThemeCode(currentSettings.Theme), valueBadgeFg, valueBadgeBg, "Switch agy, uv, or kubectl palette", IsSelectedValue: true),
+            new("6", "Inspect Directories", null, null, null, "List files & byte sizes in ./in and ./out"),
+            new("7", "Runtime & AI Diagnostics", null, null, null, "Windows/WSL paths, env vars, & status table"),
+            new("8", "View settings.json", null, null, null, "Show persisted JSON configuration"),
+            new("0", returnState == MenuState.WizardOrchestrator ? "Back to Wizard Orchestrator" : "Back to Main Menu")
+        };
+
+        var initialIndex = options.FindIndex(o => string.Equals(o.Key, _lastSelectedSettingsKey, StringComparison.OrdinalIgnoreCase));
+        if (initialIndex < 0)
+        {
+            initialIndex = 0;
+        }
+
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            initialIndex,
+            "Select option (0-8, ↑/↓, b=back, q=quit): ",
+            input,
+            color);
         if (choice is null)
         {
             return MenuState.Exit;
@@ -1694,51 +1715,54 @@ public sealed class CliMenuRunner
             return MenuState.Exit;
         }
 
+        if (normalized is "m" or "model" or "models")
+        {
+            _lastSelectedSettingsKey = "1";
+            return MenuState.ModelSelector;
+        }
+
+        if (normalized is "1" or "2" or "3" or "4" or "5" or "6" or "7" or "8")
+        {
+            _lastSelectedSettingsKey = normalized;
+        }
+
         switch (normalized)
         {
             case "1":
-                currentSettings = currentSettings with { JsonFileOut = !currentSettings.JsonFileOut };
-                sessionOptions = sessionOptions with { JsonFileOut = currentSettings.JsonFileOut };
-                var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
-                color.WriteSuccess($"JSON Export is now {(currentSettings.JsonFileOut ? "ON" : "OFF")}. Saved settings to '{savedPath}'.");
-                return MenuState.Settings;
+                return MenuState.ProviderSelector;
             case "2":
-                InspectDirectoryContents("Input", workspace.InputDirectory, color);
-                InspectDirectoryContents("Output", sessionOptions.OutputDirectory ?? workspace.OutputDirectory, color);
-                return MenuState.Settings;
-            case "3":
-                WriteRuntimeDiagnostics(workspace, sessionOptions, currentSettings, color);
-                return MenuState.Settings;
-            case "4":
-                return MenuState.ThemeSelector;
-            case "5":
                 currentSettings = currentSettings with { GeminiLive = currentSettings.GeminiLive != true };
                 sessionOptions = sessionOptions with { GeminiLive = currentSettings.GeminiLive };
                 var liveSettingsPath = _settingsService.Save(baseWorkspace, currentSettings);
                 color.WriteSuccess($"Live Gemini API is now {(currentSettings.GeminiLive == true ? "ON" : "OFF")}. Saved settings to '{liveSettingsPath}'.");
                 return MenuState.Settings;
-            case "6":
-                SelectProviderModel(baseWorkspace, ref sessionOptions, ref currentSettings, input, color);
-                return MenuState.Settings;
-            case "7":
-                DisplayPersistedSettingsJson(baseWorkspace, color);
-                return MenuState.Settings;
-            case "8":
-                return MenuState.ProviderSelector;
-            case "9":
+            case "3":
                 color.WriteLine();
                 color.WriteSubHeader("Select Default Outcome Verbosity:");
-                color.WriteMenuOption("1", "Minimalistic (<= 25 words)", "1-line objective + at most 2 action bullets");
-                color.WriteMenuOption("2", "Balanced (<= 57 words)", "Standard Objective + 3 action bullets (default)");
-                color.WriteMenuOption("3", "Detailed (<= 95 words)", "Full context, bullets & 3 Alternatives");
-                color.WriteColored("Choose default verbosity (1-3, 0=cancel): ", ConsoleColor.Yellow);
-                var vSelection = input.ReadLine();
-                if (vSelection is null)
+                var verbosityOptions = new List<HighlightedMenuOption>
+                {
+                    BuildSelectableValueOption("1", "Minimalistic (<= 25 words)", "1-line objective + at most 2 action bullets", sessionOptions.Verbosity == OutcomeVerbosity.Minimalistic),
+                    BuildSelectableValueOption("2", "Balanced (<= 57 words)", "Standard Objective + 3 action bullets (default)", sessionOptions.Verbosity == OutcomeVerbosity.Balanced),
+                    BuildSelectableValueOption("3", "Detailed (<= 95 words)", "Full context, bullets & 3 Alternatives", sessionOptions.Verbosity == OutcomeVerbosity.Detailed)
+                };
+                var activeVerbosityIndex = sessionOptions.Verbosity switch
+                {
+                    OutcomeVerbosity.Minimalistic => 0,
+                    OutcomeVerbosity.Detailed => 2,
+                    _ => 1
+                };
+                var vSelection = InteractiveSelector.SelectMenuOptionWithHighlight(
+                    verbosityOptions,
+                    activeVerbosityIndex,
+                    "Choose verbosity (1-3, ↑/↓, 0=cancel): ",
+                    input,
+                    color);
+                if (vSelection is null || vSelection.Trim().ToLowerInvariant() is "q" or "quit" or "/exit" or "/quit")
                 {
                     return MenuState.Exit;
                 }
 
-                if (vSelection.Trim() is not ("0" or "b" or "back"))
+                if (vSelection.Trim().ToLowerInvariant() is not ("0" or "b" or "back" or "/back"))
                 {
                     var nextDefaultVerbosity = DescriptionFormatter.ResolveVerbosity(vSelection, sessionOptions.Verbosity);
                     currentSettings = currentSettings with { DefaultVerbosity = nextDefaultVerbosity };
@@ -1748,8 +1772,26 @@ public sealed class CliMenuRunner
                 }
 
                 return MenuState.Settings;
+            case "4":
+                currentSettings = currentSettings with { JsonFileOut = !currentSettings.JsonFileOut };
+                sessionOptions = sessionOptions with { JsonFileOut = currentSettings.JsonFileOut };
+                var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
+                color.WriteSuccess($"JSON Export is now {(currentSettings.JsonFileOut ? "ON" : "OFF")}. Saved settings to '{savedPath}'.");
+                return MenuState.Settings;
+            case "5":
+                return MenuState.ThemeSelector;
+            case "6":
+                InspectDirectoryContents("Input", workspace.InputDirectory, color);
+                InspectDirectoryContents("Output", sessionOptions.OutputDirectory ?? workspace.OutputDirectory, color);
+                return MenuState.Settings;
+            case "7":
+                WriteRuntimeDiagnostics(workspace, sessionOptions, currentSettings, color);
+                return MenuState.Settings;
+            case "8":
+                DisplayPersistedSettingsJson(baseWorkspace, color);
+                return MenuState.Settings;
             default:
-                return WarnAndStay(color, choice, "0-9, b=back, or q=quit", MenuState.Settings);
+                return WarnAndStay(color, choice, "0-8, b=back, or q=quit", MenuState.Settings);
         }
     }
 
@@ -1764,13 +1806,28 @@ public sealed class CliMenuRunner
         color.WriteHeader("=== CLI Theme Configuration ===");
         color.WriteMuted($"Active Theme: {ConsoleColorWriter.FormatThemeDisplay(currentSettings.Theme)}");
         color.WriteLine();
-        color.WriteMenuOption("1", "Agy Style (Default)", "Gemini Agy palette (Cyan headers, Blue steps, Yellow prompts)");
-        color.WriteMenuOption("2", "UV Style", "Astral uv palette (Magenta headers, Cyan steps, Green prompts)");
-        color.WriteMenuOption("3", "Kubectl Style", "Kubernetes kubectl palette (Blue headers, DarkCyan steps, Cyan prompts)");
-        color.WriteMenuOption("0", "Back to Workspace & Settings");
-        color.WriteColored("Select a CLI theme (0-3, b=back, q=quit): ", ConsoleColor.Yellow);
 
-        var choice = input.ReadLine();
+        var options = new List<HighlightedMenuOption>
+        {
+            BuildSelectableValueOption("1", "Agy Style (Default)", "Gemini Agy palette (Cyan headers, Blue steps, Yellow prompts)", currentSettings.Theme == CliThemeStyle.Agy),
+            BuildSelectableValueOption("2", "UV Style", "Astral uv palette (Magenta headers, Cyan steps, Green prompts)", currentSettings.Theme == CliThemeStyle.Uv),
+            BuildSelectableValueOption("3", "Kubectl Style", "Kubernetes kubectl palette (Blue headers, DarkCyan steps, Cyan prompts)", currentSettings.Theme == CliThemeStyle.Kubectl),
+            new("0", "Back to Workspace & Settings")
+        };
+
+        var activeThemeIndex = currentSettings.Theme switch
+        {
+            CliThemeStyle.Uv => 1,
+            CliThemeStyle.Kubectl => 2,
+            _ => 0
+        };
+
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            activeThemeIndex,
+            "Select a CLI theme (0-3, ↑/↓, b=back, q=quit): ",
+            input,
+            color);
         if (choice is null)
         {
             return MenuState.Exit;
@@ -1817,19 +1874,39 @@ public sealed class CliMenuRunner
         ConsoleColorWriter color)
     {
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
+        var activeProviderCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
         color.WriteLine();
         color.WriteHeader("=== AI Provider Orchestrator ===");
-        color.WriteMuted($"Active Provider: {RuntimeEnvironmentService.FormatProviderCode(activeProvider)}");
+        color.WriteMuted($"  Active Provider : {activeProviderCode} │ Model: {currentSettings.ModelName ?? "automatic"}");
+        color.WriteMuted("  Recommendation  : 'gemini' (fast AI Studio tier) or 'copilot-sdk' (GitHub Copilot runtime).");
         color.WriteLine();
-        color.WriteMenuOption("1", "Google Gemini (gemini)", "Live REST generateContent or offline deterministic mode");
-        color.WriteMenuOption("2", "GitHub Copilot SDK (copilot-sdk)", "Official Microsoft.Copilot.SDK agent runtime & BYOK");
-        color.WriteMenuOption("3", "Azure OpenAI / Foundry (azure)", "Copilot SDK BYOK when configured, else mock fallback");
-        color.WriteMenuOption("4", "Anthropic Claude (claude)", "Copilot SDK BYOK when configured, else mock fallback");
-        color.WriteMenuOption("5", "Manual Prompt (manual)", "Render Markdown prompt for copy/paste into Copilot or any AI");
-        color.WriteMenuOption("0", "Back to Workspace & Settings");
-        color.WriteColored("Select an AI provider (0-5, b=back, q=quit): ", ConsoleColor.Yellow);
 
-        var choice = input.ReadLine();
+        var options = new List<HighlightedMenuOption>
+        {
+            BuildProviderOption("1", "Google Gemini (gemini)", "Live REST generateContent or offline deterministic mode", activeProvider == AiProviderType.GoogleGemini, isRecommended: true),
+            BuildProviderOption("2", "GitHub Copilot SDK (copilot-sdk)", "Official Microsoft.Copilot.SDK agent runtime & BYOK", activeProvider == AiProviderType.GitHubCopilot, isRecommended: true),
+            BuildProviderOption("3", "Azure OpenAI / Foundry (azure)", "Copilot SDK BYOK when configured, else mock fallback", activeProvider == AiProviderType.AzureOpenAi, isRecommended: false),
+            BuildProviderOption("4", "Anthropic Claude (claude)", "Copilot SDK BYOK when configured, else mock fallback", activeProvider == AiProviderType.AnthropicClaude, isRecommended: false),
+            BuildProviderOption("5", "Manual Prompt (manual)", "Render Markdown prompt for copy/paste into Copilot or any AI", activeProvider == AiProviderType.ManualPrompt, isRecommended: false),
+            new("M", $"Select Model for '{activeProviderCode}'", null, null, null, "Configure model, view recommendations & official docs"),
+            new("0", "Back to Workspace & Settings")
+        };
+
+        var activeProviderIndex = activeProvider switch
+        {
+            AiProviderType.GitHubCopilot => 1,
+            AiProviderType.AzureOpenAi => 2,
+            AiProviderType.AnthropicClaude => 3,
+            AiProviderType.ManualPrompt => 4,
+            _ => 0
+        };
+
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            activeProviderIndex,
+            "Select AI provider (0-5, M=model, ↑/↓, b=back, q=quit): ",
+            input,
+            color);
         if (choice is null)
         {
             return MenuState.Exit;
@@ -1846,6 +1923,11 @@ public sealed class CliMenuRunner
             return MenuState.Exit;
         }
 
+        if (normalized is "m" or "model" or "models")
+        {
+            return MenuState.ModelSelector;
+        }
+
         AiProviderType? selected = normalized switch
         {
             "1" or "gemini" => AiProviderType.GoogleGemini,
@@ -1858,16 +1940,406 @@ public sealed class CliMenuRunner
 
         if (selected is null)
         {
-            return WarnAndStay(color, choice, "0-5", MenuState.ProviderSelector);
+            return WarnAndStay(color, choice, "0-5, M=model", MenuState.ProviderSelector);
         }
 
         var providerCode = RuntimeEnvironmentService.FormatProviderCode(selected.Value);
-        currentSettings = currentSettings with { PreferredProvider = selected.Value };
-        sessionOptions = sessionOptions with { ProviderInput = providerCode };
+        var clearPinnedModel = selected.Value != activeProvider;
+        currentSettings = currentSettings with
+        {
+            PreferredProvider = selected.Value,
+            ModelName = clearPinnedModel ? null : currentSettings.ModelName
+        };
+        sessionOptions = sessionOptions with
+        {
+            ProviderInput = providerCode,
+            ModelName = currentSettings.ModelName
+        };
         var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
         color.WriteSuccess($"Active AI Provider set to '{providerCode}'. Saved settings to '{savedPath}'.");
-        return MenuState.Settings;
+
+        if (selected.Value == AiProviderType.ManualPrompt)
+        {
+            color.WriteMuted($"  [i] {ModelCatalogService.GetProviderRecommendationSummary(AiProviderType.ManualPrompt)}");
+            return MenuState.Settings;
+        }
+
+        return MenuState.ModelSelector;
     }
+
+    private MenuState ShowModelMenu(
+        WorkspaceDirectories baseWorkspace,
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        TextReader input,
+        ConsoleColorWriter color)
+    {
+        var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
+        var providerCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
+        var docsUrl = ModelCatalogService.GetOfficialDocsUrl(activeProvider);
+
+        if (activeProvider == AiProviderType.ManualPrompt)
+        {
+            color.WriteLine();
+            color.WriteHeader($"=== AI Model Selection ({providerCode}) ===");
+            color.WriteWarning("  [!] Manual Prompt mode renders Markdown prompts locally and does not invoke a remote model API.");
+            color.WriteMuted($"  Recommendation : {ModelCatalogService.GetProviderRecommendationSummary(activeProvider)}");
+            color.WriteMuted($"  Official Docs  : {docsUrl}");
+            return MenuState.Settings;
+        }
+
+        var catalogEntries = new List<ModelRecommendation>(ModelCatalogService.GetRecommendations(activeProvider));
+        IReadOnlyList<string>? liveModelIds = null;
+        IReadOnlyDictionary<string, IReadOnlyList<string>>? unsupportedHints = null;
+        string? discoveryNote = null;
+
+        if (activeProvider == AiProviderType.GoogleGemini)
+        {
+            var secret = _secretProvider.Resolve(sessionOptions.ApiKey);
+            if (secret.IsConfigured)
+            {
+                try
+                {
+                    var catalog = TerminalUx.RunWithSpinner(
+                        "Discovering compatible Gemini models...",
+                        () => _workflow.ListGeminiModelCatalog(secret.ApiKey!),
+                        color);
+                    unsupportedHints = catalog.UnsupportedModelMethods;
+                    (liveModelIds, discoveryNote) = MergeLiveDiscoveryEntries(
+                        catalogEntries,
+                        catalog.SupportedModels.Select(m => new ModelRecommendation(
+                            m.ModelId,
+                            string.IsNullOrWhiteSpace(m.DisplayName) ? m.ModelId : m.DisplayName,
+                            "live",
+                            string.IsNullOrWhiteSpace(m.Description) ? m.DisplayName : m.Description)),
+                        providerCode);
+                }
+                catch (Exception ex)
+                {
+                    discoveryNote = $"Could not query live Gemini models ({ex.Message}); showing curated recommendations.";
+                }
+            }
+            else
+            {
+                discoveryNote = $"GEMINI_API_KEY not configured; showing recommended Gemini models ({GeminiSecretProvider.GeminiApiKeysUrl}).";
+            }
+        }
+        else if (activeProvider == AiProviderType.GitHubCopilot)
+        {
+            var copilotDiag = _workflow.ProviderOrchestrator.CopilotGateway.InspectDiagnostics();
+            if (copilotDiag.RuntimeAvailable)
+            {
+                try
+                {
+                    var explicitApiKey = sessionOptions.ApiKey;
+                    var copilotModels = TerminalUx.RunWithSpinner(
+                        "Querying GitHub Copilot SDK models...",
+                        () => _workflow.ListCopilotModels(explicitApiKey),
+                        color);
+                    (liveModelIds, discoveryNote) = MergeLiveDiscoveryEntries(
+                        catalogEntries,
+                        copilotModels.Select(m => new ModelRecommendation(
+                            m.Id,
+                            m.Name,
+                            "live",
+                            "Available on your GitHub Copilot subscription")),
+                        providerCode);
+                }
+                catch (Exception ex)
+                {
+                    discoveryNote = $"Could not query live Copilot models ({ex.Message}); showing curated recommendations.";
+                }
+            }
+            else
+            {
+                discoveryNote = "Copilot runtime unavailable offline; showing recommended Copilot models.";
+            }
+        }
+
+        // When live catalog discovery succeeded, filter out curated entries that are absent on this key/account
+        // unless they are currently pinned, so users see actionable choices and clear reasons.
+        var pinnedModelName = currentSettings.ModelName;
+        var displayEntries = liveModelIds is { Count: > 0 }
+            ? catalogEntries
+                .Where(e =>
+                    liveModelIds.Any(id => string.Equals(id, e.ModelId, StringComparison.OrdinalIgnoreCase)) ||
+                    string.Equals(e.ModelId, pinnedModelName, StringComparison.OrdinalIgnoreCase))
+                .ToList()
+            : catalogEntries;
+
+        var defaultRecommendedId = displayEntries.FirstOrDefault(e => e.IsRecommended)?.ModelId
+            ?? displayEntries.FirstOrDefault()?.ModelId
+            ?? (activeProvider == AiProviderType.GitHubCopilot
+                ? RuntimeEnvironmentService.DefaultCopilotModel
+                : RuntimeEnvironmentService.DefaultGeminiModel);
+
+        while (true)
+        {
+            color.WriteLine();
+            color.WriteHeader($"=== AI Model Selection ({providerCode}) ===");
+            color.WriteMuted($"  Active Model   : {currentSettings.ModelName ?? $"automatic ({defaultRecommendedId})"}");
+            color.WriteMuted($"  Recommendation : {ModelCatalogService.GetProviderRecommendationSummary(activeProvider)}");
+            color.WriteMuted($"  Official Docs  : {docsUrl}");
+            if (!string.IsNullOrWhiteSpace(discoveryNote))
+            {
+                color.WriteWarning($"  [i] {discoveryNote}");
+                discoveryNote = null;
+            }
+
+            color.WriteLine();
+
+            var options = new List<HighlightedMenuOption>(displayEntries.Count + 3);
+            var initialIndex = displayEntries.Count; // defaults to [A] Automatic when nothing pinned
+            for (var i = 0; i < displayEntries.Count; i++)
+            {
+                var entry = displayEntries[i];
+                var isSelected = string.Equals(entry.ModelId, currentSettings.ModelName, StringComparison.OrdinalIgnoreCase);
+                if (isSelected)
+                {
+                    initialIndex = i;
+                }
+
+                string? badgeText = isSelected
+                    ? "selected"
+                    : entry.IsRecommended
+                        ? "recommended"
+                        : null;
+                ConsoleColor? badgeFg = isSelected
+                    ? ConsoleColor.Black
+                    : entry.IsRecommended
+                        ? ConsoleColor.Black
+                        : null;
+                ConsoleColor? badgeBg = isSelected
+                    ? ConsoleColor.Green
+                    : entry.IsRecommended
+                        ? ConsoleColor.Yellow
+                        : null;
+
+                var desc = string.Equals(entry.DisplayName, entry.ModelId, StringComparison.OrdinalIgnoreCase)
+                    ? entry.Reason
+                    : $"{entry.ModelId} — {entry.Reason}";
+
+                options.Add(new HighlightedMenuOption(
+                    (i + 1).ToString(),
+                    entry.DisplayName,
+                    BadgeText: badgeText,
+                    BadgeForeground: badgeFg,
+                    BadgeBackground: badgeBg,
+                    Description: desc,
+                    IsSelectedValue: isSelected));
+            }
+
+            var isAuto = string.IsNullOrWhiteSpace(currentSettings.ModelName);
+            options.Add(BuildSelectableValueOption(
+                "A",
+                $"Automatic (Recommended: {defaultRecommendedId})",
+                "Let Smart Backlog Assistant pick best compatible model",
+                isAuto));
+            options.Add(new("C", "Enter Custom Model ID", null, null, null, "Validate any model ID against compatibility rules & docs"));
+            options.Add(new("P", "Switch AI Provider", null, null, null, "Return to AI Provider Orchestrator"));
+            options.Add(new("0", "Back to Workspace & Settings"));
+
+            var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+                options,
+                initialIndex,
+                $"Select model (1-{displayEntries.Count}, A=auto, C=custom, P=provider, 0=back): ",
+                input,
+                color);
+            if (choice is null)
+            {
+                return MenuState.Exit;
+            }
+
+            var trimmed = choice.Trim();
+            var normalized = trimmed.ToLowerInvariant();
+            if (normalized is "0" or "b" or "back" or "/back")
+            {
+                return MenuState.Settings;
+            }
+
+            if (normalized is "q" or "quit" or "/exit" or "/quit")
+            {
+                return MenuState.Exit;
+            }
+
+            if (normalized is "p" or "provider")
+            {
+                return MenuState.ProviderSelector;
+            }
+
+            if (normalized is "a" or "auto" or "automatic" or "default")
+            {
+                currentSettings = currentSettings with { ModelName = null };
+                sessionOptions = sessionOptions with { ModelName = null };
+                var savedAutoPath = _settingsService.Save(baseWorkspace, currentSettings);
+                color.WriteSuccess($"{providerCode} model reset to automatic (recommended: {defaultRecommendedId}). Saved settings to '{savedAutoPath}'.");
+                return MenuState.Settings;
+            }
+
+            string candidateModelId;
+            if (normalized is "c" or "custom")
+            {
+                color.WriteColored($"Enter custom {providerCode} model ID (or 0 to cancel): ", ConsoleColor.Yellow);
+                var customInput = input.ReadLine();
+                if (customInput is null)
+                {
+                    return MenuState.Exit;
+                }
+
+                var customTrimmed = customInput.Trim();
+                if (string.IsNullOrEmpty(customTrimmed) ||
+                    customTrimmed.Equals("0", StringComparison.OrdinalIgnoreCase) ||
+                    customTrimmed.Equals("b", StringComparison.OrdinalIgnoreCase) ||
+                    customTrimmed.Equals("back", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                candidateModelId = customTrimmed;
+            }
+            else if (int.TryParse(trimmed, out var idx))
+            {
+                if (idx < 1 || idx > displayEntries.Count)
+                {
+                    color.WriteWarning($"  [!] Invalid option '{trimmed}'. Choose 1-{displayEntries.Count}, A, C, P, or 0.");
+                    continue;
+                }
+
+                candidateModelId = displayEntries[idx - 1].ModelId;
+            }
+            else
+            {
+                candidateModelId = trimmed;
+            }
+
+            var check = ModelCatalogService.ValidateModelSelection(
+                activeProvider,
+                candidateModelId,
+                liveModelIds,
+                unsupportedHints);
+
+            if (!check.IsSupported)
+            {
+                WriteUnsupportedModelDiagnostics(color, providerCode, candidateModelId, check);
+                continue;
+            }
+
+            if (check.IsKnownWarning)
+            {
+                color.WriteWarning($"  [!] {check.Reason}");
+                color.WriteColored($"  Official Docs  : ", ConsoleColor.DarkGray);
+                color.WriteLineColored(check.OfficialDocsUrl, ConsoleColor.Cyan);
+                WriteModelRecommendations(color, check.Recommendations);
+                color.WriteColored($"Use unverified model '{candidateModelId}' anyway? [y/N]: ", ConsoleColor.Yellow);
+                var confirm = input.ReadLine();
+                if (confirm is null)
+                {
+                    return MenuState.Exit;
+                }
+
+                if (confirm.Trim().ToLowerInvariant() is not ("y" or "yes"))
+                {
+                    continue;
+                }
+            }
+
+            var normalizedId = activeProvider == AiProviderType.GoogleGemini &&
+                               candidateModelId.StartsWith("models/", StringComparison.OrdinalIgnoreCase)
+                ? candidateModelId["models/".Length..].Trim()
+                : candidateModelId.Trim();
+
+            currentSettings = currentSettings with { ModelName = normalizedId };
+            sessionOptions = sessionOptions with { ModelName = normalizedId };
+            var savedModelPath = _settingsService.Save(baseWorkspace, currentSettings);
+            color.WriteSuccess($"{providerCode} model set to '{normalizedId}'. Saved settings to '{savedModelPath}'.");
+            return MenuState.Settings;
+        }
+    }
+
+    private static void WriteUnsupportedModelDiagnostics(
+        ConsoleColorWriter color,
+        string providerCode,
+        string candidateModelId,
+        ModelSupportCheckResult check)
+    {
+        color.WriteLine();
+        color.WriteError($"  [!] Model '{candidateModelId}' is not supported for '{providerCode}'.");
+        color.WriteColored("  Reason         : ", ConsoleColor.Yellow);
+        color.WriteLine(check.Reason ?? "Incompatible or unavailable model.");
+        color.WriteColored("  Official Docs  : ", ConsoleColor.Cyan);
+        color.WriteLineColored(check.OfficialDocsUrl, ConsoleColor.White);
+        WriteModelRecommendations(color, check.Recommendations);
+    }
+
+    private static void WriteModelRecommendations(
+        ConsoleColorWriter color,
+        IReadOnlyList<ModelRecommendation> recommendations)
+    {
+        if (recommendations.Count == 0)
+        {
+            return;
+        }
+
+        color.WriteSubHeader("  Recommended Models:");
+        foreach (var rec in recommendations.Take(3))
+        {
+            var tag = rec.IsRecommended ? "★" : "•";
+            color.WriteColored($"    {tag} {rec.ModelId}", ConsoleColor.Green);
+            color.WriteLineColored($" — {rec.Reason}", ConsoleColor.DarkGray);
+        }
+    }
+
+    private static (IReadOnlyList<string>? LiveModelIds, string? DiscoveryNote) MergeLiveDiscoveryEntries(
+        List<ModelRecommendation> catalogEntries,
+        IEnumerable<ModelRecommendation> discoveredEntries,
+        string providerCode)
+    {
+        var liveIds = new List<string>();
+        foreach (var liveModel in discoveredEntries)
+        {
+            liveIds.Add(liveModel.ModelId);
+            if (!catalogEntries.Any(e => string.Equals(e.ModelId, liveModel.ModelId, StringComparison.OrdinalIgnoreCase)))
+            {
+                catalogEntries.Add(liveModel);
+            }
+        }
+
+        if (liveIds.Count == 0)
+        {
+            return (null, $"Live '{providerCode}' catalog returned 0 models (unauthenticated or empty subscription list); showing curated recommendations.");
+        }
+
+        return (liveIds, null);
+    }
+
+    private static HighlightedMenuOption BuildProviderOption(
+        string key,
+        string label,
+        string? description,
+        bool isSelected,
+        bool isRecommended) =>
+        new(
+            key,
+            label,
+            BadgeText: isSelected ? "selected" : isRecommended ? "recommended" : null,
+            BadgeForeground: isSelected || isRecommended ? ConsoleColor.Black : null,
+            BadgeBackground: isSelected ? ConsoleColor.Green : isRecommended ? ConsoleColor.Yellow : null,
+            Description: description,
+            IsSelectedValue: isSelected);
+
+    private static HighlightedMenuOption BuildSelectableValueOption(
+        string key,
+        string label,
+        string? description,
+        bool isSelected) =>
+        new(
+            key,
+            label,
+            BadgeText: isSelected ? "selected" : null,
+            BadgeForeground: isSelected ? ConsoleColor.Black : null,
+            BadgeBackground: isSelected ? ConsoleColor.Green : null,
+            Description: description,
+            IsSelectedValue: isSelected);
 
     private void WriteSettingsHeader(
         WorkspaceDirectories baseWorkspace,
@@ -1880,11 +2352,26 @@ public sealed class CliMenuRunner
         var providerCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
         var modelLabel = currentSettings.ModelName ?? "automatic";
         var themeCode = ConsoleColorWriter.GetThemeCode(currentSettings.Theme);
+        var liveOn = currentSettings.GeminiLive == true;
+        var jsonOn = currentSettings.JsonFileOut;
 
         color.WriteLine();
         color.WriteHeader("=== Workspace & Settings ===");
         color.WriteMuted($"  Paths  : In: {workspace.InputDirectory} │ Out: {sessionOptions.OutputDirectory}");
-        color.WriteMuted($"  Active : Provider: {providerCode} ({modelLabel}) │ Live: {(currentSettings.GeminiLive == true ? "ON" : "OFF")} │ JSON: {(currentSettings.JsonFileOut ? "ON" : "OFF")} │ Verbosity: {DescriptionFormatter.FormatVerbosityLabel(sessionOptions.Verbosity)} │ Theme: {themeCode}");
+
+        color.WriteColored("  Active : Provider: ", ConsoleColor.DarkGray);
+        color.WriteColored(providerCode, ConsoleColor.Cyan);
+        color.WriteColored(" (", ConsoleColor.DarkGray);
+        color.WriteColored(modelLabel, ConsoleColor.White);
+        color.WriteColored(") │ Live: ", ConsoleColor.DarkGray);
+        color.WriteColored(liveOn ? "ON" : "OFF", liveOn ? ConsoleColor.Green : ConsoleColor.Red);
+        color.WriteColored(" │ JSON: ", ConsoleColor.DarkGray);
+        color.WriteColored(jsonOn ? "ON" : "OFF", jsonOn ? ConsoleColor.Green : ConsoleColor.DarkYellow);
+        color.WriteColored(" │ Verbosity: ", ConsoleColor.DarkGray);
+        color.WriteColored(DescriptionFormatter.FormatVerbosityLabel(sessionOptions.Verbosity), ConsoleColor.Yellow);
+        color.WriteColored(" │ Theme: ", ConsoleColor.DarkGray);
+        color.WriteLineColored(themeCode, color.GetOptionKeyColor());
+
         color.WriteMuted($"  Config : {_settingsService.GetSettingsFilePath(baseWorkspace)}");
         color.WriteLine();
     }
@@ -1995,6 +2482,15 @@ public sealed class CliMenuRunner
             return;
         }
 
+        if (provider is AiProviderType.AzureOpenAi or AiProviderType.AnthropicClaude or AiProviderType.ManualPrompt)
+        {
+            var providerCode = RuntimeEnvironmentService.FormatProviderCode(provider);
+            color.WriteHeader($"Recommended Models ({providerCode}):");
+            WriteModelRecommendations(color, ModelCatalogService.GetRecommendations(provider));
+            color.WriteMuted($"  Official Docs: {ModelCatalogService.GetOfficialDocsUrl(provider)}");
+            return;
+        }
+
         var secret = _secretProvider.ResolveOrPrompt(sessionOptions.ApiKey, input, color.InnerWriter);
         var models = TerminalUx.RunWithSpinner(
             "Querying Gemini models...",
@@ -2005,59 +2501,6 @@ public sealed class CliMenuRunner
         {
             color.WriteLine($"  • {model.ModelId,-28} {model.DisplayName}");
         }
-    }
-
-    private void SelectProviderModel(
-        WorkspaceDirectories baseWorkspace,
-        ref WorkflowOptions sessionOptions,
-        ref CliSettings currentSettings,
-        TextReader input,
-        ConsoleColorWriter color)
-    {
-        var provider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
-        if (provider == AiProviderType.GitHubCopilot)
-        {
-            var copilotModels = _workflow.ListCopilotModels(sessionOptions.ApiKey);
-            if (copilotModels.Count == 0)
-            {
-                color.WriteWarning("  [!] No Copilot SDK models returned.");
-                return;
-            }
-
-            color.WriteLine();
-            color.WriteLine("Copilot SDK models available:");
-            for (var i = 0; i < copilotModels.Count; i++)
-            {
-                color.WriteLine($"  [{i + 1}] {copilotModels[i].Name} ({copilotModels[i].Id})");
-            }
-
-            color.Write($"Select a model [default: {RuntimeEnvironmentService.DefaultCopilotModel}]: ");
-            var selection = input.ReadLine()?.Trim();
-            var modelName = int.TryParse(selection, out var idx) && idx >= 1 && idx <= copilotModels.Count
-                ? copilotModels[idx - 1].Id
-                : string.IsNullOrWhiteSpace(selection)
-                    ? RuntimeEnvironmentService.DefaultCopilotModel
-                    : selection;
-
-            sessionOptions = sessionOptions with { ModelName = modelName };
-            currentSettings = currentSettings with { ModelName = modelName };
-            var savedCopilotPath = _settingsService.Save(baseWorkspace, currentSettings);
-            color.WriteSuccess($"Copilot SDK model set to '{modelName}'. Saved settings to '{savedCopilotPath}'.");
-            return;
-        }
-
-        var secret = _secretProvider.ResolveOrPrompt(sessionOptions.ApiKey, input, color.InnerWriter);
-        var models = _workflow.ListGeminiModels(secret.ApiKey!);
-        var selectedGeminiModel = AsIsV1Workflow.SelectGeminiModel(
-            models,
-            requestedModel: null,
-            input,
-            color.InnerWriter,
-            nonInteractive: false);
-        sessionOptions = sessionOptions with { ApiKey = secret.ApiKey, ModelName = selectedGeminiModel };
-        currentSettings = currentSettings with { ModelName = selectedGeminiModel };
-        var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
-        color.WriteSuccess($"Gemini model set to '{selectedGeminiModel}'. Saved settings to '{savedPath}'.");
     }
 
     private void CacheResolvedWorkflowOptions(

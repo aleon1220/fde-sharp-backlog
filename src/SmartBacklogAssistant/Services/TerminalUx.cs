@@ -202,6 +202,26 @@ public static class TerminalUx
             return "Run 'copilot login', set COPILOT_GITHUB_TOKEN / GITHUB_TOKEN + COPILOT_CLI_PATH / COPILOT_CLI_URL, build with '-p:CopilotSkipCliDownload=false', or pass '--offline'.";
         }
 
+        if (msg.Contains("model", StringComparison.OrdinalIgnoreCase) &&
+            (msg.Contains("not supported", StringComparison.OrdinalIgnoreCase) ||
+             msg.Contains("not available", StringComparison.OrdinalIgnoreCase) ||
+             msg.Contains("unsupported", StringComparison.OrdinalIgnoreCase) ||
+             msg.Contains("not found", StringComparison.OrdinalIgnoreCase) ||
+             msg.Contains("deprecated", StringComparison.OrdinalIgnoreCase) ||
+             msg.Contains("retired", StringComparison.OrdinalIgnoreCase) ||
+             msg.Contains("does not exist", StringComparison.OrdinalIgnoreCase)))
+        {
+            var docs = msg.Contains("Copilot", StringComparison.OrdinalIgnoreCase)
+                ? ModelCatalogService.CopilotSupportedModelsDocsUrl
+                : msg.Contains("Azure", StringComparison.OrdinalIgnoreCase)
+                    ? ModelCatalogService.AzureOpenAiModelsDocsUrl
+                    : msg.Contains("Claude", StringComparison.OrdinalIgnoreCase) || msg.Contains("Anthropic", StringComparison.OrdinalIgnoreCase)
+                        ? ModelCatalogService.AnthropicModelsDocsUrl
+                        : ModelCatalogService.GeminiModelsDocsUrl;
+
+            return $"Selected model may be retired, embedding/media-only, or restricted by your plan/region/policy. Official docs: {docs} — or run 'backlog models' / Workspace & Settings -> [1] Select AI Provider.";
+        }
+
         return null;
     }
 

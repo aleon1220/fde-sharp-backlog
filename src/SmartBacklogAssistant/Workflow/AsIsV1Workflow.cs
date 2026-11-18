@@ -99,6 +99,9 @@ public sealed class AsIsV1Workflow
     public IReadOnlyList<GeminiModel> ListGeminiModels(string apiKey) =>
         _geminiApiClient.ListGenerateContentModels(apiKey);
 
+    public GeminiModelCatalogResult ListGeminiModelCatalog(string apiKey) =>
+        _geminiApiClient.ListModelCatalog(apiKey);
+
     public IReadOnlyList<CopilotModelDescriptor> ListCopilotModels(string? gitHubToken = null) =>
         _providerOrchestrator.CopilotGateway.ListModelsAsync(gitHubToken).GetAwaiter().GetResult();
 
@@ -896,8 +899,15 @@ public sealed class AsIsV1Workflow
             string.Equals(model.ModelId, selectedModel, StringComparison.OrdinalIgnoreCase));
         if (match is null)
         {
+            var recommendations = string.Join(
+                ", ",
+                ModelCatalogService.GetRecommendations(AiProviderType.GoogleGemini)
+                    .Where(r => r.IsRecommended)
+                    .Select(r => r.ModelId));
             throw new InvalidOperationException(
-                $"Gemini model '{selectedModel}' is not available for generateContent with this API key. Run --list-models to see compatible models.");
+                $"Gemini model '{selectedModel}' is not available for generateContent with this API key. " +
+                $"Models may be retired, embedding/media-only, or restricted to another tier/region. " +
+                $"Recommended: {recommendations}. Official docs: {ModelCatalogService.GeminiModelsDocsUrl} (or run --list-models).");
         }
 
         return match.ModelId;

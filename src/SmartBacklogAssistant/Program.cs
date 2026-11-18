@@ -662,6 +662,25 @@ public static class Program
             return 0;
         }
 
+        var effectiveProvider = updated.PreferredProvider ?? AiProviderType.GoogleGemini;
+        if (!string.IsNullOrWhiteSpace(updated.ModelName))
+        {
+            var modelCheck = ModelCatalogService.ValidateModelSelection(effectiveProvider, updated.ModelName);
+            if (!modelCheck.IsSupported)
+            {
+                var recList = string.Join(", ", modelCheck.Recommendations.Where(r => r.IsRecommended).Select(r => r.ModelId));
+                throw new ArgumentException(
+                    $"{modelCheck.Reason} Official docs: {modelCheck.OfficialDocsUrl}" +
+                    (string.IsNullOrWhiteSpace(recList) ? string.Empty : $" (Recommended: {recList})"));
+            }
+
+            if (modelCheck.IsKnownWarning)
+            {
+                color.WriteWarning($"  [!] {modelCheck.Reason}");
+                color.WriteMuted($"      Docs: {modelCheck.OfficialDocsUrl}");
+            }
+        }
+
         var savedPath = settingsService.Save(baseWorkspace, updated);
         var activeWorkspace = workspaceService.ApplySettings(baseWorkspace, updated);
         Directory.CreateDirectory(activeWorkspace.InputDirectory);

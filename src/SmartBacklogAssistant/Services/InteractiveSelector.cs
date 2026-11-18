@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace SmartBacklogAssistant.Services;
 
 /// <summary>
@@ -197,6 +199,174 @@ public static class InteractiveSelector
             },
             filterFunc: (candidates, query) => FilterFilePaths(candidates, query),
             allowInteractiveKeys: allowInteractiveKeys);
+    }
+
+    public static string? SelectMenuOptionWithHighlight(
+        IReadOnlyList<HighlightedMenuOption> options,
+        int initialIndex,
+        string promptText,
+        TextReader input,
+        ConsoleColorWriter color,
+        int minBarWidth = 64,
+        bool allowInteractiveKeys = true)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(color);
+
+        if (options.Count == 0)
+        {
+            return null;
+        }
+
+        var selectedIndex = Math.Clamp(initialIndex, 0, options.Count - 1);
+        var canUseKeyboard = allowInteractiveKeys &&
+                             ReferenceEquals(input, Console.In) &&
+                             ReferenceEquals(color.InnerWriter, Console.Out) &&
+                             !Console.IsInputRedirected &&
+                             !Console.IsOutputRedirected;
+
+        if (!canUseKeyboard)
+        {
+            for (var i = 0; i < options.Count; i++)
+            {
+                color.WriteSelectableMenuRow(options[i], isCursorHighlighted: i == selectedIndex);
+            }
+
+            color.WriteColored(promptText, ConsoleColor.Yellow);
+            return input.ReadLine();
+        }
+
+        var maxWidth = 100;
+        try
+        {
+            if (Console.WindowWidth > 20)
+            {
+                maxWidth = Console.WindowWidth - 1;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or PlatformNotSupportedException or ArgumentOutOfRangeException)
+        {
+        }
+
+        var barWidth = Math.Min(maxWidth, Math.Max(minBarWidth, options.Max(o => o.EstimateLength()) + 2));
+
+        for (var i = 0; i < options.Count; i++)
+        {
+            color.WriteSelectableMenuRow(options[i], i == selectedIndex, barWidth, maxWidth);
+        }
+
+        color.WriteColored(promptText, ConsoleColor.Yellow);
+
+        var topRow = -1;
+        try
+        {
+            topRow = Math.Max(0, Console.CursorTop - options.Count);
+        }
+        catch (Exception ex) when (ex is IOException or PlatformNotSupportedException or ArgumentOutOfRangeException)
+        {
+            return input.ReadLine();
+        }
+
+        var buffer = new StringBuilder();
+        var previousPromptLength = promptText.Length;
+
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                color.WriteLine();
+                return buffer.Length > 0 ? buffer.ToString() : options[selectedIndex].Key;
+            }
+
+            if (key.Key == ConsoleKey.Escape)
+            {
+                if (buffer.Length > 0)
+                {
+                    buffer.Clear();
+                }
+                else
+                {
+                    color.WriteLine();
+                    return "0";
+                }
+            }
+            else if (key.Key == ConsoleKey.UpArrow)
+            {
+                selectedIndex = (selectedIndex - 1 + options.Count) % options.Count;
+                buffer.Clear();
+            }
+            else if (key.Key == ConsoleKey.DownArrow)
+            {
+                selectedIndex = (selectedIndex + 1) % options.Count;
+                buffer.Clear();
+            }
+            else if (key.Key == ConsoleKey.Backspace)
+            {
+                if (buffer.Length > 0)
+                {
+                    buffer.Length--;
+                    var matchedIdx = FindMatchingOptionIndex(options, buffer.ToString());
+                    if (matchedIdx >= 0)
+                    {
+                        selectedIndex = matchedIdx;
+                    }
+                }
+            }
+            else if (!char.IsControl(key.KeyChar))
+            {
+                buffer.Append(key.KeyChar);
+                var matchedIdx = FindMatchingOptionIndex(options, buffer.ToString());
+                if (matchedIdx >= 0)
+                {
+                    selectedIndex = matchedIdx;
+                }
+            }
+
+            try
+            {
+                Console.SetCursorPosition(0, topRow);
+                for (var i = 0; i < options.Count; i++)
+                {
+                    color.WriteSelectableMenuRow(options[i], i == selectedIndex, barWidth, maxWidth);
+                }
+
+                var currentPromptText = $"{promptText}{buffer}";
+                color.WriteColored(promptText, ConsoleColor.Yellow);
+                color.Write(buffer.ToString());
+                var (endLeft, endTop) = Console.GetCursorPosition();
+                var clearTrailing = Math.Max(0, previousPromptLength - currentPromptText.Length);
+                if (clearTrailing > 0)
+                {
+                    color.Write(new string(' ', clearTrailing));
+                    Console.SetCursorPosition(endLeft, endTop);
+                }
+
+                previousPromptLength = currentPromptText.Length;
+            }
+            catch (Exception ex) when (ex is IOException or PlatformNotSupportedException or ArgumentOutOfRangeException)
+            {
+            }
+        }
+    }
+
+    private static int FindMatchingOptionIndex(IReadOnlyList<HighlightedMenuOption> options, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return -1;
+        }
+
+        for (var i = 0; i < options.Count; i++)
+        {
+            if (string.Equals(options[i].Key, text.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return i;
+            }
+        }
+
+        return -1;
     }
 
     private static T? RunSelector<T>(
