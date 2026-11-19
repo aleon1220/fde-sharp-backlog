@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace SmartBacklogAssistant.Services;
 
 /// <summary>
@@ -199,6 +201,198 @@ public static class InteractiveSelector
             allowInteractiveKeys: allowInteractiveKeys);
     }
 
+    public static int FindOptionIndexByKey(
+        IReadOnlyList<HighlightedMenuOption> options,
+        string? key,
+        int fallbackIndex = 0)
+    {
+        if (options.Count == 0)
+        {
+            return 0;
+        }
+
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            for (var i = 0; i < options.Count; i++)
+            {
+                if (string.Equals(options[i].Key, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    return i;
+                }
+            }
+        }
+
+        return Math.Clamp(fallbackIndex, 0, options.Count - 1);
+    }
+
+    public static string? SelectMenuOptionWithHighlight(
+        IReadOnlyList<HighlightedMenuOption> options,
+        int initialIndex,
+        string promptText,
+        TextReader input,
+        ConsoleColorWriter color,
+        int minBarWidth = 64,
+        bool allowInteractiveKeys = true)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(color);
+
+        if (options.Count == 0)
+        {
+            return null;
+        }
+
+        var selectedIndex = Math.Clamp(initialIndex, 0, options.Count - 1);
+        var canUseKeyboard = allowInteractiveKeys &&
+                             ReferenceEquals(input, Console.In) &&
+                             ReferenceEquals(color.InnerWriter, Console.Out) &&
+                             !Console.IsInputRedirected &&
+                             !Console.IsOutputRedirected;
+
+        if (!canUseKeyboard)
+        {
+            for (var i = 0; i < options.Count; i++)
+            {
+                color.WriteSelectableMenuRow(options[i], isCursorHighlighted: i == selectedIndex);
+            }
+
+            color.WriteColored(promptText, color.GetOptionKeyColor());
+            return input.ReadLine();
+        }
+
+        var maxWidth = 100;
+        try
+        {
+            if (Console.WindowWidth > 20)
+            {
+                maxWidth = Console.WindowWidth - 1;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or PlatformNotSupportedException or ArgumentOutOfRangeException)
+        {
+        }
+
+        var barWidth = Math.Min(maxWidth, Math.Max(minBarWidth, options.Max(o => o.EstimateLength()) + 2));
+
+        for (var i = 0; i < options.Count; i++)
+        {
+            color.WriteSelectableMenuRow(options[i], i == selectedIndex, barWidth, maxWidth);
+        }
+
+        color.WriteColored(promptText, color.GetOptionKeyColor());
+
+        var topRow = -1;
+        try
+        {
+            topRow = Math.Max(0, Console.CursorTop - options.Count);
+        }
+        catch (Exception ex) when (ex is IOException or PlatformNotSupportedException or ArgumentOutOfRangeException)
+        {
+            return input.ReadLine();
+        }
+
+        var buffer = new StringBuilder();
+        var previousPromptLength = promptText.Length;
+
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                color.WriteLine();
+                return buffer.Length > 0 ? buffer.ToString() : options[selectedIndex].Key;
+            }
+
+            if (key.Key == ConsoleKey.Escape)
+            {
+                if (buffer.Length > 0)
+                {
+                    buffer.Clear();
+                }
+                else
+                {
+                    color.WriteLine();
+                    return "0";
+                }
+            }
+            else if (key.Key == ConsoleKey.UpArrow)
+            {
+                selectedIndex = (selectedIndex - 1 + options.Count) % options.Count;
+                buffer.Clear();
+            }
+            else if (key.Key == ConsoleKey.DownArrow)
+            {
+                selectedIndex = (selectedIndex + 1) % options.Count;
+                buffer.Clear();
+            }
+            else if (key.Key == ConsoleKey.Backspace)
+            {
+                if (buffer.Length > 0)
+                {
+                    buffer.Length--;
+                    var matchedIdx = FindMatchingOptionIndex(options, buffer.ToString());
+                    if (matchedIdx >= 0)
+                    {
+                        selectedIndex = matchedIdx;
+                    }
+                }
+            }
+            else if (!char.IsControl(key.KeyChar))
+            {
+                buffer.Append(key.KeyChar);
+                var matchedIdx = FindMatchingOptionIndex(options, buffer.ToString());
+                if (matchedIdx >= 0)
+                {
+                    selectedIndex = matchedIdx;
+                }
+            }
+
+            try
+            {
+                Console.SetCursorPosition(0, topRow);
+                for (var i = 0; i < options.Count; i++)
+                {
+                    color.WriteSelectableMenuRow(options[i], i == selectedIndex, barWidth, maxWidth);
+                }
+
+                var currentPromptText = $"{promptText}{buffer}";
+                color.WriteColored(promptText, color.GetOptionKeyColor());
+                color.Write(buffer.ToString());
+                var (endLeft, endTop) = Console.GetCursorPosition();
+                var clearTrailing = Math.Max(0, previousPromptLength - currentPromptText.Length);
+                if (clearTrailing > 0)
+                {
+                    color.Write(new string(' ', clearTrailing));
+                    Console.SetCursorPosition(endLeft, endTop);
+                }
+
+                previousPromptLength = currentPromptText.Length;
+            }
+            catch (Exception ex) when (ex is IOException or PlatformNotSupportedException or ArgumentOutOfRangeException)
+            {
+            }
+        }
+    }
+
+    private static int FindMatchingOptionIndex(IReadOnlyList<HighlightedMenuOption> options, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return -1;
+        }
+
+        for (var i = 0; i < options.Count; i++)
+        {
+            if (string.Equals(options[i].Key, text.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
     private static T? RunSelector<T>(
         IReadOnlyList<T> items,
         TextReader input,
@@ -268,16 +462,14 @@ public static class InteractiveSelector
                 {
                     var (keyHint, label, detail) = formatRow(filtered[i]);
                     var displayKey = string.IsNullOrEmpty(keyHint) ? (i + 1).ToString() : keyHint;
-                    var marker = i == selectedIndex ? "❯ " : "  ";
-                    promptColor.WriteColored(marker, i == selectedIndex ? ConsoleColor.Green : ConsoleColor.DarkGray);
-                    promptColor.WriteColored($"[{displayKey}] ", promptColor.GetOptionKeyColor());
-                    promptColor.WriteColored(label, i == selectedIndex ? ConsoleColor.Cyan : ConsoleColor.White);
-                    if (!string.IsNullOrWhiteSpace(detail))
-                    {
-                        promptColor.WriteColored($" — {detail}", ConsoleColor.DarkGray);
-                    }
-
-                    promptColor.WriteLine();
+                    promptColor.WriteSelectableMenuRow(
+                        new HighlightedMenuOption(
+                            displayKey,
+                            label,
+                            Description: string.IsNullOrWhiteSpace(detail) ? null : detail,
+                            IsSelectedValue: i == selectedIndex),
+                        isCursorHighlighted: i == selectedIndex,
+                        minRowWidth: 64);
                 }
             }
 
@@ -348,11 +540,18 @@ public static class InteractiveSelector
             {
                 var (keyHint, label, detail) = formatRow(currentItems[i]);
                 var displayKey = string.IsNullOrEmpty(keyHint) ? (i + 1).ToString() : keyHint;
-                promptColor.WriteMenuOption(displayKey, label, detail);
+                promptColor.WriteSelectableMenuRow(
+                    new HighlightedMenuOption(
+                        displayKey,
+                        label,
+                        Description: string.IsNullOrWhiteSpace(detail) ? null : detail,
+                        IsSelectedValue: i == 0),
+                    isCursorHighlighted: i == 0,
+                    minRowWidth: 64);
             }
 
-            promptColor.WriteMenuOption("0", "Cancel");
-            promptColor.WriteColored($"Enter number (1-{currentItems.Count}), name, or fuzzy filter [0 to cancel]: ", ConsoleColor.Yellow);
+            promptColor.WriteSelectableMenuRow(new HighlightedMenuOption("0", "Cancel"), isCursorHighlighted: false, minRowWidth: 64);
+            promptColor.WriteColored($"Enter number (1-{currentItems.Count}), name, or fuzzy filter [0 to cancel]: ", promptColor.GetOptionKeyColor());
 
             var line = input.ReadLine();
             if (line is null)

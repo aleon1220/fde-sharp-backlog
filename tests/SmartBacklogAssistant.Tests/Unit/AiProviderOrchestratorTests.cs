@@ -1,3 +1,4 @@
+using Microsoft.Copilot;
 using SmartBacklogAssistant.Domain;
 using SmartBacklogAssistant.Services;
 using SmartBacklogAssistant.Workflow;
@@ -147,7 +148,7 @@ public sealed class AiProviderOrchestratorTests
     public void InspectProviderMatrix_ReportsAllFiveProvidersWithReadinessAndActiveMode()
     {
         var fakeGateway = new FakeCopilotSdkGateway(
-            diagnostics: new CopilotRuntimeDiagnostics(true, "remote-uri", "localhost:4321", false, false, "Remote Copilot CLI runtime at localhost:4321"));
+            diagnostics: new CopilotRuntimeDiagnostics(true, "remote-tcp", "localhost:4321", false, false, "Remote Copilot runtime TCP at localhost:4321"));
         var orchestrator = new AiProviderOrchestrator(copilotGateway: fakeGateway, environmentReader: _ => null);
         var secret = new GeminiSecretResolution("AIzaTest1234", "****1234", SecretSource.EnvironmentVariable, "GEMINI_API_KEY", GeminiSecretProvider.GeminiApiKeysUrl);
 
@@ -164,7 +165,7 @@ public sealed class AiProviderOrchestratorTests
     {
         var azureV1Env = new Dictionary<string, string?>
         {
-            ["COPILOT_CLI_URL"] = "localhost:4321",
+            ["COPILOT_CLI_URL"] = "http://localhost:4321/",
             ["COPILOT_GITHUB_TOKEN"] = "gho_token",
             ["AZURE_OPENAI_ENDPOINT"] = "https://foundry.services.ai.azure.com/openai/v1",
             ["AZURE_OPENAI_API_KEY"] = "key-123"
@@ -175,7 +176,8 @@ public sealed class AiProviderOrchestratorTests
         var byok = gateway.ResolveEnvironmentByok();
 
         Assert.True(diag.RuntimeAvailable);
-        Assert.Equal("remote-uri", diag.ConnectionMode);
+        Assert.Equal("remote-tcp", diag.ConnectionMode);
+        Assert.Equal("localhost:4321", diag.RuntimeLocation);
         Assert.True(diag.HasGitHubToken);
         Assert.True(diag.ByokConfigured);
         Assert.NotNull(byok);
@@ -294,6 +296,257 @@ public sealed class AiProviderOrchestratorTests
         Assert.Contains("enhancedTitle", fakeGateway.CapturedRequests[0].Prompt);
         Assert.False(offlineResult.UsedLiveProvider);
         Assert.Null(offlineResult.GeneratedContent);
+    }
+
+    [Theory]
+    [InlineData("localhost:4321", true, "localhost", 4321)]
+    [InlineData("127.0.0.1:4321", true, "127.0.0.1", 4321)]
+    [InlineData("http://localhost:4321", true, "localhost", 4321)]
+    [InlineData("https://copilot.internal:8443/", true, "copilot.internal", 8443)]
+    [InlineData("[::1]:4321", true, "::1", 4321)]
+    [InlineData("http://[::1]:4321", true, "::1", 4321)]
+    [InlineData(":4321", true, "localhost", 4321)]
+    [InlineData("", false, "", 0)]
+    [InlineData("localhost", false, "", 0)]
+    [InlineData("http://localhost", false, "", 0)]
+    [InlineData("localhost:0", false, "", 0)]
+    [InlineData("localhost:65536", false, "", 0)]
+    [InlineData("http://localhost:4321/api", false, "", 0)]
+    [InlineData("http://user:pass@localhost:4321", false, "", 0)]
+    public void TryParseTcpEndpoint_HandlesValidAndInvalidEndpointsForSdkV2ForTcp(
+        string rawEndpoint,
+        bool expectedSuccess,
+        string expectedHost,
+        int expectedPort)
+    {
+        var success = GitHubCopilotSdkGateway.TryParseTcpEndpoint(rawEndpoint, out var host, out var port);
+
+        Assert.Equal(expectedSuccess, success);
+        Assert.Equal(expectedHost, host);
+        Assert.Equal(expectedPort, port);
+    }
+
+    [Fact]
+    public void InspectDiagnostics_InvalidCliUrlOrDefaultConnection_ReportsUnavailable()
+    {
+        var badUrlGateway = new GitHubCopilotSdkGateway(
+            key => key == GitHubCopilotSdkGateway.CliUrlEnvVar ? "http://localhost" : null,
+            baseDirectory: Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")),
+            pathBinaryResolver: () => null);
+        var badUrlDiag = badUrlGateway.InspectDiagnostics();
+        Assert.False(badUrlDiag.RuntimeAvailable);
+        Assert.Equal("unavailable", badUrlDiag.ConnectionMode);
+        Assert.Contains("Invalid COPILOT_CLI_URL", badUrlDiag.Summary);
+
+        var badConnGateway = new GitHubCopilotSdkGateway(
+            key => key == GitHubCopilotSdkGateway.DefaultConnectionEnvVar ? "websocket" : null,
+            baseDirectory: Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N")),
+            pathBinaryResolver: () => null);
+        var badConnDiag = badConnGateway.InspectDiagnostics();
+        Assert.False(badConnDiag.RuntimeAvailable);
+        Assert.Equal("unavailable", badConnDiag.ConnectionMode);
+        Assert.Contains("Invalid COPILOT_SDK_DEFAULT_CONNECTION", badConnDiag.Summary);
+    }
+
+    [Fact]
+    public void InspectDiagnostics_ExplicitCliPathAndDefaultConnection_SelectsInProcessOrStdioCorrectly()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), $"sba-cli-diag-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var standaloneDir = Path.Combine(tempDir, "standalone");
+            var ffiDir = Path.Combine(tempDir, "ffi");
+            Directory.CreateDirectory(standaloneDir);
+            Directory.CreateDirectory(ffiDir);
+
+            var standaloneCli = Path.Combine(standaloneDir, OperatingSystem.IsWindows() ? "copilot.exe" : "copilot");
+            File.WriteAllText(standaloneCli, "stub");
+
+            var ffiCli = Path.Combine(ffiDir, OperatingSystem.IsWindows() ? "copilot.exe" : "copilot");
+            File.WriteAllText(ffiCli, "stub");
+            File.WriteAllText(Path.Combine(ffiDir, "runtime.node"), "stub-ffi");
+
+            // 1. Standalone binary defaults to stdio-explicit even though SDK v2 default is inprocess
+            var standaloneGateway = new GitHubCopilotSdkGateway(
+                key => key == GitHubCopilotSdkGateway.CliPathEnvVar ? standaloneCli : null,
+                baseDirectory: tempDir,
+                pathBinaryResolver: () => null);
+            var standaloneDiag = standaloneGateway.InspectDiagnostics();
+            Assert.True(standaloneDiag.RuntimeAvailable);
+            Assert.Equal("stdio-explicit", standaloneDiag.ConnectionMode);
+
+            // 2. Forcing inprocess without FFI library fails diagnostics cleanly
+            var forcedInProcStandalone = new GitHubCopilotSdkGateway(
+                key => key switch
+                {
+                    GitHubCopilotSdkGateway.CliPathEnvVar => standaloneCli,
+                    GitHubCopilotSdkGateway.DefaultConnectionEnvVar => "inprocess",
+                    _ => null
+                },
+                baseDirectory: tempDir,
+                pathBinaryResolver: () => null);
+            var forcedInProcDiag = forcedInProcStandalone.InspectDiagnostics();
+            Assert.False(forcedInProcDiag.RuntimeAvailable);
+            Assert.Equal("unavailable", forcedInProcDiag.ConnectionMode);
+
+            // 3. Adjacent runtime.node enables inprocess-explicit by default, unless overridden with stdio
+            var ffiGateway = new GitHubCopilotSdkGateway(
+                key => key == GitHubCopilotSdkGateway.CliPathEnvVar ? ffiCli : null,
+                baseDirectory: tempDir,
+                pathBinaryResolver: () => null);
+            var ffiDiag = ffiGateway.InspectDiagnostics();
+            Assert.True(ffiDiag.RuntimeAvailable);
+            Assert.Equal("inprocess-explicit", ffiDiag.ConnectionMode);
+
+            var ffiStdioOverride = new GitHubCopilotSdkGateway(
+                key => key switch
+                {
+                    GitHubCopilotSdkGateway.CliPathEnvVar => ffiCli,
+                    GitHubCopilotSdkGateway.DefaultConnectionEnvVar => "stdio",
+                    _ => null
+                },
+                baseDirectory: tempDir,
+                pathBinaryResolver: () => null);
+            var ffiStdioDiag = ffiStdioOverride.InspectDiagnostics();
+            Assert.True(ffiStdioDiag.RuntimeAvailable);
+            Assert.Equal("stdio-explicit", ffiStdioDiag.ConnectionMode);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+            {
+                Directory.Delete(tempDir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void InspectDiagnostics_BundledFfiAndBinary_RespectsDefaultConnectionOverride()
+    {
+        var tempBase = Path.Combine(Path.GetTempPath(), $"sba-bundled-{Guid.NewGuid():N}");
+        var nativeDir = Path.Combine(tempBase, "runtimes", "custom-rid", "native");
+        Directory.CreateDirectory(nativeDir);
+        try
+        {
+            var bundledBinary = Path.Combine(nativeDir, OperatingSystem.IsWindows() ? "copilot.exe" : "copilot");
+            File.WriteAllText(bundledBinary, "stub");
+            File.WriteAllText(Path.Combine(nativeDir, "runtime.node"), "stub-ffi");
+
+            var defaultBundled = new GitHubCopilotSdkGateway(_ => null, baseDirectory: tempBase, pathBinaryResolver: () => null);
+            var defaultDiag = defaultBundled.InspectDiagnostics();
+            Assert.True(defaultDiag.RuntimeAvailable);
+            Assert.Equal("inprocess-bundled", defaultDiag.ConnectionMode);
+
+            var stdioBundled = new GitHubCopilotSdkGateway(
+                key => key == GitHubCopilotSdkGateway.DefaultConnectionEnvVar ? "stdio" : null,
+                baseDirectory: tempBase,
+                pathBinaryResolver: () => null);
+            var stdioDiag = stdioBundled.InspectDiagnostics();
+            Assert.True(stdioDiag.RuntimeAvailable);
+            Assert.Equal("stdio-bundled", stdioDiag.ConnectionMode);
+            Assert.Equal(bundledBinary, stdioDiag.RuntimeLocation);
+        }
+        finally
+        {
+            if (Directory.Exists(tempBase))
+            {
+                Directory.Delete(tempBase, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CreateClient_ForTcpAndStdioAndInProcess_ConstructsSdkClientsWithoutValidationErrors()
+    {
+        var gateway = new GitHubCopilotSdkGateway(
+            key => key switch
+            {
+                GitHubCopilotSdkGateway.CliUrlEnvVar => "http://[::1]:4321/",
+                GitHubCopilotSdkGateway.CopilotTokenEnvVar => "gho_env_token",
+                _ => null
+            },
+            baseDirectory: Path.GetTempPath(),
+            pathBinaryResolver: () => null);
+
+        var tcpDiag = gateway.InspectDiagnostics();
+        Assert.Equal("remote-tcp", tcpDiag.ConnectionMode);
+        Assert.Equal("[::1]:4321", tcpDiag.RuntimeLocation);
+
+        // SDK v2 throws ArgumentException in CopilotClient ctor if ClientGitHubOptions.Token or UseLoggedInUser
+        // is set alongside TcpRuntimeConnection. Verify our gateway omits them cleanly.
+        await using var tcpClient = gateway.CreateClient("ghp_explicit_override", workingDirectory: null, tcpDiag);
+        await using var stdioClient = gateway.CreateClient(
+            "ghp_stdio",
+            Directory.GetCurrentDirectory(),
+            new CopilotRuntimeDiagnostics(true, "stdio-path", "/usr/local/bin/copilot", true, false, "stdio"));
+        await using var inProcClient = gateway.CreateClient(
+            gitHubToken: null,
+            workingDirectory: Directory.GetCurrentDirectory(),
+            new CopilotRuntimeDiagnostics(true, "inprocess-bundled", "/tmp/runtime.node", false, false, "inproc"));
+
+        Assert.NotNull(tcpClient);
+        Assert.NotNull(stdioClient);
+        Assert.NotNull(inProcClient);
+    }
+
+    [Fact]
+    public void BuildSessionOptions_ConfiguresIsolationAndSdkV2ByokAndRemoteTcpToken()
+    {
+        var gateway = new GitHubCopilotSdkGateway(
+            key => key == GitHubCopilotSdkGateway.CopilotTokenEnvVar ? "gho_tcp_session_token" : null,
+            baseDirectory: Path.GetTempPath(),
+            pathBinaryResolver: () => null);
+
+        var byokRequest = new CopilotGenerationRequest(
+            Prompt: "Generate backlog story",
+            SystemPrompt: "Zero Hallucination system prompt",
+            ModelId: "gpt-4o-deploy",
+            WorkingDirectory: Directory.GetCurrentDirectory(),
+            Byok: new CopilotByokOptions(
+                Type: "azure",
+                BaseUrl: "https://example.openai.azure.com",
+                ApiKey: "az-key",
+                WireApi: "completions",
+                AzureApiVersion: "2024-10-21"));
+
+        var byokSession = gateway.BuildSessionOptions(
+            byokRequest,
+            "gpt-4o-deploy",
+            byokRequest.Byok,
+            new CopilotRuntimeDiagnostics(true, "stdio-path", "/usr/local/bin/copilot", true, true, "Ready"));
+
+        Assert.Equal("smart-backlog-assistant", byokSession.ClientName);
+        Assert.Equal("gpt-4o-deploy", byokSession.Model);
+        Assert.False(byokSession.EnableConfigDiscovery);
+        Assert.True(byokSession.Instructions.SkipCustomInstructions);
+        Assert.False(byokSession.Hooks.EnableRepositoryHooks);
+        Assert.False(byokSession.Skills.Enabled);
+        Assert.False(byokSession.Git.EnableHostGitOperations);
+        Assert.NotNull(byokSession.Tools.AvailableTools);
+        Assert.Empty(byokSession.Tools.AvailableTools);
+        Assert.NotNull(byokSession.Permissions.OnRequest);
+        Assert.Equal(SystemMessageMode.Replace, byokSession.SystemMessage?.Mode);
+        Assert.Equal("Zero Hallucination system prompt", byokSession.SystemMessage?.Content);
+        Assert.False(byokSession.GitHub.Capi?.Enabled);
+        Assert.Equal("byok", byokSession.Inference.DefaultProvider);
+#pragma warning disable MCPSDK001
+        Assert.NotNull(byokSession.Inference.Providers);
+        var provider = Assert.Single(byokSession.Inference.Providers);
+        Assert.Equal("byok", provider.Name);
+        Assert.Equal("azure", provider.Type);
+        Assert.Equal("https://example.openai.azure.com", provider.BaseUrl);
+        Assert.Equal("az-key", provider.ApiKey);
+        Assert.Equal("2024-10-21", provider.Azure?.ApiVersion);
+#pragma warning restore MCPSDK001
+
+        var tcpSession = gateway.BuildSessionOptions(
+            new CopilotGenerationRequest(Prompt: "Hello", SystemPrompt: "Sys", ModelId: "gpt-5-mini"),
+            "gpt-5-mini",
+            effectiveByok: null,
+            new CopilotRuntimeDiagnostics(true, "remote-tcp", "localhost:4321", true, false, "TCP"));
+        Assert.Equal("gho_tcp_session_token", tcpSession.GitHub.Token);
+        Assert.Null(tcpSession.GitHub.Capi);
     }
 
     private sealed class FakeCopilotSdkGateway(

@@ -37,6 +37,36 @@ public sealed class GeminiApiClientTests
     }
 
     [Fact]
+    public void ListModelCatalog_CapturesSupportedAndUnsupportedGenerationMethods()
+    {
+        using var httpClient = CreateHttpClient(_ => JsonResponse("""
+            {
+              "models": [
+                {
+                  "name": "models/gemini-2.5-flash",
+                  "baseModelId": "gemini-2.5-flash",
+                  "displayName": "Gemini 2.5 Flash",
+                  "supportedGenerationMethods": ["generateContent"]
+                },
+                {
+                  "name": "models/gemini-embedding-001",
+                  "baseModelId": "gemini-embedding-001",
+                  "displayName": "Gemini Embedding",
+                  "supportedGenerationMethods": ["embedContent"]
+                }
+              ]
+            }
+            """));
+
+        var catalog = new GeminiApiClient(httpClient).ListModelCatalog("test-key");
+
+        var supported = Assert.Single(catalog.SupportedModels);
+        Assert.Equal("gemini-2.5-flash", supported.ModelId);
+        Assert.True(catalog.UnsupportedModelMethods.TryGetValue("gemini-embedding-001", out var methods));
+        Assert.Equal(["embedContent"], methods);
+    }
+
+    [Fact]
     public void GenerateContent_SendsSelectedModelAndReturnsCandidateText()
     {
         HttpMethod? capturedMethod = null;

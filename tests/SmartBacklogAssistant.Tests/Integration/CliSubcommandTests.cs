@@ -536,6 +536,27 @@ public sealed class CliSubcommandTests : IDisposable
         Assert.Contains("--copy", error.ToString());
     }
 
+    [Fact]
+    public void Execute_ConfigWithUnsupportedModel_FailsWithReasonOfficialDocsAndRecommendations()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = Program.Execute(
+            ["-w", _tempRoot, "config", "--provider", "gemini", "--model", "text-embedding-004"],
+            new StringReader(string.Empty),
+            output,
+            error);
+
+        Assert.Equal(1, exitCode);
+        var errText = error.ToString();
+        Assert.Contains("error:", errText);
+        Assert.Contains("unsupported modality", errText);
+        Assert.Contains(ModelCatalogService.GeminiModelsDocsUrl, errText);
+        Assert.Contains("gemini-2.5-flash", errText);
+        Assert.Contains("hint :", errText);
+    }
+
     private sealed class RecordingClipboardService : IClipboardService
     {
         public List<string> CopiedTexts { get; } = [];

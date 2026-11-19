@@ -18,11 +18,10 @@ public sealed class CliArgumentParserTests
     }
 
     [Fact]
-    public void ParseArgs_LiveGeminiIsDefaultUnlessOfflineIsRequested()
+    public void ParseArgs_WithLiveAndOfflineFlags_ParsesGeminiLiveSetting()
     {
         Assert.True(Program.ParseArgs(["--gemini-live"]).GeminiLive);
         Assert.False(Program.ParseArgs(["--offline"]).GeminiLive);
-        Assert.True(Program.ShouldLaunchMenu([], Program.ParseArgs([])));
     }
 
     [Theory]

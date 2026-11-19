@@ -662,6 +662,25 @@ public static class Program
             return 0;
         }
 
+        var effectiveProvider = updated.PreferredProvider ?? AiProviderType.GoogleGemini;
+        if (!string.IsNullOrWhiteSpace(updated.ModelName))
+        {
+            var modelCheck = ModelCatalogService.ValidateModelSelection(effectiveProvider, updated.ModelName);
+            if (!modelCheck.IsSupported)
+            {
+                var recList = string.Join(", ", modelCheck.Recommendations.Where(r => r.IsRecommended).Select(r => r.ModelId));
+                throw new ArgumentException(
+                    $"{modelCheck.Reason} Official docs: {modelCheck.OfficialDocsUrl}" +
+                    (string.IsNullOrWhiteSpace(recList) ? string.Empty : $" (Recommended: {recList})"));
+            }
+
+            if (modelCheck.IsKnownWarning)
+            {
+                color.WriteWarning($"  [!] {modelCheck.Reason}");
+                color.WriteMuted($"      Docs: {modelCheck.OfficialDocsUrl}");
+            }
+        }
+
         var savedPath = settingsService.Save(baseWorkspace, updated);
         var activeWorkspace = workspaceService.ApplySettings(baseWorkspace, updated);
         Directory.CreateDirectory(activeWorkspace.InputDirectory);
@@ -855,13 +874,13 @@ public static class Program
         output.WriteLine("  version                  Print build, .NET runtime, and architecture information");
         output.WriteLine();
         output.WriteLine("INTERACTIVE REPL (run with zero arguments):");
-        output.WriteLine("  Starts from [1] Wizard Orchestrator (all-in-one: Draft, Process, Preview/Refine, Copy, Settings, & Status),");
-        output.WriteLine("  supporting [0-5], quick shortcuts [w/d/p/v/s/c/?/q], /slash commands (/wizard, /draft, /process, /preview,");
-        output.WriteLine("  /copy, /verbosity, /settings, /status, /config, /provider, /models, /theme, /json, /live, /help, /exit),");
-        output.WriteLine("  universal submenu [b]ack/[q]uit navigation, and @filename context mentions.");
+        output.WriteLine("  Starts from [1] Backlog Assisted Orchestrator (all-in-one: Draft, Process, Preview/Refine, Copy, Settings, & Status),");
+        output.WriteLine("  supporting [0-4], quick shortcuts [w/g/d/p/v/s/c/?/q], /slash commands (/wizard, /generate, /draft, /process,");
+        output.WriteLine("  /preview, /copy, /verbosity, /settings, /status, /config, /provider, /models, /theme, /json, /live, /help, /exit),");
+        output.WriteLine("  universal submenu [b]ack/[q]uit navigation, theme-matched option highlights, and @filename context mentions.");
         output.WriteLine();
         output.WriteLine("AI PROVIDERS (--provider):");
-        output.WriteLine("  gemini (default) | copilot-sdk (GitHub.Copilot.SDK) | azure | claude | manual");
+        output.WriteLine("  gemini (default) | copilot-sdk (Microsoft.Copilot.SDK) | azure | claude | manual");
         output.WriteLine();
         output.WriteLine("GLOBAL OPTIONS:");
         output.WriteLine("  -w, --workspace <path>       Workspace root override (c:\\workspace on Win, /mnt/c/workspace on WSL)");
