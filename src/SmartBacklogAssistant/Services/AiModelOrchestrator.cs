@@ -1,15 +1,24 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using SmartBacklogAssistant.Domain;
 
 namespace SmartBacklogAssistant.Services;
 
 /// <summary>
-/// Step 2 (Local -> process & validate):
+/// Step 2 (Local -> process &amp; validate):
 /// AI model orchestrator that supports a live Google Gemini API path and mocked
 /// Azure OpenAI/Anthropic providers, or defaults to selecting
 /// a prompt from a Markdown file and suggesting the user run it in their desired AI model.
 /// </summary>
 public sealed class AiModelOrchestrator
 {
+    private readonly ILogger<AiModelOrchestrator> _logger;
+
+    public AiModelOrchestrator(ILogger<AiModelOrchestrator>? logger = null)
+    {
+        _logger = logger ?? NullLogger<AiModelOrchestrator>.Instance;
+    }
+
     public AiProviderType ResolveProvider(string? userInput)
     {
         if (string.IsNullOrWhiteSpace(userInput))
@@ -65,6 +74,13 @@ public sealed class AiModelOrchestrator
             Alternatives: alternatives);
 
         ValidateOutcome(outcome, backlogType);
+        LogEvents.OutcomeOrchestrated(
+            _logger,
+            outcome.Title,
+            provider.ToString(),
+            backlogType.ToString(),
+            outcome.Scenarios.Count,
+            verbosity.ToString());
         return outcome;
     }
 

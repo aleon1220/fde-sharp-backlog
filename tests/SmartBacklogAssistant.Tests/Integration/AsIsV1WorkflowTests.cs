@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using SmartBacklogAssistant.Domain;
 using SmartBacklogAssistant.Services;
 using SmartBacklogAssistant.Workflow;
@@ -517,10 +518,16 @@ public sealed class AsIsV1WorkflowTests : IDisposable
     }
 
     [Fact]
-    public void Execute_WithVerboseFlagEnabled_PrintsFullRuntimeBannerAndWordBudgetTelemetry()
+    public void Execute_WithVerboseFlagEnabled_RoutesRuntimeBannerAndWordBudgetTelemetryToStderrKeepingStdoutClean()
     {
-        var workflow = CreateWorkflow();
         using var output = new StringWriter();
+        using var error = new StringWriter();
+        using var loggerFactory = new StderrLoggerFactory(
+            error,
+            minimumLevel: Microsoft.Extensions.Logging.LogLevel.Debug,
+            outputFormat: LogOutputFormat.Text,
+            enableColor: false);
+        var workflow = CreateWorkflow(loggerFactory: loggerFactory);
 
         workflow.Execute(
             new WorkflowOptions(
@@ -534,26 +541,95 @@ public sealed class AsIsV1WorkflowTests : IDisposable
             new StringReader(string.Empty),
             output);
 
-        var consoleText = output.ToString();
-        Assert.Contains("OS Running", consoleText);
-        Assert.Contains("Build Info", consoleText);
-        Assert.Contains("Description word budget:", consoleText);
-        Assert.Contains("/57 words", consoleText);
+        var stdoutText = output.ToString();
+        var stderrText = error.ToString();
+        Assert.Contains("OS Running", stderrText);
+        Assert.Contains("Build Info", stderrText);
+        Assert.Contains("Description word budget:", stderrText);
+        Assert.Contains("/57 words", stderrText);
+        Assert.DoesNotContain("OS Running", stdoutText);
+        Assert.DoesNotContain("Description word budget:", stdoutText);
+    }
+
+    [Fact]
+    public void Execute_WithTraceLoggingAndGeminiLive_EmitsHttpAndPipelineTraceOnStderrWithoutLeakingApiKey()
+    {
+        const string secretKey = "AIzaSyWorkflowTraceSecret7788";
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+        using var loggerFactory = new StderrLoggerFactory(
+            error,
+            minimumLevel: Microsoft.Extensions.Logging.LogLevel.Trace,
+            outputFormat: LogOutputFormat.Text,
+            enableColor: false);
+
+        using var httpClient = new HttpClient(new StubHttpMessageHandler(request =>
+            request.Method == HttpMethod.Get
+                ? JsonResponse("""
+                    {
+                      "models": [{
+                        "name": "models/gemini-2.5-flash",
+                        "baseModelId": "gemini-2.5-flash",
+                        "displayName": "Gemini 2.5 Flash",
+                        "supportedGenerationMethods": ["generateContent"]
+                      }]
+                    }
+                    """)
+                : JsonResponse("""
+                    {
+                      "candidates": [{
+                        "content": {
+                          "parts": [{
+                            "text": "{\"title\":\"Trace Logged Ticket\",\"description\":\"Validate trace telemetry.\",\"userStory\":\"As an SRE, I want trace logs on stderr so that stdout stays clean.\",\"scenarios\":[{\"given\":\"Trace logging is enabled\",\"when\":\"Workflow runs\",\"then\":\"Secrets are masked\"}]}"
+                          }]
+                        }
+                      }]
+                    }
+                    """)));
+
+        var workflow = CreateWorkflow(
+            geminiApiClient: new GeminiApiClient(httpClient, loggerFactory.CreateLogger<GeminiApiClient>()),
+            loggerFactory: loggerFactory);
+
+        workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _inputFilePath,
+                PromptFilePath: _promptFilePath,
+                ApiKey: secretKey,
+                ModelName: "gemini-2.5-flash",
+                BacklogTypeInput: "Type01",
+                DryRun: true,
+                NonInteractive: true,
+                GeminiLive: true),
+            new StringReader(string.Empty),
+            output);
+
+        var stderrText = error.ToString();
+        var stdoutText = output.ToString();
+        Assert.Contains(" TRC]", stderrText);
+        Assert.Contains("Gemini HTTP", stderrText);
+        Assert.Contains("****7788", stderrText);
+        Assert.DoesNotContain(secretKey, stderrText);
+        Assert.DoesNotContain(secretKey, stdoutText);
+        Assert.DoesNotContain(" TRC]", stdoutText);
     }
 
     private static AsIsV1Workflow CreateWorkflow(
         GeminiSecretProvider? secretProvider = null,
-        GeminiApiClient? geminiApiClient = null) =>
+        GeminiApiClient? geminiApiClient = null,
+        Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null) =>
         new(
-            new RawDataCollector(),
+            new RawDataCollector(loggerFactory?.CreateLogger<RawDataCollector>()),
             new PromptTemplateService(),
-            new AiModelOrchestrator(),
+            new AiModelOrchestrator(loggerFactory?.CreateLogger<AiModelOrchestrator>()),
             new JiraBacklogFormatter(),
             new RuntimeEnvironmentService(),
             secretProvider ?? new GeminiSecretProvider(
                 environmentReader: _ => null,
                 environmentWriter: (_, _) => { }),
-            geminiApiClient);
+            geminiApiClient,
+            providerOrchestrator: null,
+            loggerFactory: loggerFactory);
 
     private static HttpResponseMessage JsonResponse(string json) => new(System.Net.HttpStatusCode.OK)
     {

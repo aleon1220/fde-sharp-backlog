@@ -16,7 +16,7 @@
 ### 1. Prerequisites
 
 * **.NET 10 SDK** (`dotnet --version` >= `10.0`)
-* **Build & Verify Locally** (runs all 261 unit & integration tests with zero warnings):
+* **Build & Verify Locally** (runs all 311 unit & integration tests with zero warnings):
 
 ```bash
 dotnet test
@@ -37,6 +37,8 @@ dotnet test
 | `COPILOT_SDK_DEFAULT_CONNECTION` | Default local transport | `inprocess` (SDK v2 default) or `stdio` |
 | `COPILOT_MODEL` / `GEMINI_MODEL` | Default model ID override | Defaults: `gpt-5-mini` (`copilot-sdk`), `gemini-3.8-flash` (`gemini`) |
 | `GEMINI_API_KEY` | Google Gemini REST API key | Can also be persisted interactively or overridden via `--api-key` |
+| `SBA_LOG_LEVEL` | Diagnostic `stderr` log severity | `Trace`, `Debug`, `Information`, `Warning` (default), `Error`, `Critical`, `None` (`Quiet`) |
+| `SBA_LOG_FORMAT` | Diagnostic `stderr` log format | `text` (default timestamped) or `json` (structured NDJSON); always routed to `stderr` |
 
 > [!TIP]
 > Builds skip downloading the native Copilot runtime bundle by default (`CopilotSkipCliDownload=true`). Pass `-p:CopilotSkipCliDownload=false` when building/publishing if you want MSBuild to bundle the platform FFI native library (`runtimes/<rid>/native/`) for zero-external-CLI in-process execution.
@@ -74,7 +76,12 @@ dotnet run --project src/SmartBacklogAssistant -- draft "Check Geocaching 2026 h
 dotnet run --project src/SmartBacklogAssistant -- draft "Add Redis Distributed Cache" --type both --json
 
 # Persist workspace settings in smart-backlog-assistant/settings.json
-dotnet run --project src/SmartBacklogAssistant -- config --json on --in ./in --out ./out --theme uv --provider copilot-sdk --verbosity bal
+dotnet run --project src/SmartBacklogAssistant -- config --json on --in ./in --out ./out --theme uv --provider copilot-sdk --verbosity bal --log-level info --log-format text
+
+# Control diagnostic stderr logging (keeps stdout clean for pipes; API keys & tokens always masked)
+dotnet run --project src/SmartBacklogAssistant -- draft "Audit OAuth2 Flows" --preview --offline --log-level debug
+dotnet run --project src/SmartBacklogAssistant -- preview --select --log-level trace --log-format json
+SBA_LOG_LEVEL=debug SBA_LOG_FORMAT=json dotnet run --project src/SmartBacklogAssistant -- status
 
 # Preview & interactively select saved outputs or copy clean plain text / Jira fields
 dotnet run --project src/SmartBacklogAssistant -- preview --select
@@ -88,6 +95,14 @@ dotnet run --project src/SmartBacklogAssistant -- status
 
 Aliases preserved: `run` (`process`), `add` (`draft`), `doctor` (`status`), `view` (`preview`), `menu`/`tui`. Pass `<command> --help` (e.g. `draft --help`, `status --help`) for command-specific options.
 
+### Configurable Logging (`stderr` & Secret Redaction)
+
+Diagnostic telemetry uses standard `Microsoft.Extensions.Logging` (`LogLevel`: `Trace`, `Debug`, `Information`, `Warning`, `Error`, `Critical`, `None`/`Quiet`), routed exclusively to `stderr` so `stdout` artifacts and piped selections (`preview --select`) stay uncorrupted:
+
+* **Precedence:** `--log-level` → `--verbose`/`-V` (`Debug`) or `--quiet`/`-q` (`None`) → `SBA_LOG_LEVEL` → `settings.json` (`logLevel`) → `Warning` (default).
+* **Formatting:** Timestamped `text` (default) or structured NDJSON (`--log-format json` / `SBA_LOG_FORMAT=json` / `settings.json`).
+* **Secret Redaction:** Gemini keys (`AIza...`), GitHub/Copilot tokens (`ghp_`, `gho_`, `github_pat_`), Anthropic/Azure/BYOK keys, and auth headers are masked via `GeminiSecretProvider.MaskKey` before writing to `stderr`.
+
 ## Interactive REPL & Menu (Gemini CLI / Agy Style)
 
 Running with zero arguments displays the compact boxed workspace header and supports theme-matched highlight selection (`↑`/`↓` + `Enter`), numeric options (`[0-4]`), single-key shortcuts (`[w/g/d/p/v/s/c/?/q]`), `/slash` commands, and `@filename` mentions from `backlog > `:
@@ -95,8 +110,8 @@ Running with zero arguments displays the compact boxed workspace header and supp
 * **`[1]` / `w` Backlog Assisted Orchestrator:** Unified end-to-end hub (`orchestrator > `, `/wizard`, `/orchestrator`, `/bao`) for drafting from Goals/Titles, processing `./in` files, previewing workspace artifacts, copying formats (`simple`, `clean`, `raw`, `md`, `title`, `story`, `desc`, `ac`, `alt1..alt3`), settings, and diagnostics.
 * **`[2]` / `g` Create / Generate Backlog:** Combines creation entry points into a single source selector (`/generate`): `[1]` Draft from Goal / Title (`Type01`, `Type02`, `Both`; `Minimalistic <=25w`, `Balanced <=57w`, `Detailed <=95w`, or `[d]` direct), `[2]` Process Input Files (`./in` batch, single review, or dry run, or `[p]` direct), and `[3]` Dry Run / Scan Workspace.
 * **`[3]` / `v` Preview:** General workspace previewer across active in-memory session drafts (`[session]`), saved Markdown outcomes (`./out/*.md`), JSON exports (`./out/*.json`), and raw input notes (`./in/*.txt`, `./in/*.md`) with fuzzy filtering, native/ANSI **OSC 52** clipboard copy, and `[E]` Orchestrator refinement/processing actions.
-* **`[4]` / `s` Workspace & Settings:** Colourfully highlights the active/selected option (`↑`/`↓` + `Enter` or `[0-8]`, matched to `agy` Cyan, `uv` Green, or `kubectl` DarkCyan themes) and setting badges (`provider • model`, `ON`/`OFF`, verbosity, theme): `[1]` **Select AI Provider** (with curated recommendations and a dedicated **AI Model Selection** submenu that flags unsupported/retired/wrong-modality models with reasons, recommendations, and links to official provider docs), `[2]` Toggle Live AI API, `[3]` Default Outcome Verbosity, `[4]` Toggle JSON Export, `[5]` Select CLI Theme (`agy`, `uv`, `kubectl`), `[6]` Inspect Directories, `[7]` Runtime & AI Diagnostics, `[8]` View `settings.json`, `[0]` Back.
-* **`/slash` Commands & `@filename` Mentions:** `/wizard` (`/orchestrator`, `/bao`), `/generate`, `/process`, `/draft`, `/preview`, `/copy`, `/verbosity`, `/settings`, `/status`, `/config`, `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`, plus `@raw-notes.txt ...`.
+* **`[4]` / `s` Workspace & Settings:** Colourfully highlights the active/selected option (`↑`/`↓` + `Enter` or `[0-9]`, matched to `agy` Cyan, `uv` Green, or `kubectl` DarkCyan themes) and setting badges (`provider • model`, `ON`/`OFF`, verbosity, theme, log level): `[1]` **Select AI Provider** (with curated recommendations and a dedicated **AI Model Selection** submenu that flags unsupported/retired/wrong-modality models with reasons, recommendations, and links to official provider docs), `[2]` Toggle Live AI API, `[3]` Default Outcome Verbosity, `[4]` Toggle JSON Export, `[5]` Select CLI Theme (`agy`, `uv`, `kubectl`), `[6]` Inspect Directories, `[7]` Runtime & AI Diagnostics, `[8]` View `settings.json`, `[9]` Select Log Level (`Trace`–`None` + `text`/`json` `stderr` format), `[0]` Back.
+* **`/slash` Commands & `@filename` Mentions:** `/wizard` (`/orchestrator`, `/bao`), `/generate`, `/process`, `/draft`, `/preview`, `/copy`, `/verbosity`, `/log-level`, `/log-format`, `/verbose`, `/settings`, `/status`, `/config`, `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`, plus `@raw-notes.txt ...`.
 
 ## Multi-Provider AI Orchestration (`Gemini` & `Microsoft.Copilot.SDK`)
 

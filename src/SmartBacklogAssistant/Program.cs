@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using SmartBacklogAssistant.Domain;
 using SmartBacklogAssistant.Services;
 using SmartBacklogAssistant.Workflow;
@@ -24,7 +25,9 @@ public static class Program
         "--in",
         "--out",
         "--copy",
-        "--verbosity"
+        "--verbosity",
+        "--log-level",
+        "--log-format"
     };
 
     private static readonly HashSet<string> OptionalBoolValueFlags = new(StringComparer.OrdinalIgnoreCase)
@@ -43,23 +46,30 @@ public static class Program
         TextReader input,
         TextWriter output,
         TextWriter error) =>
-        Execute(args, input, output, error, clipboardService: null);
+        Execute(args, input, output, error, clipboardService: null, environmentReader: null);
 
     internal static int Execute(
         string[] args,
         TextReader input,
         TextWriter output,
         TextWriter error,
-        IClipboardService? clipboardService)
+        IClipboardService? clipboardService,
+        Func<string, string?>? environmentReader = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(error);
 
+        var secretRedactor = new SecretRedactor();
+        secretRedactor.RegisterEnvironmentSecrets(environmentReader);
+        StderrLoggerFactory? loggerFactory = null;
+        ILogger? programLogger = null;
+
         try
         {
             var options = ParseArgs(args);
+            secretRedactor.RegisterSecret(options.ApiKey);
 
             if (HasAnyFlag(args, "--help", "-h") || options.Subcommand == "help")
             {
@@ -70,23 +80,62 @@ public static class Program
                 return 0;
             }
 
-            var runtimeEnvService = new RuntimeEnvironmentService();
-            var secretProvider = new GeminiSecretProvider();
-            var geminiApiClient = new GeminiApiClient();
-            var workspaceService = new WorkspacePathService();
+            var workspaceService = new WorkspacePathService(environmentReader: environmentReader);
             var settingsService = new CliSettingsService();
-            var modelOrchestrator = new AiModelOrchestrator();
-            var providerOrchestrator = new AiProviderOrchestrator(geminiApiClient);
+            var initialWorkspace = workspaceService.Resolve(options.WorkspaceRoot);
+            var initialSettings = settingsService.Load(initialWorkspace);
+
+            // Allow 'backlog config --log-level default|reset' and '--log-format default|reset' without rejecting as runtime override tokens.
+            var runtimeLoggingOptions = options.Subcommand == "config"
+                ? options with
+                {
+                    LogLevelInput = IsResetToken(options.LogLevelInput) ? null : options.LogLevelInput,
+                    LogFormatInput = IsResetToken(options.LogFormatInput) ? null : options.LogFormatInput
+                }
+                : options;
+
+            var resolvedLogging = CliLogLevelResolver.ResolveEffectiveLogging(
+                runtimeLoggingOptions,
+                initialSettings,
+                environmentReader);
+
+            loggerFactory = new StderrLoggerFactory(
+                error,
+                resolvedLogging.Level,
+                resolvedLogging.Format,
+                secretRedactor);
+            programLogger = loggerFactory.CreateLogger("SmartBacklogAssistant.Program");
+
+            LogEvents.CliInitialized(
+                programLogger,
+                options.Subcommand ?? (ShouldLaunchMenu(args, options) ? "menu" : "direct"),
+                resolvedLogging.Level,
+                resolvedLogging.LevelSource,
+                CliLogLevelResolver.FormatLogFormatCode(resolvedLogging.Format),
+                resolvedLogging.FormatSource,
+                options.NonInteractive,
+                options.DryRun);
+
+            var runtimeEnvService = new RuntimeEnvironmentService();
+            var secretProvider = new GeminiSecretProvider(environmentReader: environmentReader);
+            var geminiApiClient = new GeminiApiClient(logger: loggerFactory.CreateLogger<GeminiApiClient>());
+            var modelOrchestrator = new AiModelOrchestrator(loggerFactory.CreateLogger<AiModelOrchestrator>());
+            var providerOrchestrator = new AiProviderOrchestrator(
+                geminiApiClient,
+                environmentReader: environmentReader,
+                loggerFactory: loggerFactory);
             var diagnosticService = new WorkspaceDiagnosticService(
                 workspaceService,
                 runtimeEnvService,
                 secretProvider,
                 settingsService,
                 modelOrchestrator,
-                providerOrchestrator);
+                providerOrchestrator,
+                environmentReader);
 
             if (options.ShowVersion)
             {
+                LogEvents.DispatchingCommand(programLogger, "version", initialWorkspace.ProjectRoot);
                 var info = runtimeEnvService.Inspect();
                 output.WriteLine($"SmartBacklogAssistant v{info.BuildVersion} ({info.BuildConfiguration}) | {info.FrameworkDescription} | {info.OsPlatform} ({info.ProcessArchitecture})");
                 return 0;
@@ -94,6 +143,7 @@ public static class Program
 
             if (options.Subcommand == "config")
             {
+                LogEvents.DispatchingCommand(programLogger, "config", initialWorkspace.ProjectRoot);
                 return RunConfigCommand(
                     args,
                     options,
@@ -101,11 +151,13 @@ public static class Program
                     settingsService,
                     diagnosticService,
                     modelOrchestrator,
-                    output);
+                    output,
+                    programLogger);
             }
 
             if (options.Subcommand == "preview")
             {
+                LogEvents.DispatchingCommand(programLogger, "preview", initialWorkspace.ProjectRoot);
                 return RunPreviewCommand(
                     args,
                     options,
@@ -114,11 +166,13 @@ public static class Program
                     clipboardService ?? new OsClipboardService(),
                     input,
                     output,
-                    error);
+                    error,
+                    programLogger);
             }
 
             if (options.ShowDoctorStatus)
             {
+                LogEvents.DispatchingCommand(programLogger, "status", initialWorkspace.ProjectRoot);
                 return RunDoctorStatus(
                     options,
                     runtimeEnvService,
@@ -127,11 +181,13 @@ public static class Program
                     settingsService,
                     modelOrchestrator,
                     output,
-                    providerOrchestrator);
+                    providerOrchestrator,
+                    environmentReader);
             }
 
             if (options.ListGeminiModels)
             {
+                LogEvents.DispatchingCommand(programLogger, "models", initialWorkspace.ProjectRoot);
                 return RunModelsCommand(
                     options,
                     workspaceService,
@@ -145,7 +201,7 @@ public static class Program
                     output);
             }
 
-            var collector = new RawDataCollector();
+            var collector = new RawDataCollector(loggerFactory.CreateLogger<RawDataCollector>());
             var promptService = new PromptTemplateService();
             var formatter = new JiraBacklogFormatter();
 
@@ -157,10 +213,12 @@ public static class Program
                 runtimeEnvService,
                 secretProvider,
                 geminiApiClient,
-                providerOrchestrator);
+                providerOrchestrator,
+                loggerFactory);
 
             if (ShouldLaunchMenu(args, options))
             {
+                LogEvents.DispatchingCommand(programLogger, "menu", initialWorkspace.ProjectRoot);
                 var menuRunner = new CliMenuRunner(
                     workflow,
                     workspaceService,
@@ -169,12 +227,15 @@ public static class Program
                     modelOrchestrator,
                     settingsService,
                     diagnosticService,
-                    clipboardService);
+                    clipboardService,
+                    loggerFactory,
+                    environmentReader);
 
                 return menuRunner.Run(options, input, output);
             }
 
             // Direct / headless execution (uv-style one-shot subcommands or explicit flags)
+            LogEvents.DispatchingCommand(programLogger, options.Subcommand ?? "direct", initialWorkspace.ProjectRoot);
             var resolvedOptions = ResolveDirectExecutionOptions(args, options, workspaceService, settingsService, collector);
             workflow.Execute(resolvedOptions, input, output);
 
@@ -209,10 +270,19 @@ public static class Program
         }
         catch (Exception ex)
         {
+            if (programLogger is not null)
+            {
+                LogEvents.CommandExecutionFailed(programLogger, ex, ex.Message);
+            }
+
             var theme = ConsoleColorWriter.ResolveTheme(GetArgValue(args, "--theme"));
             var errorWriter = new ConsoleColorWriter(error, theme: theme);
-            TerminalUx.WriteActionableError(errorWriter, ex);
+            TerminalUx.WriteActionableError(errorWriter, ex, secretRedactor);
             return 1;
+        }
+        finally
+        {
+            loggerFactory?.Dispose();
         }
     }
 
@@ -259,9 +329,16 @@ public static class Program
                                HasFlag(args, "--status") ||
                                subcommand == "doctor";
         var showVersion = HasFlag(args, "--version") ||
-                          HasFlag(args, "-v") ||
+                          HasExactFlag(args, "-v") ||
                           subcommand == "version";
-        var verbose = HasFlag(args, "--verbose") || HasFlag(args, "-V");
+        var verbose = HasFlag(args, "--verbose") || HasExactFlag(args, "-V");
+        var quiet = HasFlag(args, "--quiet") || HasExactFlag(args, "-q");
+        var logLevelInput = TryGetRequiredFlagValue(args, out var parsedLogLevelToken, "--log-level")
+            ? parsedLogLevelToken
+            : null;
+        var logFormatInput = TryGetRequiredFlagValue(args, out var parsedLogFormatToken, "--log-format")
+            ? parsedLogFormatToken
+            : null;
         var showAlternatives = HasAnyFlag(args, "--alternatives", "--alts");
         var verbosityArg = GetArgValue(args, "--verbosity");
         var verbosity = HasAnyFlag(args, "--minimal", "--minimalistic")
@@ -296,7 +373,10 @@ public static class Program
             WebSearchGrounding: webSearch,
             Verbose: verbose,
             ShowAlternatives: showAlternatives,
-            Verbosity: verbosity);
+            Verbosity: verbosity,
+            LogLevelInput: logLevelInput,
+            LogFormatInput: logFormatInput,
+            Quiet: quiet);
     }
 
     public static bool ShouldLaunchMenu(string[] args, WorkflowOptions options)
@@ -341,7 +421,8 @@ public static class Program
         CliSettingsService settingsService,
         AiModelOrchestrator orchestrator,
         TextWriter output,
-        AiProviderOrchestrator? providerOrchestrator = null)
+        AiProviderOrchestrator? providerOrchestrator = null,
+        Func<string, string?>? environmentReader = null)
     {
         var diagnosticService = new WorkspaceDiagnosticService(
             workspaceService,
@@ -349,7 +430,8 @@ public static class Program
             secretProvider,
             settingsService,
             orchestrator,
-            providerOrchestrator);
+            providerOrchestrator,
+            environmentReader);
 
         return diagnosticService.RenderStatusTable(options, output);
     }
@@ -369,7 +451,8 @@ public static class Program
             clipboardService,
             Console.In,
             output,
-            Console.Error);
+            Console.Error,
+            logger: null);
 
     public static int RunPreviewCommand(
         string[] args,
@@ -379,7 +462,8 @@ public static class Program
         IClipboardService clipboardService,
         TextReader input,
         TextWriter output,
-        TextWriter error)
+        TextWriter error,
+        ILogger? logger = null)
     {
         var baseWorkspace = workspaceService.Resolve(options.WorkspaceRoot);
         var settings = settingsService.Load(baseWorkspace);
@@ -429,6 +513,11 @@ public static class Program
         else
         {
             resolvedPath = CliMenuRunner.ResolveSavedMarkdownTarget(explicitTarget, outputDir);
+        }
+
+        if (logger is not null)
+        {
+            LogEvents.PreviewingMarkdown(logger, resolvedPath, selectInteractive, copyMode ?? "none");
         }
 
         var markdown = File.ReadAllText(resolvedPath);
@@ -556,7 +645,8 @@ public static class Program
         CliSettingsService settingsService,
         WorkspaceDiagnosticService diagnosticService,
         AiModelOrchestrator orchestrator,
-        TextWriter output)
+        TextWriter output,
+        ILogger? logger = null)
     {
         var sw = Stopwatch.StartNew();
         var baseWorkspace = workspaceService.Resolve(options.WorkspaceRoot);
@@ -653,6 +743,28 @@ public static class Program
                 updated = updated with { DefaultVerbosity = parsedVerbosity };
                 changed = true;
             }
+
+            if (TryGetRequiredFlagValue(args, out var logLevelValue, "--log-level"))
+            {
+                updated = updated with
+                {
+                    LogLevel = IsResetToken(logLevelValue)
+                        ? null
+                        : CliLogLevelResolver.ParseLogLevelOrThrow(logLevelValue, "--log-level")
+                };
+                changed = true;
+            }
+
+            if (TryGetRequiredFlagValue(args, out var logFormatValue, "--log-format"))
+            {
+                updated = updated with
+                {
+                    LogFormat = IsResetToken(logFormatValue)
+                        ? null
+                        : CliLogLevelResolver.ParseLogFormatOrThrow(logFormatValue, "--log-format")
+                };
+                changed = true;
+            }
         }
 
         if (!changed)
@@ -676,6 +788,11 @@ public static class Program
 
             if (modelCheck.IsKnownWarning)
             {
+                if (logger is not null)
+                {
+                    LogEvents.ModelSelectionWarning(logger, effectiveProvider.ToString(), updated.ModelName, modelCheck.Reason ?? string.Empty);
+                }
+
                 color.WriteWarning($"  [!] {modelCheck.Reason}");
                 color.WriteMuted($"      Docs: {modelCheck.OfficialDocsUrl}");
             }
@@ -687,6 +804,15 @@ public static class Program
         Directory.CreateDirectory(activeWorkspace.OutputDirectory);
 
         sw.Stop();
+        if (logger is not null)
+        {
+            LogEvents.ConfigSaved(
+                logger,
+                savedPath,
+                updated.LogLevel?.ToString() ?? "default",
+                updated.LogFormat?.ToString() ?? "default");
+        }
+
         TerminalUx.WriteStepDone(color, "Saved", $"workspace settings to '{savedPath}'", sw.Elapsed);
         diagnosticService.RenderConfigSummary(baseWorkspace, activeWorkspace, updated, color);
         return 0;
@@ -813,12 +939,14 @@ public static class Program
                 output.WriteLine("  --live <on|off>         Enable/disable live AI generation by default");
                 output.WriteLine("  --theme <agy|uv|kubectl> Set interactive CLI theme palette");
                 output.WriteLine("  --verbosity <min|bal|det> Set default outcome verbosity (Minimalistic, Balanced, Detailed)");
+                output.WriteLine("  --log-level <level|default> Set stderr log severity (trace, debug, information, warning, error, critical, none)");
+                output.WriteLine("  --log-format <text|json|default> Set stderr log serialization format (default: text)");
                 output.WriteLine("  --show                  Display current settings summary");
                 output.WriteLine("  --reset                 Reset settings.json back to defaults");
                 output.WriteLine();
                 output.WriteLine("EXAMPLES:");
                 output.WriteLine("  backlog config --json on --in ./in --out ./out");
-                output.WriteLine("  backlog config --provider copilot-sdk --theme uv");
+                output.WriteLine("  backlog config --provider copilot-sdk --theme uv --log-level debug --log-format json");
                 return;
 
             case "doctor":
@@ -826,11 +954,12 @@ public static class Program
                 color.WriteMuted("USAGE: backlog status [OPTIONS]");
                 output.WriteLine();
                 output.WriteLine("Displays a diagnostic table of WSL2/Windows resolved paths, queued ./in file count,");
-                output.WriteLine("export mode (.md / .json), active AI model, Gemini API key status, and Copilot SDK runtime readiness.");
+                output.WriteLine("active log level/format, export mode (.md / .json), active AI model, Gemini API key status, and Copilot SDK runtime readiness.");
                 output.WriteLine();
                 output.WriteLine("OPTIONS:");
                 output.WriteLine("  -w, --workspace <path>  Inspect a custom workspace root");
                 output.WriteLine("  --provider <name>       Inspect readiness with a specific provider selected");
+                output.WriteLine("  --log-level <level>     Override effective log level for inspection");
                 output.WriteLine("  --theme <agy|uv|kubectl> Override table color palette");
                 return;
 
@@ -852,6 +981,8 @@ public static class Program
                 output.WriteLine("  --copy <target>          Copy to clipboard: raw, md, clean, simple, title, story, desc, ac, alt1..alt3");
                 output.WriteLine("  --output-dir <path>      Override ./out directory to inspect");
                 output.WriteLine("  -w, --workspace <path>   Workspace root override");
+                output.WriteLine("  --log-level <level>      Diagnostic stderr log severity (stdout remains clean)");
+                output.WriteLine("  --log-format <text|json> Diagnostic stderr log format (text or json)");
                 output.WriteLine("  --theme <agy|uv|kubectl> Table color palette");
                 return;
         }
@@ -868,7 +999,7 @@ public static class Program
         output.WriteLine("  draft \"<Goal or Title>\"  Draft a Type01 User Story and/or Type02 Schedule Item (alias: add)");
         output.WriteLine("  preview [<file>|latest]  Preview a saved ./out/*.md file in one colored table (alias: view)");
         output.WriteLine("  status                   Show WSL2/Windows paths, queued files, & AI readiness table (alias: doctor)");
-        output.WriteLine("  config                   Configure persisted settings (--json, --in, --out, --provider, --theme)");
+        output.WriteLine("  config                   Configure persisted settings (--json, --in, --out, --provider, --log-level, --theme)");
         output.WriteLine("  models                   List available models for the active AI provider");
         output.WriteLine("  menu | tui               Launch interactive Gemini Agy REPL/TUI (default when no args given)");
         output.WriteLine("  version                  Print build, .NET runtime, and architecture information");
@@ -876,7 +1007,7 @@ public static class Program
         output.WriteLine("INTERACTIVE REPL (run with zero arguments):");
         output.WriteLine("  Starts from [1] Backlog Assisted Orchestrator (all-in-one: Draft, Process, Preview/Refine, Copy, Settings, & Status),");
         output.WriteLine("  supporting [0-4], quick shortcuts [w/g/d/p/v/s/c/?/q], /slash commands (/wizard, /generate, /draft, /process,");
-        output.WriteLine("  /preview, /copy, /verbosity, /settings, /status, /config, /provider, /models, /theme, /json, /live, /help, /exit),");
+        output.WriteLine("  /preview, /copy, /verbosity, /log-level, /log-format, /settings, /status, /config, /provider, /models, /theme, /json, /live, /help, /exit),");
         output.WriteLine("  universal submenu [b]ack/[q]uit navigation, theme-matched option highlights, and @filename context mentions.");
         output.WriteLine();
         output.WriteLine("AI PROVIDERS (--provider):");
@@ -892,15 +1023,19 @@ public static class Program
         output.WriteLine("  --offline / --live           Toggle live AI generation vs local deterministic drafting");
         output.WriteLine("  -s, --select                 Interactive fuzzy output picker (stderr prompts, clean stdout)");
         output.WriteLine("  --copy <target>              Copy outcome or field (raw, md, clean, title, story, desc, ac, alt1..)");
+        output.WriteLine("  --log-level <level>          Stderr log level: trace, debug, information, warning (default), error, critical, none (env: SBA_LOG_LEVEL)");
+        output.WriteLine("  --log-format <text|json>     Stderr log format: text (default) or json / NDJSON (env: SBA_LOG_FORMAT)");
+        output.WriteLine("  -V, --verbose                Shortcut for --log-level debug (diagnostic logs routed to stderr)");
+        output.WriteLine("  -q, --quiet                  Shortcut for --log-level none (suppress diagnostic logs)");
         output.WriteLine("  --non-interactive            Disable stdin prompts");
         output.WriteLine("  --theme <agy|uv|kubectl>     CLI color palette");
         output.WriteLine("  -h, --help                   Show help (run '<command> --help' for command options)");
         output.WriteLine();
         output.WriteLine("EXAMPLES:");
         output.WriteLine("  backlog                                              # Launch Gemini/Agy interactive REPL");
-        output.WriteLine("  backlog process all --dry-run                        # Preview all queued ./in files");
+        output.WriteLine("  backlog process all --dry-run --log-level debug      # Preview all ./in files with stderr diagnostics");
         output.WriteLine("  backlog draft \"OAuth2 PKCE Login\" -t 01 --preview    # Quick-draft without disk write");
-        output.WriteLine("  backlog config --json on --in ./in --out ./out       # Persist workspace overrides");
+        output.WriteLine("  backlog config --json on --log-level info            # Persist workspace & logging overrides");
         output.WriteLine("  backlog status                                       # Crisp WSL2/Windows & AI table");
     }
 
@@ -1263,9 +1398,10 @@ public static class Program
     {
         for (var i = 0; i < args.Length; i++)
         {
+            var token = args[i];
             foreach (var flag in flags)
             {
-                if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(token, flag, StringComparison.OrdinalIgnoreCase))
                 {
                     if (i + 1 >= args.Length || string.IsNullOrWhiteSpace(args[i + 1]) || args[i + 1].StartsWith('-'))
                     {
@@ -1275,12 +1411,31 @@ public static class Program
                     value = args[i + 1];
                     return true;
                 }
+
+                if (token.Length > flag.Length &&
+                    token[flag.Length] == '=' &&
+                    token.StartsWith(flag, StringComparison.OrdinalIgnoreCase))
+                {
+                    var inlineValue = token[(flag.Length + 1)..];
+                    if (string.IsNullOrWhiteSpace(inlineValue))
+                    {
+                        throw new ArgumentException($"Missing value for '{flag}'.");
+                    }
+
+                    value = inlineValue;
+                    return true;
+                }
             }
         }
 
         value = string.Empty;
         return false;
     }
+
+    private static bool IsResetToken(string? token) =>
+        !string.IsNullOrWhiteSpace(token) &&
+        (token.Trim().Equals("default", StringComparison.OrdinalIgnoreCase) ||
+         token.Trim().Equals("reset", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsBooleanToken(string token) =>
         TryParseBooleanToken(token, out _);
@@ -1309,6 +1464,9 @@ public static class Program
     private static bool HasFlag(string[] args, string flag) =>
         args.Contains(flag, StringComparer.OrdinalIgnoreCase);
 
+    private static bool HasExactFlag(string[] args, string flag) =>
+        args.Contains(flag, StringComparer.Ordinal);
+
     private static bool HasAnyFlag(string[] args, params string[] flags)
     {
         foreach (var flag in flags)
@@ -1324,13 +1482,22 @@ public static class Program
 
     private static string? GetArgValue(string[] args, params string[] flags)
     {
-        for (var i = 0; i < args.Length - 1; i++)
+        for (var i = 0; i < args.Length; i++)
         {
+            var token = args[i];
             foreach (var flag in flags)
             {
-                if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(token, flag, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                 {
                     return args[i + 1];
+                }
+
+                if (token.Length > flag.Length &&
+                    token[flag.Length] == '=' &&
+                    token.StartsWith(flag, StringComparison.OrdinalIgnoreCase))
+                {
+                    var inlineValue = token[(flag.Length + 1)..];
+                    return string.IsNullOrWhiteSpace(inlineValue) ? null : inlineValue;
                 }
             }
         }

@@ -16,6 +16,7 @@ public sealed class WorkspaceDiagnosticService
     private readonly CliSettingsService _settingsService;
     private readonly AiModelOrchestrator _modelOrchestrator;
     private readonly AiProviderOrchestrator _providerOrchestrator;
+    private readonly Func<string, string?> _environmentReader;
 
     public WorkspaceDiagnosticService(
         WorkspacePathService? workspaceService = null,
@@ -23,7 +24,8 @@ public sealed class WorkspaceDiagnosticService
         GeminiSecretProvider? secretProvider = null,
         CliSettingsService? settingsService = null,
         AiModelOrchestrator? modelOrchestrator = null,
-        AiProviderOrchestrator? providerOrchestrator = null)
+        AiProviderOrchestrator? providerOrchestrator = null,
+        Func<string, string?>? environmentReader = null)
     {
         _workspaceService = workspaceService ?? new WorkspacePathService();
         _runtimeEnvService = runtimeEnvService ?? new RuntimeEnvironmentService();
@@ -31,6 +33,7 @@ public sealed class WorkspaceDiagnosticService
         _settingsService = settingsService ?? new CliSettingsService();
         _modelOrchestrator = modelOrchestrator ?? new AiModelOrchestrator();
         _providerOrchestrator = providerOrchestrator ?? new AiProviderOrchestrator();
+        _environmentReader = environmentReader ?? Environment.GetEnvironmentVariable;
     }
 
     public int RenderStatusTable(
@@ -51,6 +54,7 @@ public sealed class WorkspaceDiagnosticService
         var effectiveModel = options.ModelName ?? settings.ModelName;
         var effectiveLive = options.GeminiLive ?? settings.GeminiLive ?? true;
         var effectiveJson = options.JsonFileOut ?? settings.JsonFileOut;
+        var logging = CliLogLevelResolver.ResolveEffectiveLogging(options, settings, _environmentReader);
 
         var runtimeInfo = _runtimeEnvService.Inspect(activeProvider, effectiveModel);
         var secret = _secretProvider.Resolve(options.ApiKey);
@@ -71,6 +75,8 @@ public sealed class WorkspaceDiagnosticService
             ("Runtime", "OS & .NET", platformSummary, ConsoleColor.Green),
             ("Runtime", "Build Version", $"v{runtimeInfo.BuildVersion} ({runtimeInfo.BuildConfiguration})", ConsoleColor.Cyan),
             ("Runtime", "CLI Theme", ConsoleColorWriter.FormatThemeDisplay(resolvedTheme), ConsoleColor.Cyan),
+            ("Logging", "Log Level", $"{CliLogLevelResolver.FormatLogLevelDisplay(logging.Level)} ({logging.LevelSource})", CliLogLevelResolver.GetLogLevelColor(logging.Level)),
+            ("Logging", "Log Format", $"{CliLogLevelResolver.FormatLogFormatCode(logging.Format)} -> stderr ({logging.FormatSource})", ConsoleColor.Cyan),
             ("Paths", "Windows Root", WorkspacePathService.DefaultWindowsWorkspaceRoot, ConsoleColor.Gray),
             ("Paths", "WSL2 Root", WorkspacePathService.DefaultWslWorkspaceRoot, ConsoleColor.Gray),
             ("Paths", "Active In (./in)", $"{workspace.InputDirectory} ({inputFiles.Count} queued)", inputFiles.Count > 0 ? ConsoleColor.Green : ConsoleColor.Yellow),
@@ -114,6 +120,14 @@ public sealed class WorkspaceDiagnosticService
     {
         var activeProvider = settings.PreferredProvider ?? AiProviderType.GoogleGemini;
         var effectiveVerbosity = settings.DefaultVerbosity ?? OutcomeVerbosity.Balanced;
+        var effectiveLogLevel = settings.LogLevel ?? CliLogLevelResolver.DefaultLogLevel;
+        var logLevelDisplay = settings.LogLevel is { } persistedLevel
+            ? CliLogLevelResolver.FormatLogLevelDisplay(persistedLevel)
+            : $"{CliLogLevelResolver.FormatLogLevelDisplay(CliLogLevelResolver.DefaultLogLevel)} (default)";
+        var logFormatDisplay = settings.LogFormat is { } persistedFormat
+            ? $"{CliLogLevelResolver.FormatLogFormatCode(persistedFormat)} (stderr)"
+            : $"{CliLogLevelResolver.FormatLogFormatCode(CliLogLevelResolver.DefaultLogFormat)} (default, stderr)";
+
         var rows = new List<(string Section, string Setting, string Value, ConsoleColor ValueColor)>
         {
             ("Export", "JSON Export (--json)", settings.JsonFileOut ? "ON (.md + .json)" : "OFF (.md only)", settings.JsonFileOut ? ConsoleColor.Green : ConsoleColor.Yellow),
@@ -121,6 +135,8 @@ public sealed class WorkspaceDiagnosticService
             ("Paths", "Output Dir (--out)", activeWorkspace.OutputDirectory, ConsoleColor.Cyan),
             ("UI", "CLI Theme (--theme)", ConsoleColorWriter.FormatThemeDisplay(settings.Theme), ConsoleColor.Cyan),
             ("UI", "Verbosity", DescriptionFormatter.FormatVerbosityLabel(effectiveVerbosity), ConsoleColor.Cyan),
+            ("Logging", "Log Level", logLevelDisplay, CliLogLevelResolver.GetLogLevelColor(effectiveLogLevel)),
+            ("Logging", "Log Format", logFormatDisplay, ConsoleColor.Cyan),
             ("AI", "Provider (--provider)", RuntimeEnvironmentService.FormatProviderCode(activeProvider), ConsoleColor.Green),
             ("AI", "Live AI (--live)", (settings.GeminiLive ?? true) ? "ON" : "OFF", (settings.GeminiLive ?? true) ? ConsoleColor.Green : ConsoleColor.Yellow),
             ("AI", "Model (--model)", settings.ModelName ?? "automatic", ConsoleColor.Gray),

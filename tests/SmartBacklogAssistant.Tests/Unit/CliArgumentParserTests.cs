@@ -257,4 +257,41 @@ public sealed class CliArgumentParserTests
         Assert.True(options.WebSearchGrounding);
         Assert.False(Program.ShouldLaunchMenu(args, options));
     }
+
+    [Fact]
+    public void ParseArgs_WithLogLevelLogFormatVerboseAndQuietFlags_ParsesExpectedOptions()
+    {
+        var separated = Program.ParseArgs(["draft", "Goal", "--log-level", "debug", "--log-format", "json"]);
+        Assert.Equal("debug", separated.LogLevelInput);
+        Assert.Equal("json", separated.LogFormatInput);
+        Assert.False(separated.Verbose);
+        Assert.False(separated.Quiet);
+
+        var inlineEquals = Program.ParseArgs(["status", "--log-level=trace", "--log-format=text"]);
+        Assert.Equal("trace", inlineEquals.LogLevelInput);
+        Assert.Equal("text", inlineEquals.LogFormatInput);
+        Assert.True(inlineEquals.ShowDoctorStatus);
+
+        var verboseShort = Program.ParseArgs(["-V", "status"]);
+        Assert.True(verboseShort.Verbose);
+        Assert.False(verboseShort.ShowVersion);
+
+        var versionShort = Program.ParseArgs(["-v"]);
+        Assert.True(versionShort.ShowVersion);
+        Assert.False(versionShort.Verbose);
+
+        var quietShort = Program.ParseArgs(["-q", "draft", "Goal"]);
+        Assert.True(quietShort.Quiet);
+        Assert.False(quietShort.Verbose);
+    }
+
+    [Theory]
+    [InlineData("status", "--log-level")]
+    [InlineData("status", "--log-level=")]
+    [InlineData("status", "--log-format")]
+    [InlineData("status", "--log-format=")]
+    public void ParseArgs_WithMissingLoggingFlagValue_ThrowsArgumentException(string subcommand, string flag)
+    {
+        Assert.Throws<ArgumentException>(() => Program.ParseArgs([subcommand, flag]));
+    }
 }

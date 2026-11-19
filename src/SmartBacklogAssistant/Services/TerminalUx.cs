@@ -139,7 +139,10 @@ public static class TerminalUx
         return $"{text[..headLength]}…{text[^tailLength..]}";
     }
 
-    public static void WriteActionableError(ConsoleColorWriter errorWriter, Exception ex)
+    public static void WriteActionableError(
+        ConsoleColorWriter errorWriter,
+        Exception ex,
+        SecretRedactor? redactor = null)
     {
         ArgumentNullException.ThrowIfNull(errorWriter);
         ArgumentNullException.ThrowIfNull(ex);
@@ -148,8 +151,12 @@ public static class TerminalUx
             ? agg.InnerException
             : ex;
 
+        var safeMessage = redactor is not null
+            ? redactor.Redact(root.Message)
+            : SecretRedactor.RedactPatterns(root.Message);
+
         errorWriter.WriteColored("error: ", ConsoleColor.Red);
-        errorWriter.WriteLine(root.Message);
+        errorWriter.WriteLine(safeMessage);
 
         var hint = ResolveActionableHint(root);
         if (!string.IsNullOrWhiteSpace(hint))
@@ -162,6 +169,20 @@ public static class TerminalUx
     public static string? ResolveActionableHint(Exception ex)
     {
         var msg = ex.Message;
+
+        if (msg.Contains("log level", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("--log-level", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains(CliLogLevelResolver.LogLevelEnvVar, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"Use '--log-level <{CliLogLevelResolver.ValidLevelsDisplay}>' or set {CliLogLevelResolver.LogLevelEnvVar} (default: Warning; --verbose = Debug, --quiet = None).";
+        }
+
+        if (msg.Contains("log format", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("--log-format", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains(CliLogLevelResolver.LogFormatEnvVar, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"Use '--log-format <{CliLogLevelResolver.ValidFormatsDisplay}>' or set {CliLogLevelResolver.LogFormatEnvVar} (logs always write to stderr).";
+        }
 
         if (msg.Contains("Interactive selection", StringComparison.OrdinalIgnoreCase) ||
             msg.Contains("--select", StringComparison.OrdinalIgnoreCase))

@@ -557,6 +557,210 @@ public sealed class CliSubcommandTests : IDisposable
         Assert.Contains("hint :", errText);
     }
 
+    [Fact]
+    public void Execute_LogLevelCliFlagEnvVarAndConfig_ControlsStderrVerbosityAndMasksSecrets()
+    {
+        const string secretKey = "AIzaSyCliSubcmdSecret9012";
+
+        // 1. --log-level debug emits DBG/INF logs to stderr while keeping stdout clean and masking secrets
+        using var debugOut = new StringWriter();
+        using var debugErr = new StringWriter();
+        var debugExit = Program.Execute(
+            [
+                "-w", _tempRoot,
+                "draft", "Enable Structured Logging",
+                "-t", "01",
+                "--preview",
+                "--offline",
+                "--api-key", secretKey,
+                "--log-level", "debug",
+                "-p", _promptFile
+            ],
+            new StringReader(string.Empty),
+            debugOut,
+            debugErr,
+            clipboardService: null,
+            environmentReader: _ => null);
+
+        Assert.Equal(0, debugExit);
+        var debugStdout = debugOut.ToString();
+        var debugStderr = debugErr.ToString();
+        Assert.Contains("Smart Backlog Assistant — Markdown Outcome", debugStdout);
+        Assert.DoesNotContain(" DBG]", debugStdout);
+        Assert.DoesNotContain(" INF]", debugStdout);
+        Assert.DoesNotContain(secretKey, debugStdout);
+
+        Assert.Contains(" DBG]", debugStderr);
+        Assert.Contains(" INF]", debugStderr);
+        Assert.DoesNotContain(" TRC]", debugStderr);
+        Assert.Contains("****9012", debugStderr);
+        Assert.DoesNotContain(secretKey, debugStderr);
+
+        // 2. --log-level warning suppresses DBG/INF/TRC logs on stderr
+        using var warnOut = new StringWriter();
+        using var warnErr = new StringWriter();
+        var warnExit = Program.Execute(
+            ["-w", _tempRoot, "draft", "Enable Structured Logging", "-t", "01", "--preview", "--offline", "--log-level", "warning", "-p", _promptFile],
+            new StringReader(string.Empty),
+            warnOut,
+            warnErr,
+            clipboardService: null,
+            environmentReader: _ => null);
+
+        Assert.Equal(0, warnExit);
+        Assert.Empty(warnErr.ToString());
+
+        // 3. SBA_LOG_LEVEL=trace and SBA_LOG_FORMAT=json emit valid NDJSON on stderr with secret masking
+        var env = new Dictionary<string, string?>
+        {
+            [CliLogLevelResolver.LogLevelEnvVar] = "trace",
+            [CliLogLevelResolver.LogFormatEnvVar] = "json",
+            [GeminiSecretProvider.PrimaryEnvVar] = secretKey
+        };
+        using var envOut = new StringWriter();
+        using var envErr = new StringWriter();
+        var envExit = Program.Execute(
+            ["-w", _tempRoot, "draft", "Enable Structured Logging", "-t", "01", "--preview", "--offline", "-p", _promptFile],
+            new StringReader(string.Empty),
+            envOut,
+            envErr,
+            clipboardService: null,
+            environmentReader: key => env.TryGetValue(key, out var val) ? val : null);
+
+        Assert.Equal(0, envExit);
+        var ndjsonLines = envErr.ToString()
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+        Assert.NotEmpty(ndjsonLines);
+        Assert.Contains(ndjsonLines, l => l.Contains("\"level\":\"Trace\""));
+        Assert.All(ndjsonLines, line =>
+        {
+            Assert.DoesNotContain(secretKey, line);
+            using var doc = System.Text.Json.JsonDocument.Parse(line);
+            Assert.True(doc.RootElement.TryGetProperty("timestamp", out _));
+            Assert.True(doc.RootElement.TryGetProperty("level", out _));
+            Assert.True(doc.RootElement.TryGetProperty("category", out _));
+            Assert.True(doc.RootElement.TryGetProperty("message", out _));
+        });
+    }
+
+    [Fact]
+    public void Execute_PreviewSelectWithDebugAndTraceJsonLogging_KeepsStdoutStrictlyCleanForPipelines()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempRoot);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        File.WriteAllText(
+            Path.Combine(dirs.OutputDirectory, "type02-logging-pipeline.md"),
+            "# [Jira - schedule (Type02)] Clean Pipeline Title\n\n## Description\n**Objective:** Verify clean stdout piping.");
+
+        var clipboard = new RecordingClipboardService();
+        using var stdout = new StringWriter();
+        using var stderr = new StringWriter();
+
+        var exitCode = Program.Execute(
+            ["-w", _tempRoot, "preview", "--select", "--log-level", "trace", "--log-format", "json"],
+            new StringReader("title\n"),
+            stdout,
+            stderr,
+            clipboard,
+            environmentReader: _ => null);
+
+        Assert.Equal(0, exitCode);
+        Assert.Equal("Clean Pipeline Title", stdout.ToString().Trim());
+        Assert.Equal("Clean Pipeline Title", Assert.Single(clipboard.CopiedTexts));
+
+        var stderrText = stderr.ToString();
+        Assert.Contains("\"level\":\"Debug\"", stderrText);
+        Assert.Contains("Previewing saved Markdown", stderrText);
+        Assert.Contains("Select output format or Jira field to copy:", stderrText);
+    }
+
+    [Fact]
+    public void Execute_ConfigAndStatus_PersistDisplayAndResetLogLevelAndFormat()
+    {
+        using var cfgOut = new StringWriter();
+        using var cfgErr = new StringWriter();
+        Assert.Equal(0, Program.Execute(
+            ["-w", _tempRoot, "config", "--log-level", "information", "--log-format", "json"],
+            new StringReader(string.Empty),
+            cfgOut,
+            cfgErr,
+            clipboardService: null,
+            environmentReader: _ => null));
+
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var settingsService = new CliSettingsService();
+        var persisted = settingsService.Load(workspaceService.Resolve(_tempRoot));
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Information, persisted.LogLevel);
+        Assert.Equal(LogOutputFormat.Json, persisted.LogFormat);
+        Assert.Contains("Information", cfgOut.ToString());
+        Assert.Contains("json (stderr)", cfgOut.ToString());
+
+        // `status` reflects persisted settings.json log level and format
+        using var statusOut = new StringWriter();
+        using var statusErr = new StringWriter();
+        Assert.Equal(0, Program.Execute(
+            ["-w", _tempRoot, "status"],
+            new StringReader(string.Empty),
+            statusOut,
+            statusErr,
+            clipboardService: null,
+            environmentReader: _ => null));
+
+        var statusText = statusOut.ToString();
+        Assert.Contains("Information (settings.json)", statusText);
+        Assert.Contains("json -> stderr (settings.json)", statusText);
+
+        // `config --log-level default --log-format default` clears overrides cleanly
+        using var resetOut = new StringWriter();
+        using var resetErr = new StringWriter();
+        Assert.Equal(0, Program.Execute(
+            ["-w", _tempRoot, "config", "--log-level", "default", "--log-format", "default"],
+            new StringReader(string.Empty),
+            resetOut,
+            resetErr,
+            clipboardService: null,
+            environmentReader: _ => null));
+
+        var afterReset = settingsService.Load(workspaceService.Resolve(_tempRoot));
+        Assert.Null(afterReset.LogLevel);
+        Assert.Null(afterReset.LogFormat);
+    }
+
+    [Fact]
+    public void Execute_WithInvalidLogLevelOrQuietSuppression_BehavesDeterministically()
+    {
+        using var invalidOut = new StringWriter();
+        using var invalidErr = new StringWriter();
+        var invalidExit = Program.Execute(
+            ["-w", _tempRoot, "status", "--log-level", "super-noisy"],
+            new StringReader(string.Empty),
+            invalidOut,
+            invalidErr,
+            clipboardService: null,
+            environmentReader: _ => null);
+
+        Assert.Equal(1, invalidExit);
+        Assert.Contains("error: Invalid log level 'super-noisy'", invalidErr.ToString());
+        Assert.Contains("hint :", invalidErr.ToString());
+        Assert.Contains("SBA_LOG_LEVEL", invalidErr.ToString());
+
+        // --quiet suppresses diagnostic ERR log entry while still rendering concise actionable error
+        using var quietOut = new StringWriter();
+        using var quietErr = new StringWriter();
+        var quietExit = Program.Execute(
+            ["-w", _tempRoot, "draft", "--quiet"],
+            new StringReader(string.Empty),
+            quietOut,
+            quietErr,
+            clipboardService: null,
+            environmentReader: _ => null);
+
+        Assert.Equal(1, quietExit);
+        Assert.Contains("error: Missing goal or title for 'draft'", quietErr.ToString());
+        Assert.DoesNotContain(" ERR]", quietErr.ToString());
+    }
+
     private sealed class RecordingClipboardService : IClipboardService
     {
         public List<string> CopiedTexts { get; } = [];

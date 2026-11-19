@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using SmartBacklogAssistant.Domain;
 using SmartBacklogAssistant.Services;
 
@@ -24,6 +26,7 @@ public sealed class CliMenuRunner
         ThemeSelector,
         ProviderSelector,
         ModelSelector,
+        LogLevelSelector,
         PreviewOutcome,
         Exit
     }
@@ -36,7 +39,10 @@ public sealed class CliMenuRunner
     private readonly CliSettingsService _settingsService;
     private readonly WorkspaceDiagnosticService _diagnosticService;
     private readonly IClipboardService _clipboardService;
-    private readonly RawDataCollector _collector = new();
+    private readonly StderrLoggerFactory? _loggerFactory;
+    private readonly ILogger<CliMenuRunner> _logger;
+    private readonly Func<string, string?> _environmentReader;
+    private readonly RawDataCollector _collector;
     private IReadOnlyList<string> _lastMarkdownDocuments = [];
     private string? _lastSupplementalUserStory;
     private string? _lastSupplementalDescription;
@@ -57,7 +63,9 @@ public sealed class CliMenuRunner
         AiModelOrchestrator? orchestrator = null,
         CliSettingsService? settingsService = null,
         WorkspaceDiagnosticService? diagnosticService = null,
-        IClipboardService? clipboardService = null)
+        IClipboardService? clipboardService = null,
+        StderrLoggerFactory? loggerFactory = null,
+        Func<string, string?>? environmentReader = null)
     {
         _workflow = workflow ?? throw new ArgumentNullException(nameof(workflow));
         _workspaceService = workspaceService ?? new WorkspacePathService();
@@ -66,13 +74,18 @@ public sealed class CliMenuRunner
         _orchestrator = orchestrator ?? new AiModelOrchestrator();
         _settingsService = settingsService ?? new CliSettingsService();
         _clipboardService = clipboardService ?? new OsClipboardService();
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory?.CreateLogger<CliMenuRunner>() ?? NullLogger<CliMenuRunner>.Instance;
+        _environmentReader = environmentReader ?? Environment.GetEnvironmentVariable;
+        _collector = new RawDataCollector(loggerFactory?.CreateLogger<RawDataCollector>());
         _diagnosticService = diagnosticService ?? new WorkspaceDiagnosticService(
             _workspaceService,
             _runtimeEnvService,
             _secretProvider,
             _settingsService,
             _orchestrator,
-            _workflow.ProviderOrchestrator);
+            _workflow.ProviderOrchestrator,
+            _environmentReader);
     }
 
     public int Run(WorkflowOptions baseOptions, TextReader input, TextWriter output)
@@ -99,7 +112,9 @@ public sealed class CliMenuRunner
             ModelName = baseOptions.ModelName ?? persistedSettings.ModelName,
             GeminiLive = baseOptions.GeminiLive ?? persistedSettings.GeminiLive ?? true,
             PreferredProvider = resolvedProvider,
-            DefaultVerbosity = persistedSettings.DefaultVerbosity
+            DefaultVerbosity = persistedSettings.DefaultVerbosity,
+            LogLevel = persistedSettings.LogLevel,
+            LogFormat = persistedSettings.LogFormat
         };
         var resolvedVerbosity = baseOptions.Verbosity != OutcomeVerbosity.Balanced
             ? baseOptions.Verbosity
@@ -128,6 +143,8 @@ public sealed class CliMenuRunner
             Verbosity = resolvedVerbosity
         };
 
+        SyncActiveLogging(sessionOptions, currentSettings);
+
         var state = MenuState.Main;
         while (state != MenuState.Exit)
         {
@@ -142,6 +159,7 @@ public sealed class CliMenuRunner
                 MenuState.ThemeSelector => ShowThemeMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.ProviderSelector => ShowProviderMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.ModelSelector => ShowModelMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
+                MenuState.LogLevelSelector => ShowLogLevelMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.PreviewOutcome => ShowPreviewOutcomeMenu(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color, _subMenuReturnState, _previewReturnToOrchestrator),
                 _ => MenuState.Exit
             };
@@ -319,10 +337,11 @@ public sealed class CliMenuRunner
             ? RuntimeEnvironmentService.DefaultCopilotModel
             : "auto");
 
+        var activeLogging = ResolveActiveLogging(sessionOptions, currentSettings);
         color.WriteLine();
         color.WriteHeader("=== Backlog Assisted Orchestrator ===");
         color.WriteMuted($"  Workspace : In ./in ({inputFiles.Count} queued) │ Out ./out ({savedFiles.Count} saved) │ JSON: {(currentSettings.JsonFileOut ? "ON" : "OFF")}");
-        color.WriteMuted($"  Pipeline  : {providerCode} ({modelLabel}) │ Live: {(currentSettings.GeminiLive == true ? "ON" : "OFF")} │ Verbosity: {DescriptionFormatter.FormatVerbosityLabel(sessionOptions.Verbosity)} │ Theme: {ConsoleColorWriter.GetThemeCode(currentSettings.Theme)}");
+        color.WriteMuted($"  Pipeline  : {providerCode} ({modelLabel}) │ Live: {(currentSettings.GeminiLive == true ? "ON" : "OFF")} │ Verbosity: {DescriptionFormatter.FormatVerbosityLabel(sessionOptions.Verbosity)} │ Log: {CliLogLevelResolver.FormatLogLevelDisplay(activeLogging.Level)} │ Theme: {ConsoleColorWriter.GetThemeCode(currentSettings.Theme)}");
         if (_lastMarkdownDocuments.Count > 0)
         {
             var lastParsed = MarkdownOutcomeRenderer.ParseMarkdown(_lastMarkdownDocuments[0]);
@@ -734,11 +753,100 @@ public sealed class CliMenuRunner
 
                 case "/verbose":
                 {
+                    var activeLogging = ResolveActiveLogging(sessionOptions, currentSettings);
+                    var currentlyVerbose = activeLogging.Level <= LogLevel.Debug;
                     var nextVerbose = args.Length == 0
-                        ? !sessionOptions.Verbose
-                        : ParseBooleanToggle(args[0], sessionOptions.Verbose);
-                    sessionOptions = sessionOptions with { Verbose = nextVerbose };
-                    color.WriteSuccess($"Verbose pipeline diagnostics are now {(nextVerbose ? "ON" : "OFF")}.");
+                        ? !currentlyVerbose
+                        : ParseBooleanToggle(args[0], currentlyVerbose);
+                    sessionOptions = nextVerbose
+                        ? sessionOptions with { Verbose = true, Quiet = false, LogLevelInput = "debug" }
+                        : sessionOptions with { Verbose = false, Quiet = false, LogLevelInput = null };
+                    var resolvedAfter = SyncActiveLogging(sessionOptions, currentSettings);
+                    color.WriteSuccess(
+                        $"Verbose pipeline diagnostics are now {(nextVerbose ? "ON" : "OFF")} " +
+                        $"(Log Level: {CliLogLevelResolver.FormatLogLevelDisplay(resolvedAfter.Level)} -> stderr).");
+                    return returnState;
+                }
+
+                case "/log-level" or "/loglevel" or "/log":
+                {
+                    if (args.Length == 0)
+                    {
+                        _subMenuReturnState = returnState;
+                        return MenuState.LogLevelSelector;
+                    }
+
+                    var token = args[0].Trim();
+                    if (token.Equals("default", StringComparison.OrdinalIgnoreCase) ||
+                        token.Equals("reset", StringComparison.OrdinalIgnoreCase))
+                    {
+                        currentSettings = currentSettings with { LogLevel = null };
+                        sessionOptions = sessionOptions with { LogLevelInput = null, Verbose = false, Quiet = false };
+                        var resolved = SyncActiveLogging(sessionOptions, currentSettings);
+                        var savedResetPath = _settingsService.Save(baseWorkspace, currentSettings);
+                        color.WriteSuccess(
+                            $"Log Level reset to {CliLogLevelResolver.FormatLogLevelDisplay(resolved.Level)} ({resolved.LevelSource}, stderr). " +
+                            $"Saved settings to '{savedResetPath}'.");
+                        return returnState;
+                    }
+
+                    if (!CliLogLevelResolver.TryParseLogLevel(token, out var parsedLevel))
+                    {
+                        color.WriteWarning($"  [!] Unknown log level '{args[0]}'. Choose {CliLogLevelResolver.ValidLevelsDisplay}.");
+                        return returnState;
+                    }
+
+                    currentSettings = currentSettings with { LogLevel = parsedLevel };
+                    sessionOptions = sessionOptions with
+                    {
+                        LogLevelInput = CliLogLevelResolver.FormatLogLevelCode(parsedLevel),
+                        Verbose = parsedLevel <= LogLevel.Debug,
+                        Quiet = parsedLevel == LogLevel.None
+                    };
+                    SyncActiveLogging(sessionOptions, currentSettings);
+                    var savedLevelPath = _settingsService.Save(baseWorkspace, currentSettings);
+                    color.WriteSuccess(
+                        $"Log Level is now {CliLogLevelResolver.FormatLogLevelDisplay(parsedLevel)} " +
+                        $"({CliLogLevelResolver.FormatLogFormatCode(ResolveActiveLogging(sessionOptions, currentSettings).Format)} -> stderr). " +
+                        $"Saved settings to '{savedLevelPath}'.");
+                    return returnState;
+                }
+
+                case "/log-format" or "/logformat":
+                {
+                    var activeLogging = ResolveActiveLogging(sessionOptions, currentSettings);
+                    LogOutputFormat nextFormat;
+                    if (args.Length == 0)
+                    {
+                        nextFormat = activeLogging.Format == LogOutputFormat.Text
+                            ? LogOutputFormat.Json
+                            : LogOutputFormat.Text;
+                    }
+                    else if (args[0].Trim().Equals("default", StringComparison.OrdinalIgnoreCase) ||
+                             args[0].Trim().Equals("reset", StringComparison.OrdinalIgnoreCase))
+                    {
+                        currentSettings = currentSettings with { LogFormat = null };
+                        sessionOptions = sessionOptions with { LogFormatInput = null };
+                        var resetResolved = SyncActiveLogging(sessionOptions, currentSettings);
+                        var savedResetFormatPath = _settingsService.Save(baseWorkspace, currentSettings);
+                        color.WriteSuccess(
+                            $"Log Format reset to {CliLogLevelResolver.FormatLogFormatCode(resetResolved.Format)} ({resetResolved.FormatSource}, stderr). " +
+                            $"Saved settings to '{savedResetFormatPath}'.");
+                        return returnState;
+                    }
+                    else if (!CliLogLevelResolver.TryParseLogFormat(args[0], out nextFormat))
+                    {
+                        color.WriteWarning($"  [!] Unknown log format '{args[0]}'. Choose {CliLogLevelResolver.ValidFormatsDisplay}.");
+                        return returnState;
+                    }
+
+                    currentSettings = currentSettings with { LogFormat = nextFormat };
+                    sessionOptions = sessionOptions with { LogFormatInput = CliLogLevelResolver.FormatLogFormatCode(nextFormat) };
+                    SyncActiveLogging(sessionOptions, currentSettings);
+                    var savedFormatPath = _settingsService.Save(baseWorkspace, currentSettings);
+                    color.WriteSuccess(
+                        $"Log Format is now {CliLogLevelResolver.FormatLogFormatCode(nextFormat)} (stderr). " +
+                        $"Saved settings to '{savedFormatPath}'.");
                     return returnState;
                 }
 
@@ -1123,12 +1231,50 @@ public sealed class CliMenuRunner
                     DefaultVerbosity = DescriptionFormatter.ResolveVerbosity(verbosityArg, updated.DefaultVerbosity ?? OutcomeVerbosity.Balanced)
                 };
             }
+
+            var logLevelArg = GetInlineFlagValue(args, "--log-level");
+            if (!string.IsNullOrWhiteSpace(logLevelArg))
+            {
+                if (logLevelArg.Equals("default", StringComparison.OrdinalIgnoreCase) ||
+                    logLevelArg.Equals("reset", StringComparison.OrdinalIgnoreCase))
+                {
+                    updated = updated with { LogLevel = null };
+                }
+                else
+                {
+                    updated = updated with
+                    {
+                        LogLevel = CliLogLevelResolver.ParseLogLevelOrThrow(logLevelArg, "--log-level")
+                    };
+                }
+            }
+
+            var logFormatArg = GetInlineFlagValue(args, "--log-format");
+            if (!string.IsNullOrWhiteSpace(logFormatArg))
+            {
+                if (logFormatArg.Equals("default", StringComparison.OrdinalIgnoreCase) ||
+                    logFormatArg.Equals("reset", StringComparison.OrdinalIgnoreCase))
+                {
+                    updated = updated with { LogFormat = null };
+                }
+                else
+                {
+                    updated = updated with
+                    {
+                        LogFormat = CliLogLevelResolver.ParseLogFormatOrThrow(logFormatArg, "--log-format")
+                    };
+                }
+            }
         }
 
         currentSettings = updated;
         workspace = _workspaceService.ApplySettings(baseWorkspace, currentSettings);
         Directory.CreateDirectory(workspace.InputDirectory);
         Directory.CreateDirectory(workspace.OutputDirectory);
+
+        var resetRequested = args.Contains("--reset", StringComparer.OrdinalIgnoreCase);
+        var updatedLogLevelArg = GetInlineFlagValue(args, "--log-level");
+        var updatedLogFormatArg = GetInlineFlagValue(args, "--log-format");
 
         color.Theme = currentSettings.Theme;
         sessionOptions = sessionOptions with
@@ -1140,8 +1286,30 @@ public sealed class CliMenuRunner
             ModelName = currentSettings.ModelName,
             ProviderInput = RuntimeEnvironmentService.FormatProviderCode(
                 currentSettings.PreferredProvider ?? AiProviderType.GoogleGemini),
-            Verbosity = currentSettings.DefaultVerbosity ?? OutcomeVerbosity.Balanced
+            Verbosity = currentSettings.DefaultVerbosity ?? OutcomeVerbosity.Balanced,
+            LogLevelInput = resetRequested
+                ? null
+                : !string.IsNullOrWhiteSpace(updatedLogLevelArg)
+                    ? (currentSettings.LogLevel is { } persistedLvl ? CliLogLevelResolver.FormatLogLevelCode(persistedLvl) : null)
+                    : sessionOptions.LogLevelInput,
+            LogFormatInput = resetRequested
+                ? null
+                : !string.IsNullOrWhiteSpace(updatedLogFormatArg)
+                    ? (currentSettings.LogFormat is { } persistedFmt ? CliLogLevelResolver.FormatLogFormatCode(persistedFmt) : null)
+                    : sessionOptions.LogFormatInput,
+            Verbose = resetRequested
+                ? false
+                : !string.IsNullOrWhiteSpace(updatedLogLevelArg)
+                    ? currentSettings.LogLevel is { } lvl && lvl <= LogLevel.Debug
+                    : sessionOptions.Verbose,
+            Quiet = resetRequested
+                ? false
+                : !string.IsNullOrWhiteSpace(updatedLogLevelArg)
+                    ? currentSettings.LogLevel == LogLevel.None
+                    : sessionOptions.Quiet
         };
+
+        SyncActiveLogging(sessionOptions, currentSettings);
 
         var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
         color.WriteSuccess($"✓ Configuration updated and saved to '{savedPath}'.");
@@ -1913,6 +2081,9 @@ public sealed class CliMenuRunner
         var (valueBadgeFg, valueBadgeBg) = color.GetValueBadgeColors();
         var providerModelBadge = $"{RuntimeEnvironmentService.FormatProviderCode(activeProvider)} • {currentSettings.ModelName ?? "automatic"}";
 
+        var activeLogging = ResolveActiveLogging(sessionOptions, currentSettings);
+        var logLevelBadge = $"{CliLogLevelResolver.FormatLogLevelDisplay(activeLogging.Level)} • {CliLogLevelResolver.FormatLogFormatCode(activeLogging.Format)}";
+
         var options = new List<HighlightedMenuOption>
         {
             new("1", "Select AI Provider", providerModelBadge, ConsoleColor.Black, ConsoleColor.Cyan, "Choose AI provider & model submenu (with recommendations)", IsSelectedValue: true),
@@ -1923,6 +2094,7 @@ public sealed class CliMenuRunner
             new("6", "Inspect Directories", null, null, null, "List files & byte sizes in ./in and ./out"),
             new("7", "Runtime & AI Diagnostics", null, null, null, "Windows/WSL paths, env vars, & status table"),
             new("8", "View settings.json", null, null, null, "Show persisted JSON configuration"),
+            new("9", "Select Log Level", logLevelBadge, valueBadgeFg, valueBadgeBg, "Trace..None (Quiet) & stderr text/json (/log-level)", IsSelectedValue: true),
             new("0", BackToLabel(returnState))
         };
 
@@ -1931,7 +2103,7 @@ public sealed class CliMenuRunner
         var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
             options,
             initialIndex,
-            "Select option (0-8, ↑/↓, b=back, q=quit): ",
+            "Select option (0-9, ↑/↓, b=back, q=quit): ",
             input,
             color);
         if (choice is null)
@@ -1956,7 +2128,13 @@ public sealed class CliMenuRunner
             return MenuState.ModelSelector;
         }
 
-        if (normalized is "1" or "2" or "3" or "4" or "5" or "6" or "7" or "8")
+        if (normalized is "l" or "log" or "log-level" or "logging")
+        {
+            _lastSelectedSettingsKey = "9";
+            return MenuState.LogLevelSelector;
+        }
+
+        if (normalized is "1" or "2" or "3" or "4" or "5" or "6" or "7" or "8" or "9")
         {
             _lastSelectedSettingsKey = normalized;
         }
@@ -2013,9 +2191,134 @@ public sealed class CliMenuRunner
             case "8":
                 DisplayPersistedSettingsJson(baseWorkspace, color);
                 return MenuState.Settings;
+            case "9":
+                return MenuState.LogLevelSelector;
             default:
-                return WarnAndStay(color, choice, "0-8, b=back, or q=quit", MenuState.Settings);
+                return WarnAndStay(color, choice, "0-9, b=back, or q=quit", MenuState.Settings);
         }
+    }
+
+    private MenuState ShowLogLevelMenu(
+        WorkspaceDirectories baseWorkspace,
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        TextReader input,
+        ConsoleColorWriter color)
+    {
+        var active = ResolveActiveLogging(sessionOptions, currentSettings);
+        var nextFormatLabel = active.Format == LogOutputFormat.Text ? "json" : "text";
+
+        color.WriteLine();
+        color.WriteHeader("=== Diagnostic Logging Configuration (stderr) ===");
+        color.WriteMuted($"Active Level  : {CliLogLevelResolver.FormatLogLevelDisplay(active.Level)} ({active.LevelSource})");
+        color.WriteMuted($"Active Format : {CliLogLevelResolver.FormatLogFormatCode(active.Format)} ({active.FormatSource}) — routed to stderr (stdout stays clean)");
+        color.WriteLine();
+
+        var options = new List<HighlightedMenuOption>
+        {
+            BuildSelectableValueOption("1", "Trace", "Deep diagnostic traces including payload/HTTP metrics", active.Level == LogLevel.Trace),
+            BuildSelectableValueOption("2", "Debug", "Pipeline telemetry, runtime banner & provider diagnostics (--verbose)", active.Level == LogLevel.Debug),
+            BuildSelectableValueOption("3", "Information", "Stage lifecycle milestones (collect, expand, generate, complete)", active.Level == LogLevel.Information),
+            BuildSelectableValueOption("4", "Warning (Default)", "Degraded fallbacks & errors only — quiet normal runs", active.Level == LogLevel.Warning),
+            BuildSelectableValueOption("5", "Error", "Failures & unhandled exceptions only", active.Level == LogLevel.Error),
+            BuildSelectableValueOption("6", "Critical", "Fatal errors only", active.Level == LogLevel.Critical),
+            BuildSelectableValueOption("7", "None (Quiet)", "Suppress all diagnostic log events (--quiet)", active.Level == LogLevel.None),
+            new("8", $"Toggle stderr Log Format ({CliLogLevelResolver.FormatLogFormatCode(active.Format)} -> {nextFormatLabel})", CliLogLevelResolver.FormatLogFormatCode(active.Format), ConsoleColor.Black, ConsoleColor.Cyan, "Switch between human-readable text and structured NDJSON"),
+            new("0", "Back to Workspace & Settings")
+        };
+
+        var activeIndex = active.Level switch
+        {
+            LogLevel.Trace => 0,
+            LogLevel.Debug => 1,
+            LogLevel.Information => 2,
+            LogLevel.Warning => 3,
+            LogLevel.Error => 4,
+            LogLevel.Critical => 5,
+            LogLevel.None => 6,
+            _ => 3
+        };
+
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            activeIndex,
+            "Select log level (0-8, ↑/↓, b=back, q=quit): ",
+            input,
+            color);
+        if (choice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var normalized = choice.Trim().ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back")
+        {
+            return MenuState.Settings;
+        }
+
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
+        }
+
+        if (normalized is "8" or "format" or "json" or "text")
+        {
+            var nextFormat = normalized switch
+            {
+                "json" => LogOutputFormat.Json,
+                "text" => LogOutputFormat.Text,
+                _ => active.Format == LogOutputFormat.Text ? LogOutputFormat.Json : LogOutputFormat.Text
+            };
+
+            currentSettings = currentSettings with { LogFormat = nextFormat };
+            sessionOptions = sessionOptions with { LogFormatInput = CliLogLevelResolver.FormatLogFormatCode(nextFormat) };
+            SyncActiveLogging(sessionOptions, currentSettings);
+            var savedFmtPath = _settingsService.Save(baseWorkspace, currentSettings);
+            color.WriteSuccess($"Log Format is now {CliLogLevelResolver.FormatLogFormatCode(nextFormat)} (stderr). Saved settings to '{savedFmtPath}'.");
+            return MenuState.LogLevelSelector;
+        }
+
+        LogLevel? selectedLevel = normalized switch
+        {
+            "1" or "trace" or "trc" => LogLevel.Trace,
+            "2" or "debug" or "dbg" or "verbose" => LogLevel.Debug,
+            "3" or "information" or "info" or "inf" => LogLevel.Information,
+            "4" or "warning" or "warn" or "wrn" => LogLevel.Warning,
+            "5" or "error" or "err" => LogLevel.Error,
+            "6" or "critical" or "crit" => LogLevel.Critical,
+            "7" or "none" or "quiet" or "off" => LogLevel.None,
+            _ => null
+        };
+
+        if (selectedLevel is null)
+        {
+            return WarnAndStay(color, choice, "0-8, level name, b=back, or q=quit", MenuState.LogLevelSelector);
+        }
+
+        currentSettings = currentSettings with { LogLevel = selectedLevel.Value };
+        sessionOptions = sessionOptions with
+        {
+            LogLevelInput = CliLogLevelResolver.FormatLogLevelCode(selectedLevel.Value),
+            Verbose = selectedLevel.Value <= LogLevel.Debug,
+            Quiet = selectedLevel.Value == LogLevel.None
+        };
+        SyncActiveLogging(sessionOptions, currentSettings);
+        var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
+        color.WriteSuccess(
+            $"Log Level is now {CliLogLevelResolver.FormatLogLevelDisplay(selectedLevel.Value)} " +
+            $"({CliLogLevelResolver.FormatLogFormatCode(active.Format)} -> stderr). Saved settings to '{savedPath}'.");
+        return MenuState.Settings;
+    }
+
+    private ResolvedLoggingConfig ResolveActiveLogging(WorkflowOptions sessionOptions, CliSettings currentSettings) =>
+        CliLogLevelResolver.ResolveEffectiveLogging(sessionOptions, currentSettings, _environmentReader);
+
+    private ResolvedLoggingConfig SyncActiveLogging(WorkflowOptions sessionOptions, CliSettings currentSettings)
+    {
+        var resolved = ResolveActiveLogging(sessionOptions, currentSettings);
+        _loggerFactory?.Reconfigure(resolved.Level, resolved.Format);
+        LogEvents.ReplLoggingReconfigured(_logger, resolved.Level, CliLogLevelResolver.FormatLogFormatCode(resolved.Format));
+        return resolved;
     }
 
     private static List<HighlightedMenuOption> BuildVerbosityOptions(
@@ -2602,6 +2905,7 @@ public sealed class CliMenuRunner
         var themeCode = ConsoleColorWriter.GetThemeCode(currentSettings.Theme);
         var liveOn = currentSettings.GeminiLive == true;
         var jsonOn = currentSettings.JsonFileOut;
+        var activeLogging = ResolveActiveLogging(sessionOptions, currentSettings);
 
         color.WriteLine();
         color.WriteHeader("=== Workspace & Settings ===");
@@ -2617,6 +2921,8 @@ public sealed class CliMenuRunner
         color.WriteColored(jsonOn ? "ON" : "OFF", jsonOn ? ConsoleColor.Green : ConsoleColor.DarkYellow);
         color.WriteColored(" │ Verbosity: ", ConsoleColor.DarkGray);
         color.WriteColored(DescriptionFormatter.FormatVerbosityLabel(sessionOptions.Verbosity), ConsoleColor.Yellow);
+        color.WriteColored(" │ Log: ", ConsoleColor.DarkGray);
+        color.WriteColored($"{CliLogLevelResolver.FormatLogLevelDisplay(activeLogging.Level)} ({CliLogLevelResolver.FormatLogFormatCode(activeLogging.Format)})", CliLogLevelResolver.GetLogLevelColor(activeLogging.Level));
         color.WriteColored(" │ Theme: ", ConsoleColor.DarkGray);
         color.WriteLineColored(themeCode, color.GetOptionKeyColor());
 
@@ -3611,8 +3917,10 @@ public sealed class CliMenuRunner
         color.WriteLine("  /preview       Preview active session, './out/*.md', './out/*.json', or './in' notes: /preview [filename]");
         color.WriteLine("  /copy          Copy outcome or field: /copy [simple|raw|md|clean|title|story|desc|ac|alt1..]");
         color.WriteLine("  /verbosity     Set persisted default verbosity: /verbosity [min|bal|det]");
+        color.WriteLine("  /log-level     Set stderr log severity: /log-level [trace|debug|info|warning|error|critical|none|default]");
+        color.WriteLine("  /log-format    Switch stderr log serialization: /log-format [text|json|default]");
         color.WriteLine("  /status        Show crisp WSL2/Windows paths, queued files, & AI provider readiness table");
-        color.WriteLine("  /config        Show or update settings: /config [--json on|off] [--in <dir>] [--out <dir>] [--verbosity min|bal|det]");
+        color.WriteLine("  /config        Show or update settings: /config [--json on|off] [--in <dir>] [--out <dir>] [--verbosity min|bal|det] [--log-level <lvl>] [--log-format text|json]");
         color.WriteLine("  /provider      Switch AI orchestrator provider (gemini, copilot-sdk, azure, claude, manual)");
         color.WriteLine("  /models        List available models for the active provider");
         color.WriteLine("  /theme         Switch CLI theme (agy, uv, kubectl)");

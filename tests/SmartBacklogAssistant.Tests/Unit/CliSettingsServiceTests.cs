@@ -55,6 +55,38 @@ public sealed class CliSettingsServiceTests : IDisposable
         Assert.False(settings.JsonFileOut);
     }
 
+    [Fact]
+    public void SaveAndLoad_PersistsLogLevelAndLogFormatAsCamelCaseStringsAndSupportsLegacyJson()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var workspace = workspaceService.Resolve(_tempRoot);
+        var sut = new CliSettingsService();
+
+        var savedPath = sut.Save(
+            workspace,
+            new CliSettings(
+                JsonFileOut: false,
+                Theme: CliThemeStyle.Kubectl,
+                LogLevel: Microsoft.Extensions.Logging.LogLevel.Debug,
+                LogFormat: LogOutputFormat.Json));
+
+        var rawJson = File.ReadAllText(savedPath);
+        Assert.Contains("\"logLevel\": \"debug\"", rawJson);
+        Assert.Contains("\"logFormat\": \"json\"", rawJson);
+
+        var loaded = sut.Load(workspace);
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Debug, loaded.LogLevel);
+        Assert.Equal(LogOutputFormat.Json, loaded.LogFormat);
+
+        // Legacy settings.json without logLevel/logFormat continues to deserialize cleanly
+        File.WriteAllText(savedPath, """{"jsonFileOut":true,"theme":"uv"}""");
+        var legacy = sut.Load(workspace);
+        Assert.True(legacy.JsonFileOut);
+        Assert.Equal(CliThemeStyle.Uv, legacy.Theme);
+        Assert.Null(legacy.LogLevel);
+        Assert.Null(legacy.LogFormat);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_tempRoot))

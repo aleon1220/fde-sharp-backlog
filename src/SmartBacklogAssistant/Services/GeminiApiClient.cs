@@ -1,6 +1,9 @@
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace SmartBacklogAssistant.Services;
 
@@ -27,10 +30,12 @@ public sealed class GeminiApiClient
 {
     private const string ApiRoot = "https://generativelanguage.googleapis.com/v1beta/";
     private readonly HttpClient _httpClient;
+    private readonly ILogger<GeminiApiClient> _logger;
 
-    public GeminiApiClient(HttpClient? httpClient = null)
+    public GeminiApiClient(HttpClient? httpClient = null, ILogger<GeminiApiClient>? logger = null)
     {
         _httpClient = httpClient ?? new HttpClient();
+        _logger = logger ?? NullLogger<GeminiApiClient>.Instance;
     }
 
     public IReadOnlyList<GeminiModel> ListGenerateContentModels(string apiKey) =>
@@ -171,17 +176,30 @@ public sealed class GeminiApiClient
             apiKey);
         request.Content = new StringContent(requestBody, Encoding.UTF8, "application/json");
 
+        var endpointPath = request.RequestUri?.AbsolutePath ?? "generateContent";
+        LogEvents.GeminiHttpRequest(_logger, request.Method.Method, endpointPath);
+        var sw = Stopwatch.StartNew();
         using var response = _httpClient.SendAsync(request).GetAwaiter().GetResult();
         var responseBody = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        sw.Stop();
+        LogEvents.GeminiHttpResponse(_logger, request.Method.Method, endpointPath, (int)response.StatusCode, responseBody.Length, sw.ElapsedMilliseconds);
 
         if (!response.IsSuccessStatusCode)
         {
             if ((int)response.StatusCode is 401 or 403)
             {
+                LogEvents.GeminiHttpError(
+                    _logger,
+                    request.Method.Method,
+                    endpointPath,
+                    (int)response.StatusCode,
+                    response.ReasonPhrase ?? string.Empty,
+                    TrimPreview(responseBody));
                 throw new InvalidOperationException(
                     $"Gemini API request failed with HTTP {(int)response.StatusCode} ({response.ReasonPhrase}): {responseBody}");
             }
 
+            LogEvents.GeminiGroundingWarning(_logger, (int)response.StatusCode, response.ReasonPhrase ?? string.Empty);
             return new GeminiWebGroundingResult(
                 Summary: string.Empty,
                 Sources: [],
@@ -314,14 +332,39 @@ public sealed class GeminiApiClient
 
     private string Send(HttpRequestMessage request)
     {
+        var endpointPath = request.RequestUri?.AbsolutePath ?? "gemini";
+        LogEvents.GeminiHttpRequest(_logger, request.Method.Method, endpointPath);
+        var sw = Stopwatch.StartNew();
         using var response = _httpClient.SendAsync(request).GetAwaiter().GetResult();
         var responseBody = response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        sw.Stop();
+        LogEvents.GeminiHttpResponse(_logger, request.Method.Method, endpointPath, (int)response.StatusCode, responseBody.Length, sw.ElapsedMilliseconds);
         if (!response.IsSuccessStatusCode)
         {
+            LogEvents.GeminiHttpError(
+                _logger,
+                request.Method.Method,
+                endpointPath,
+                (int)response.StatusCode,
+                response.ReasonPhrase ?? string.Empty,
+                TrimPreview(responseBody));
             throw new InvalidOperationException(
                 $"Gemini API request failed with HTTP {(int)response.StatusCode} ({response.ReasonPhrase}): {responseBody}");
         }
 
         return responseBody;
+    }
+
+    private static string TrimPreview(string text, int maxLength = 240)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var singleLine = text.Replace("\r", " ").Replace("\n", " ").Trim();
+        return singleLine.Length <= maxLength
+            ? singleLine
+            : singleLine[..maxLength] + "...";
     }
 }

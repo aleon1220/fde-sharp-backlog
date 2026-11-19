@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using SmartBacklogAssistant.Domain;
 using SmartBacklogAssistant.Services;
 
@@ -33,7 +35,10 @@ public sealed record WorkflowOptions(
     bool? ExpandGoalContext = null,
     bool Verbose = false,
     bool ShowAlternatives = false,
-    OutcomeVerbosity Verbosity = OutcomeVerbosity.Balanced);
+    OutcomeVerbosity Verbosity = OutcomeVerbosity.Balanced,
+    string? LogLevelInput = null,
+    string? LogFormatInput = null,
+    bool Quiet = false);
 
 public sealed class AsIsV1Workflow
 {
@@ -57,6 +62,9 @@ public sealed class AsIsV1Workflow
     private readonly GeminiSecretProvider _secretProvider;
     private readonly GeminiApiClient _geminiApiClient;
     private readonly AiProviderOrchestrator _providerOrchestrator;
+    private readonly ILoggerFactory _loggerFactory;
+    private readonly ILogger<AsIsV1Workflow> _logger;
+    private readonly SecretRedactor? _secretRedactor;
 
     public AsIsV1Workflow(
         RawDataCollector collector,
@@ -66,7 +74,8 @@ public sealed class AsIsV1Workflow
         RuntimeEnvironmentService? runtimeEnvService = null,
         GeminiSecretProvider? secretProvider = null,
         GeminiApiClient? geminiApiClient = null,
-        AiProviderOrchestrator? providerOrchestrator = null)
+        AiProviderOrchestrator? providerOrchestrator = null,
+        ILoggerFactory? loggerFactory = null)
     {
         _collector = collector ?? throw new ArgumentNullException(nameof(collector));
         _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
@@ -74,8 +83,11 @@ public sealed class AsIsV1Workflow
         _formatter = formatter ?? throw new ArgumentNullException(nameof(formatter));
         _runtimeEnvService = runtimeEnvService ?? new RuntimeEnvironmentService();
         _secretProvider = secretProvider ?? new GeminiSecretProvider();
-        _geminiApiClient = geminiApiClient ?? new GeminiApiClient();
-        _providerOrchestrator = providerOrchestrator ?? new AiProviderOrchestrator(_geminiApiClient);
+        _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
+        _logger = _loggerFactory.CreateLogger<AsIsV1Workflow>();
+        _secretRedactor = (_loggerFactory as StderrLoggerFactory)?.Redactor;
+        _geminiApiClient = geminiApiClient ?? new GeminiApiClient(logger: _loggerFactory.CreateLogger<GeminiApiClient>());
+        _providerOrchestrator = providerOrchestrator ?? new AiProviderOrchestrator(_geminiApiClient, loggerFactory: _loggerFactory);
     }
 
     public string? LastSelectedModel { get; private set; }
@@ -249,13 +261,26 @@ public sealed class AsIsV1Workflow
             ? AiProviderType.GoogleGemini
             : _orchestrator.ResolveProvider(options.ProviderInput);
 
+        var sourceType = !string.IsNullOrWhiteSpace(options.GoalTitle) ? "goal" : "file";
+        var modeLabel = options.GeminiLive == false ? "offline" : (options.GeminiLive == true ? "live" : "default");
+
+        using var workflowScope = _logger.BeginScope(new Dictionary<string, object?>
+        {
+            ["provider"] = RuntimeEnvironmentService.FormatProviderCode(provider),
+            ["source"] = sourceType,
+            ["dryRun"] = options.DryRun
+        });
+
+        LogEvents.WorkflowStarted(_logger, RuntimeEnvironmentService.FormatProviderCode(provider), modeLabel, sourceType, options.DryRun);
+
         // Inspect OS, Build Info, Enabled AI Model, and initial secret status
         var initialSecret = _secretProvider.Resolve(options.ApiKey);
+        _secretRedactor?.RegisterSecret(initialSecret.ApiKey);
+        _secretRedactor?.RegisterSecret(options.ApiKey);
         var runtimeInfo = _runtimeEnvService.Inspect(provider, options.ModelName);
-        if (options.Verbose)
+        if (_logger.IsEnabled(LogLevel.Debug))
         {
-            colorWriter.WriteHeader("=== Smart Backlog Assistant: Use Case 1 (Practical Process As-Is v1) ===");
-            colorWriter.WriteMuted(_runtimeEnvService.FormatRuntimeBanner(runtimeInfo, initialSecret));
+            LogEvents.RuntimeBannerLogged(_logger, _runtimeEnvService.FormatRuntimeBanner(runtimeInfo, initialSecret).TrimEnd());
         }
 
         // 1. Local: Collect raw data (either from Goal/Title or from InputFilePath)
@@ -263,10 +288,7 @@ public sealed class AsIsV1Workflow
         string rawData;
         if (!string.IsNullOrWhiteSpace(options.GoalTitle))
         {
-            if (options.Verbose)
-            {
-                colorWriter.WriteSubHeader($"[1/5 Local -> Collect] Preparing backlog goal '{options.GoalTitle}'...");
-            }
+            LogEvents.WorkflowCollectStage(_logger, "goal", options.GoalTitle);
 
             var hasExtendedGoalContext = !string.IsNullOrWhiteSpace(options.GoalContext) ||
                                          !string.IsNullOrWhiteSpace(options.PreviousDraftContext) ||
@@ -281,15 +303,17 @@ public sealed class AsIsV1Workflow
         }
         else
         {
-            if (options.Verbose)
-            {
-                colorWriter.WriteSubHeader($"[1/5 Local -> Collect] Reading raw data from '{options.InputFilePath}'...");
-            }
-
+            LogEvents.WorkflowCollectStage(_logger, "file", options.InputFilePath);
             rawData = _collector.CollectFromFile(options.InputFilePath);
         }
 
         collectSw.Stop();
+        LogEvents.WorkflowCollected(_logger, rawData.Length, collectSw.ElapsedMilliseconds);
+        if (_logger.IsEnabled(LogLevel.Trace))
+        {
+            LogEvents.WorkflowRawDataTrace(_logger, rawData.Length, BuildSingleLinePreview(rawData));
+        }
+
         var collectDetail = !string.IsNullOrWhiteSpace(options.GoalTitle)
             ? $"goal '{options.GoalTitle}'"
             : $"raw discovery context ({Path.GetFileName(options.InputFilePath)})";
@@ -307,20 +331,27 @@ public sealed class AsIsV1Workflow
                 options.NonInteractive);
             apiKey = resolvedSecret.ApiKey;
             LastResolvedApiKey = apiKey;
+            _secretRedactor?.RegisterSecret(apiKey);
+            LogEvents.SecretResolved(_logger, resolvedSecret.SourceDetail, resolvedSecret.MaskedKey);
         }
         else if (provider == AiProviderType.GoogleGemini)
         {
             apiKey = initialSecret.ApiKey;
+            LogEvents.SecretResolved(_logger, initialSecret.SourceDetail, initialSecret.MaskedKey);
         }
         else if (provider == AiProviderType.GitHubCopilot)
         {
             apiKey = options.ApiKey;
+            _secretRedactor?.RegisterSecret(apiKey);
+            LogEvents.SecretResolved(_logger, string.IsNullOrWhiteSpace(apiKey) ? "Copilot runtime / env" : "CLI Argument (--api-key)", GeminiSecretProvider.MaskKey(apiKey));
         }
         else if (provider != AiProviderType.ManualPrompt && string.IsNullOrWhiteSpace(apiKey) && !options.NonInteractive)
         {
             colorWriter.WriteColored($"Enter API key for {provider} (or press Enter for mock key): ", ConsoleColor.Yellow);
             apiKey = input.ReadLine();
             LastResolvedApiKey = apiKey;
+            _secretRedactor?.RegisterSecret(apiKey);
+            LogEvents.SecretResolved(_logger, "Interactive CLI Prompt", GeminiSecretProvider.MaskKey(apiKey));
         }
 
         var backlogTypeSelection = options.BacklogTypeInput;
@@ -352,10 +383,7 @@ public sealed class AsIsV1Workflow
         var modelName = options.ModelName;
         if (provider == AiProviderType.GoogleGemini && options.GeminiLive == true)
         {
-            if (options.Verbose)
-            {
-                colorWriter.WriteSubHeader("[2/5 Local -> Process] Calling Gemini API to list models supporting generateContent...");
-            }
+            LogEvents.WorkflowProcessStage(_logger, "Calling Gemini API to list models supporting generateContent...");
 
             var availableModels = TerminalUx.RunWithSpinner(
                 "Discovering compatible Gemini models...",
@@ -376,10 +404,7 @@ public sealed class AsIsV1Workflow
             var searchTopic = BuildWebSearchTopic(options.GoalTitle, options.GoalContext, rawData);
             if (provider == AiProviderType.GoogleGemini && options.GeminiLive == true)
             {
-                if (options.Verbose)
-                {
-                    colorWriter.WriteSubHeader($"[2/5 Local -> Search] Running live Google Search grounding ({modelName})...");
-                }
+                LogEvents.WorkflowProcessStage(_logger, $"Running live Google Search grounding ({modelName})...");
 
                 var searchSw = System.Diagnostics.Stopwatch.StartNew();
                 var grounding = TerminalUx.RunWithSpinner(
@@ -393,6 +418,7 @@ public sealed class AsIsV1Workflow
                     var formattedFindings = FormatWebGroundingFindings(grounding);
                     LastWebResearchFindings = formattedFindings;
                     rawData = $"{rawData.TrimEnd()}\n\nWeb Research Findings:\n{formattedFindings}";
+                    LogEvents.WebGroundingCompleted(_logger, grounding.Sources.Count, searchSw.ElapsedMilliseconds);
                     TerminalUx.WriteStepDone(
                         colorWriter,
                         "Grounded",
@@ -403,6 +429,7 @@ public sealed class AsIsV1Workflow
                 }
                 else if (!string.IsNullOrWhiteSpace(grounding.Warning))
                 {
+                    LogEvents.WebGroundingSkipped(_logger, grounding.Warning);
                     colorWriter.WriteWarning($"  [!] Google Search grounding skipped ({grounding.Warning}); continuing with standard draft.");
                 }
             }
@@ -443,9 +470,9 @@ public sealed class AsIsV1Workflow
                 _ => modelName ?? provider.ToString()
             };
 
-            if (options.Verbose && provider is AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot)
+            if (provider is AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot)
             {
-                colorWriter.WriteSubHeader($"[2/5 Local -> Expand] Expanding goal with INVEST User Story principles ({expandModelLabel})...");
+                LogEvents.WorkflowProcessStage(_logger, $"Expanding goal with INVEST User Story principles ({expandModelLabel})...");
             }
 
             var expandSw = System.Diagnostics.Stopwatch.StartNew();
@@ -483,8 +510,9 @@ public sealed class AsIsV1Workflow
                         $"goal brief & {capturedExpansion.Alternatives.Count} alternatives ({expansionGen.ResolvedModel ?? expandModelLabel})",
                         expandSw.Elapsed);
                 }
-                catch (System.Text.Json.JsonException)
+                catch (System.Text.Json.JsonException jsonEx)
                 {
+                    LogEvents.GoalExpansionJsonFallback(_logger, jsonEx);
                     colorWriter.WriteWarning("  [!] Goal expansion response was not valid JSON; using deterministic creative synthesis.");
                     capturedExpansion = GoalExpansionSynthesizer.ExpandOffline(options.GoalTitle!, options.GoalContext, LastWebResearchFindings);
                     rawData = GoalExpansionSynthesizer.MergeExpansionIntoRawData(rawData, capturedExpansion, includeSyntheticGwt: false);
@@ -517,11 +545,13 @@ public sealed class AsIsV1Workflow
                 expandOfflineSw.Elapsed);
         }
 
+        var promptSourceName = existingSelectedPrompt ?? existingFallbackPrompt ?? "built-in-fallback";
         var renderedPrompt = existingSelectedPrompt is not null
             ? _promptService.LoadAndRenderPrompt(existingSelectedPrompt, rawData)
             : existingFallbackPrompt is not null
                 ? _promptService.LoadAndRenderPrompt(existingFallbackPrompt, rawData)
                 : _promptService.RenderPromptFromTemplate("# Practical Process As-Is v1\nAnalyze the following raw notes:\n{{RAW_DATA}}", rawData);
+        LogEvents.PromptRendered(_logger, promptSourceName, promptType.ToString(), renderedPrompt.Length);
 
         if (provider == AiProviderType.ManualPrompt)
         {
@@ -538,10 +568,7 @@ public sealed class AsIsV1Workflow
 
         if (provider == AiProviderType.GoogleGemini && options.GeminiLive == true)
         {
-            if (options.Verbose)
-            {
-                colorWriter.WriteSubHeader($"[2/5 Local -> Process] Calling Google Gemini API ({modelName}) with '{Path.GetFileName(existingSelectedPrompt ?? selectedPromptPath)}'...");
-            }
+            LogEvents.WorkflowProcessStage(_logger, $"Calling Google Gemini API ({modelName}) with '{Path.GetFileName(existingSelectedPrompt ?? selectedPromptPath)}'...");
 
             var aiSw = System.Diagnostics.Stopwatch.StartNew();
             var generationResult = TerminalUx.RunWithSpinner(
@@ -565,19 +592,16 @@ public sealed class AsIsV1Workflow
                 $"structured {promptType} draft via Google Gemini ({modelName})",
                 aiSw.Elapsed);
         }
-        else if (provider == AiProviderType.GoogleGemini && options.Verbose)
+        else if (provider == AiProviderType.GoogleGemini)
         {
-            colorWriter.WriteMuted("[2/5 Local -> Process] Live Gemini API is OFF; using the local deterministic draft.");
+            LogEvents.WorkflowProcessStage(_logger, "Live Gemini API is OFF; using the local deterministic draft.");
         }
         else if (provider == AiProviderType.GitHubCopilot)
         {
             var effectiveModel = modelName ?? RuntimeEnvironmentService.DefaultCopilotModel;
             if (liveEnabled)
             {
-                if (options.Verbose)
-                {
-                    colorWriter.WriteSubHeader($"[2/5 Local -> Process] Calling GitHub Copilot SDK ({effectiveModel}) with '{Path.GetFileName(existingSelectedPrompt ?? selectedPromptPath)}'...");
-                }
+                LogEvents.WorkflowProcessStage(_logger, $"Calling GitHub Copilot SDK ({effectiveModel}) with '{Path.GetFileName(existingSelectedPrompt ?? selectedPromptPath)}'...");
 
                 var aiSw = System.Diagnostics.Stopwatch.StartNew();
                 var generationResult = TerminalUx.RunWithSpinner(
@@ -598,9 +622,9 @@ public sealed class AsIsV1Workflow
                 loggedLiveGenerationStep = true;
                 TerminalUx.WriteStepDone(colorWriter, "Generated", $"structured {promptType} draft via Copilot SDK ({modelName})", aiSw.Elapsed);
             }
-            else if (options.Verbose)
+            else
             {
-                colorWriter.WriteMuted("[2/5 Local -> Process] Offline mode active; using local deterministic draft.");
+                LogEvents.WorkflowProcessStage(_logger, "Offline mode active; using local deterministic draft.");
             }
         }
         else if (provider is AiProviderType.AzureOpenAi or AiProviderType.AnthropicClaude)
@@ -682,16 +706,13 @@ public sealed class AsIsV1Workflow
                 processSw.Elapsed);
         }
 
-        if (provider == AiProviderType.ManualPrompt || options.Verbose)
+        if (provider == AiProviderType.ManualPrompt)
         {
             colorWriter.WriteMuted(outcome.GuidanceMessage);
         }
 
-        if (options.Verbose)
-        {
-            colorWriter.WriteMuted($"  [Telemetry] Description word budget: {DescriptionFormatter.FormatWordBudgetBadge(outcome.Description)}");
-            colorWriter.WriteSuccess("[3/5 Local -> Validate] Outcome validated successfully.");
-        }
+        LogEvents.ProviderGuidance(_logger, outcome.GuidanceMessage);
+        LogEvents.OutcomeValidationTelemetry(_logger, DescriptionFormatter.FormatWordBudgetBadge(outcome.Description));
 
         IReadOnlyList<JiraBacklogTicket> tickets = isCombinedType
             ? [
@@ -711,7 +732,9 @@ public sealed class AsIsV1Workflow
             var savedPaths = new List<string>(tickets.Count);
             foreach (var ticketToSave in tickets)
             {
-                savedPaths.Add(SaveTicketArtifacts(ticketToSave, options.OutputDirectory, jsonFileOut, colorWriter));
+                var savedSlugPath = SaveTicketArtifacts(ticketToSave, options.OutputDirectory, jsonFileOut, colorWriter);
+                LogEvents.TicketArtifactsSaved(_logger, savedSlugPath, jsonFileOut);
+                savedPaths.Add(savedSlugPath);
             }
 
             // Read generated Markdown back from disk so the CLI table previews exact saved Markdown
@@ -747,6 +770,7 @@ public sealed class AsIsV1Workflow
         LastSupplementalDescription = supplementalDescription;
 
         executionStopwatch.Stop();
+        LogEvents.WorkflowCompleted(_logger, tickets.Count, tickets[0].Title, options.DryRun, executionStopwatch.ElapsedMilliseconds);
         TerminalUx.WriteStepDone(
             colorWriter,
             options.DryRun ? "Previewed" : "Completed",
@@ -758,6 +782,19 @@ public sealed class AsIsV1Workflow
             includeAlternatives: effectiveShowAlternatives);
 
         return tickets;
+    }
+
+    private static string BuildSingleLinePreview(string text, int maxLength = 200)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return string.Empty;
+        }
+
+        var singleLine = text.Replace("\r", " ").Replace("\n", " ").Trim();
+        return singleLine.Length <= maxLength
+            ? singleLine
+            : singleLine[..maxLength] + "...";
     }
 
     public static string? ResolveSupplementalUserStory(
