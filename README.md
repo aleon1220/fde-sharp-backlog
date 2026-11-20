@@ -9,17 +9,42 @@
 1. **Astral `uv`-Style Headless Subcommands:** Verb-driven commands (`process`, `draft`, `preview`, `status`, `config`, `models`) with step timers, progress spinners, actionable `error:` / `hint:` diagnostics, and per-command `--help`.
 2. **Gemini CLI / Agy Interactive REPL:** Zero-arg execution opens a boxed workspace bar (`In: ./in | Out: ./out | Export: .md`), theme-matched option highlights (`↑`/`↓` + `Enter` or `[0-4]`), quick shortcuts (`[w/g/d/p/v/s/c/?/q]`), `/slash` commands (`/wizard`, `/generate`, `/preview`, `/provider`, `/status`), and `@filename` mentions.
 
-* **GitHub Repository & Backlog**: [aleon1220/fde-sharp-backlog](https://github.com/aleon1220/fde-sharp-backlog) · [Issues](https://github.com/aleon1220/fde-sharp-backlog/issues) · [Milestone #1 (`release-fde-version`)](https://github.com/aleon1220/fde-sharp-backlog/milestone/1)
+* **GitHub Repository & Backlog**: [aleon1220/fde-sharp-backlog](https://github.com/aleon1220/fde-sharp-backlog) · [Issues](https://github.com/aleon1220/fde-sharp-backlog/issues) · [Milestone #1 (`release-fde-version`, due Nov 27)](https://github.com/aleon1220/fde-sharp-backlog/milestone/1) · [UAT Gate (#6)](https://github.com/aleon1220/fde-sharp-backlog/issues/6) · [UAT NuGet Restore Hardening (#57)](https://github.com/aleon1220/fde-sharp-backlog/issues/57)
 
 ## Setup & Quick Start (`Microsoft.Copilot.SDK` & OpenAI Gateway)
 
-### 1. Prerequisites
+### 1. Prerequisites & NuGet Restore (UAT & Non-Clean Workstation Setup)
 
 * **.NET 10 SDK** (`dotnet --version` >= `10.0`)
-* **Build & Verify Locally** (runs all 348 unit & integration tests with zero warnings):
+* **Register Official `nuget.org` Feed & Restore Packages**:
+  The solution includes a root [`nuget.config`](nuget.config) pointing to `https://api.nuget.org/v3/index.json`. If your global user/machine `NuGet.Config` is not clean (e.g., missing `nuget.org`, disabled sources, or stale corporate/offline feed entries), register `nuget.org` explicitly and restore before running UAT:
 
 ```bash
-dotnet test
+# 1. Register the official NuGet v3 feed in your user profile (if not already present)
+dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org
+
+# 2. Restore all solution packages (Microsoft.Copilot.SDK, xunit, Microsoft.NET.Test.Sdk)
+dotnet restore
+```
+
+> [!NOTE]
+> **Troubleshooting Non-Clean Setups During UAT ([Issue #57](https://github.com/aleon1220/fde-sharp-backlog/issues/57)):**
+> * If `dotnet nuget add source` reports that `nuget.org` already exists or is disabled, inspect and re-enable it:
+>   ```bash
+>   dotnet nuget list source
+>   dotnet nuget enable source nuget.org
+>   ```
+> * If a stale HTTP cache or corrupted package folder blocks restore, force a clean restore using the repo-pinned [`nuget.config`](nuget.config):
+>   ```bash
+>   dotnet nuget locals http-cache --clear
+>   dotnet restore --configfile nuget.config --force --no-cache
+>   ```
+
+* **Build & Verify Locally for UAT** (runs all unit & integration tests with zero warnings, then checks live workspace readiness):
+
+```bash
+dotnet test --no-restore
+dotnet run --project src/SmartBacklogAssistant -- status
 ```
 
 * **AI Provider Credentials** (pick one or use `--offline` for deterministic drafting):

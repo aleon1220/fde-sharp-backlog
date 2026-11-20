@@ -2,8 +2,10 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
+COPY ["nuget.config", "./"]
+COPY ["prompts/", "prompts/"]
 COPY ["src/SmartBacklogAssistant/SmartBacklogAssistant.csproj", "src/SmartBacklogAssistant/"]
-RUN dotnet restore "src/SmartBacklogAssistant/SmartBacklogAssistant.csproj"
+RUN dotnet restore "src/SmartBacklogAssistant/SmartBacklogAssistant.csproj" --configfile nuget.config
 
 COPY ["src/SmartBacklogAssistant/", "src/SmartBacklogAssistant/"]
 RUN dotnet publish "src/SmartBacklogAssistant/SmartBacklogAssistant.csproj" -c Release -o /app/publish /p:UseAppHost=false

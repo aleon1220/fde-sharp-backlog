@@ -25,6 +25,10 @@ During the implementation and verification of the **Runtime Gemini Secret API Ke
 * **Observation:** On the Windows test host (`Microsoft Windows 10.0.26100 | X64`), the global `C:\Program Files\dotnet` installation only contained the `.NET 8.0.33` runtime without a `.NET 10.0` SDK, and WSL2/Podman Machine was blocked by `HCS_E_HYPERV_NOT_INSTALLED`. Installing `.NET SDK 10.0.403` into the user-scoped `$HOME\.dotnet` directory enabled native `.NET 10` compilation and test execution without admin privileges.
 * **Action Taken:** `RuntimeEnvironmentService` now inspects and prints OS platform/architecture, assembly build version/configuration (`Debug`/`Release`), `.NET` framework description, and the enabled AI model (`Google Gemini (gemini-2.5-flash)`) at startup so environment discrepancies are immediately visible.
 
+### Finding 5: Non-Clean Workstation NuGet Source Drift During Pre-Production UAT ([Issue #57](https://github.com/aleon1220/fde-sharp-backlog/issues/57) · Child of [#6](https://github.com/aleon1220/fde-sharp-backlog/issues/6))
+* **Observation:** During live UAT and dogfooding on a non-clean workstation environment, package restore for `Microsoft.Copilot.SDK` (`2.0.1`) and test runners failed because the host user's `NuGet.Config` lacked an active `nuget.org` v3 feed registration.
+* **Action Taken:** Verified and documented the two-step recovery command sequence (`dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org` followed by `dotnet restore`), added a repository-root [`nuget.config`](nuget.config) pinning `https://api.nuget.org/v3/index.json`, and updated [`README.md`](README.md) with UAT restore troubleshooting steps.
+
 ---
 
 ## 2. Prioritized Backlog for Next Iteration
@@ -78,3 +82,14 @@ The following backlog items have been structured in Jira-ready `Type01` (`comple
   * **Given** a user drafts or processes a `Type01`, `Type02`, or `Both` item via CLI or TUI
   * **When** the outcome is rendered in the terminal and saved to `./out`
   * **Then** `Type01` persists and renders `Title`, `User Story`, concise `Description`, `Acceptance`, and `Alternatives`; `Type02` renders strictly `Title`, concise `Description`, and `Alternatives` without injecting `User Story`; verbosity adapts cleanly (`Minimalistic`, `Balanced`, `Detailed`) with persisted `defaultVerbosity`; terminal cells strip `# [Jira - ...]`, `###`, and `**` clutter while preserving full Markdown in `.md` files and `md` copy; and pre-table output condenses to compact `✓ Collected`, `✓ Expanded`, and `✓ Generated` lines.
+
+### [SBA-109] Harden Pre-Production NuGet Restores to Prevent UAT and Dogfooding Outages (`Type02` — `schedule` | Priority: P1 — Issue #57, Child of #6)
+* **Objective:** Harden NuGet feed reliability, source registration, and restore troubleshooting across pre-production runners and non-clean developer/UAT workstations to eliminate build interruptions.
+* **Leveraged UAT Fix:**
+  * `dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org`
+  * `dotnet restore`
+* **Suggested Actions:**
+  * Pin repository-level [`nuget.config`](nuget.config) and configure caching proxies / fallback feeds
+  * Automate CI/CD credential rotation and auth for private/proxy feeds
+  * Enable exponential backoff retries (`NUGET_ENABLE_ENHANCED_HTTP_RETRY=true`) for transient errors
+  * Document restore troubleshooting in [`README.md`](README.md) for internal UAT testers
