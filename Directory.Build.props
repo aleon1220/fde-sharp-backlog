@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <!-- Deterministic NuGet lockfiles for pre-production & UAT restores (Issue #57) -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+
+    <!-- Optional upstream caching proxy & local fallback feeds (skipped when restore script passes a managed config) -->
+    <RestoreSources Condition="'$(SBA_NUGET_CONFIG_MANAGED)' != 'true' and '$(NUGET_PROXY_FEED_URL)' != '' and '$(NUGET_PROXY_ONLY)' == 'true'">$(NUGET_PROXY_FEED_URL)</RestoreSources>
+    <RestoreAdditionalProjectSources Condition="'$(SBA_NUGET_CONFIG_MANAGED)' != 'true' and '$(NUGET_PROXY_FEED_URL)' != '' and '$(NUGET_PROXY_ONLY)' != 'true'">$(NUGET_PROXY_FEED_URL);$(RestoreAdditionalProjectSources)</RestoreAdditionalProjectSources>
+    <RestoreAdditionalProjectSources Condition="'$(SBA_NUGET_CONFIG_MANAGED)' != 'true' and '$(NUGET_FALLBACK_FEED_DIR)' != '' and Exists('$(NUGET_FALLBACK_FEED_DIR)')">$(RestoreAdditionalProjectSources);$(NUGET_FALLBACK_FEED_DIR)</RestoreAdditionalProjectSources>
+    <RestoreFallbackFolders Condition="'$(SBA_NUGET_CONFIG_MANAGED)' != 'true' and '$(NUGET_FALLBACK_PACKAGES_DIR)' != '' and Exists('$(NUGET_FALLBACK_PACKAGES_DIR)')">$(RestoreFallbackFolders);$(NUGET_FALLBACK_PACKAGES_DIR)</RestoreFallbackFolders>
+    <RestoreFallbackFolders Condition="'$(SBA_NUGET_CONFIG_MANAGED)' != 'true' and '$(NUGET_FALLBACK_PACKAGES_DIR)' == '' and Exists('$(MSBuildThisFileDirectory).nuget/fallback')">$(RestoreFallbackFolders);$(MSBuildThisFileDirectory).nuget/fallback</RestoreFallbackFolders>
+  </PropertyGroup>
+</Project>

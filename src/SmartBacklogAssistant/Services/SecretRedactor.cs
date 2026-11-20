@@ -20,7 +20,9 @@ public sealed partial class SecretRedactor
         "AZURE_OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "COPILOT_BYOK_API_KEY",
-        OpenAiGatewayClient.ApiKeyEnvVar
+        OpenAiGatewayClient.ApiKeyEnvVar,
+        "NUGET_AUTH_TOKEN",
+        "VSS_NUGET_ACCESSTOKEN"
     ];
 
     private readonly object _lock = new();
@@ -138,8 +140,8 @@ public sealed partial class SecretRedactor
     [GeneratedRegex(@"(?i)(Authorization\s*[:=]\s*Bearer\s+)([^\s""',;]+)", RegexOptions.CultureInvariant)]
     private static partial Regex BearerHeaderRegex();
 
-    // Header or key=value pairs for API keys and access tokens (skip already-masked **** tokens)
-    [GeneratedRegex(@"(?i)((?:x-goog-api-key|x-api-key|api[-_]?key|access[-_]?token)\s*[:=]\s*[""']?)(?!\*{4})([^\s""',;&}]+)", RegexOptions.CultureInvariant)]
+    // Header or key=value pairs for API keys, access tokens, and NuGet feed passwords (skip already-masked **** tokens)
+    [GeneratedRegex(@"(?i)((?:x-goog-api-key|x-api-key|api[-_]?key|access[-_]?token|ClearTextPassword|Password)\s*[:=]\s*[""']?)(?!\*{4})([^\s""',;&}]+)", RegexOptions.CultureInvariant)]
     private static partial Regex SensitiveHeaderOrFieldRegex();
 
     // Sensitive query string parameters (?key=..., &api_key=..., &token=...)

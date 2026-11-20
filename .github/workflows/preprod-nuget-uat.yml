@@ -1,0 +1,118 @@
+name: Pre-Production NuGet Restore & UAT Gate
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      proxy_feed_url:
+        description: "Optional upstream NuGet caching proxy URL (defaults to repo var NUGET_PROXY_FEED_URL or nuget.org)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  NUGET_ENABLE_ENHANCED_HTTP_RETRY: "true"
+  NUGET_ENHANCED_MAX_NETWORK_TRY_COUNT: "6"
+  NUGET_ENHANCED_NETWORK_RETRY_DELAY_MILLISECONDS: "1000"
+  NUGET_RETRY_HTTP_429: "true"
+  NUGET_OBSERVE_RETRY_AFTER: "true"
+  ContinuousIntegrationBuild: "true"
+
+jobs:
+  nuget-restore-uat:
+    name: NuGet Restore & UAT (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: read
+      id-token: write # Enables OIDC workload identity token exchange for private Azure/cloud artifact proxies
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet global packages by lockfile
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json', 'nuget.config', 'Directory.Build.props') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Verify non-clean workstation NuGet.Config drift resilience (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIRTY_HOME="$(mktemp -d)"
+          trap 'rm -rf "$DIRTY_HOME"' EXIT
+          mkdir -p "$DIRTY_HOME/.nuget/NuGet" "$DIRTY_HOME/.config/NuGet"
+          cat > "$DIRTY_HOME/.nuget/NuGet/NuGet.Config" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <configuration>
+            <packageSources>
+              <add key="broken-corporate-feed" value="http://127.0.0.1:59999/v3/index.json" />
+            </packageSources>
+            <disabledPackageSources>
+              <add key="nuget.org" value="true" />
+            </disabledPackageSources>
+          </configuration>
+          EOF
+          cp "$DIRTY_HOME/.nuget/NuGet/NuGet.Config" "$DIRTY_HOME/.config/NuGet/NuGet.Config"
+          HOME="$DIRTY_HOME" XDG_CONFIG_HOME="$DIRTY_HOME/.config" NUGET_PACKAGES="$DIRTY_HOME/pkgs" \
+            dotnet restore SmartBacklogAssistant.slnx --locked-mode
+
+      - name: Hardened NuGet restore with ephemeral token-scoped auth (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          NUGET_PROXY_FEED_URL: ${{ github.event.inputs.proxy_feed_url || vars.NUGET_PROXY_FEED_URL }}
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x ./scripts/restore-nuget.sh
+          ./scripts/restore-nuget.sh --locked-mode
+
+      - name: Hardened NuGet restore with ephemeral token-scoped auth (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          NUGET_PROXY_FEED_URL: ${{ github.event.inputs.proxy_feed_url || vars.NUGET_PROXY_FEED_URL }}
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./scripts/restore-nuget.ps1 -LockedMode:`$true
+
+      - name: Build solution (Release, warnings as errors)
+        run: dotnet build SmartBacklogAssistant.slnx -c Release --no-restore -p:TreatWarningsAsErrors=true
+
+      - name: Run full unit & integration test suite
+        run: dotnet test SmartBacklogAssistant.slnx -c Release --no-restore --verbosity normal
+
+      - name: UAT headless CLI smoke verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          UAT_WORKSPACE="${{ runner.temp }}/sba-uat-smoke"
+          mkdir -p "$UAT_WORKSPACE"
+          trap 'rm -rf "$UAT_WORKSPACE"' EXIT
+          dotnet run --project src/SmartBacklogAssistant -c Release --no-build -- -w "$UAT_WORKSPACE" status
+          dotnet run --project src/SmartBacklogAssistant -c Release --no-build -- -w "$UAT_WORKSPACE" draft "Verify NuGet Restore Hardening" --type 01 --preview --offline --non-interactive
+          dotnet run --project src/SmartBacklogAssistant -c Release --no-build -- -w "$UAT_WORKSPACE" process all --dry-run --offline --non-interactive
