@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+using SmartBacklogAssistant.Domain;
 using SmartBacklogAssistant.Services;
 using SmartBacklogAssistant.Workflow;
 using System.Net;
@@ -1303,34 +1305,93 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.Contains("\"Sample Outcome\"", clipboard.CopiedPayloads[1]);
     }
 
+    [Fact]
+    public void Run_ReplSlashLogLevelAndSettingsSubmenu_ReconfiguresLiveStderrLoggerAndPersistsSettings()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var settingsService = new CliSettingsService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        using var stderr = new StringWriter();
+        using var loggerFactory = new StderrLoggerFactory(
+            stderr,
+            minimumLevel: LogLevel.Warning,
+            outputFormat: LogOutputFormat.Text,
+            enableColor: false);
+
+        var runner = CreateMenuRunner(
+            workspaceService,
+            settingsService,
+            loggerFactory: loggerFactory,
+            environmentReader: _ => null);
+
+        // 1) /log-level debug -> updates live factory & persists
+        // 2) /log-format json -> switches to NDJSON & persists
+        // 3) /log-level invalid-level -> warns cleanly
+        // 4) /verbose off -> turns off verbose debug override
+        // 5) 4 (Settings) -> 9 (Select Log Level) -> 1 (Trace) -> 0 (Back to Main)
+        // 6) /status -> displays Trace & json
+        // 7) 0 (Exit)
+        using var input = new StringReader("/log-level debug\n/log-format json\n/log-level bogus\n/verbose off\n4\n9\n1\n0\n/status\n0\n");
+        using var output = new StringWriter();
+
+        var exitCode = runner.Run(
+            new WorkflowOptions(dirs.InputDirectory, _promptFilePath, WorkspaceRoot: _tempWorkspaceRoot, GeminiLive: false),
+            input,
+            output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("Log Level is now Debug (text -> stderr).", text);
+        Assert.Contains("Log Format is now json (stderr).", text);
+        Assert.Contains("Unknown log level 'bogus'", text);
+        Assert.Contains("Verbose pipeline diagnostics are now OFF", text);
+        Assert.Contains("=== Diagnostic Logging Configuration (stderr) ===", text);
+        Assert.Contains("Log Level is now Trace (json -> stderr).", text);
+        Assert.Contains("Trace (CLI --log-level)", text);
+
+        var saved = settingsService.Load(dirs);
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Trace, saved.LogLevel);
+        Assert.Equal(LogOutputFormat.Json, saved.LogFormat);
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Trace, loggerFactory.MinimumLevel);
+        Assert.Equal(LogOutputFormat.Json, loggerFactory.OutputFormat);
+
+        // Live stderr received structured NDJSON reconfiguration events without polluting stdout
+        Assert.Contains("\"level\":\"Debug\"", stderr.ToString());
+        Assert.DoesNotContain("\"eventName\":\"ReplLoggingReconfigured\"", text);
+    }
+
     private static CliMenuRunner CreateMenuRunner(
         WorkspacePathService workspaceService,
         CliSettingsService? settingsService = null,
         GeminiApiClient? geminiApiClient = null,
         IClipboardService? clipboardService = null,
-        ICopilotSdkGateway? copilotGateway = null)
+        ICopilotSdkGateway? copilotGateway = null,
+        StderrLoggerFactory? loggerFactory = null,
+        Func<string, string?>? environmentReader = null)
     {
         var secretProvider = new GeminiSecretProvider(
             environmentReader: _ => null,
             environmentWriter: (_, _) => { });
         var runtimeService = new RuntimeEnvironmentService();
-        var orchestrator = new AiModelOrchestrator();
-        var effectiveGemini = geminiApiClient ?? new GeminiApiClient();
+        var orchestrator = new AiModelOrchestrator(loggerFactory?.CreateLogger<AiModelOrchestrator>());
+        var effectiveGemini = geminiApiClient ?? new GeminiApiClient(logger: loggerFactory?.CreateLogger<GeminiApiClient>());
         var effectiveCopilot = copilotGateway ?? new StubCopilotSdkGateway(runtimeAvailable: false, models: []);
         var providerOrchestrator = new AiProviderOrchestrator(
             effectiveGemini,
             effectiveCopilot,
-            environmentReader: _ => null);
+            environmentReader: _ => null,
+            loggerFactory: loggerFactory);
 
         var workflow = new AsIsV1Workflow(
-            new RawDataCollector(),
+            new RawDataCollector(loggerFactory?.CreateLogger<RawDataCollector>()),
             new PromptTemplateService(),
             orchestrator,
             new JiraBacklogFormatter(),
             runtimeService,
             secretProvider,
             effectiveGemini,
-            providerOrchestrator);
+            providerOrchestrator,
+            loggerFactory);
 
         return new CliMenuRunner(
             workflow,
@@ -1339,7 +1400,9 @@ public sealed class CliMenuRunnerTests : IDisposable
             secretProvider,
             orchestrator,
             settingsService ?? new CliSettingsService(),
-            clipboardService: clipboardService);
+            clipboardService: clipboardService,
+            loggerFactory: loggerFactory,
+            environmentReader: environmentReader);
     }
 
     private sealed class StubCopilotSdkGateway(

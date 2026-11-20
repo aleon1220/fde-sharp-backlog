@@ -1,6 +1,9 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using Microsoft.Copilot;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace SmartBacklogAssistant.Services;
 
@@ -61,22 +64,29 @@ public sealed class GitHubCopilotSdkGateway : ICopilotSdkGateway
     private readonly Func<string, string?> _environmentReader;
     private readonly string _baseDirectory;
     private readonly Func<string?> _pathBinaryResolver;
+    private readonly ILoggerFactory _loggerFactory;
+    private readonly ILogger<GitHubCopilotSdkGateway> _logger;
 
-    public GitHubCopilotSdkGateway(Func<string, string?>? environmentReader = null)
-        : this(environmentReader, baseDirectory: null, pathBinaryResolver: null)
+    public GitHubCopilotSdkGateway(
+        Func<string, string?>? environmentReader = null,
+        ILoggerFactory? loggerFactory = null)
+        : this(environmentReader, baseDirectory: null, pathBinaryResolver: null, loggerFactory: loggerFactory)
     {
     }
 
     internal GitHubCopilotSdkGateway(
         Func<string, string?>? environmentReader,
         string? baseDirectory,
-        Func<string?>? pathBinaryResolver = null)
+        Func<string?>? pathBinaryResolver = null,
+        ILoggerFactory? loggerFactory = null)
     {
         _environmentReader = environmentReader ?? Environment.GetEnvironmentVariable;
         _baseDirectory = string.IsNullOrWhiteSpace(baseDirectory)
             ? AppContext.BaseDirectory
             : baseDirectory;
         _pathBinaryResolver = pathBinaryResolver ?? (() => FindCopilotOnPath(_environmentReader));
+        _loggerFactory = loggerFactory ?? NullLoggerFactory.Instance;
+        _logger = _loggerFactory.CreateLogger<GitHubCopilotSdkGateway>();
     }
 
     public CopilotRuntimeDiagnostics InspectDiagnostics()
@@ -277,6 +287,13 @@ public sealed class GitHubCopilotSdkGateway : ICopilotSdkGateway
         ArgumentException.ThrowIfNullOrWhiteSpace(request.Prompt);
 
         var diagnostics = InspectDiagnostics();
+        LogEvents.CopilotDiagnosticsInspected(
+            _logger,
+            diagnostics.ConnectionMode,
+            diagnostics.RuntimeAvailable,
+            diagnostics.HasGitHubToken,
+            diagnostics.ByokConfigured,
+            diagnostics.RuntimeLocation ?? "none");
         if (!diagnostics.RuntimeAvailable)
         {
             throw CreateUnavailableRuntimeException(diagnostics);
@@ -287,6 +304,13 @@ public sealed class GitHubCopilotSdkGateway : ICopilotSdkGateway
             ? RuntimeEnvironmentService.DefaultCopilotModel
             : request.ModelId.Trim();
 
+        LogEvents.CopilotGenerationStarting(
+            _logger,
+            diagnostics.ConnectionMode,
+            modelId,
+            effectiveByok?.Type ?? "native");
+
+        var sw = Stopwatch.StartNew();
         await using var client = CreateClient(request.GitHubToken, request.WorkingDirectory, diagnostics);
         await client.StartAsync(cancellationToken).ConfigureAwait(false);
 
@@ -306,6 +330,8 @@ public sealed class GitHubCopilotSdkGateway : ICopilotSdkGateway
                 throw new InvalidOperationException("Microsoft Copilot SDK returned an empty response.");
             }
 
+            sw.Stop();
+            LogEvents.CopilotGenerationCompleted(_logger, modelId, request.Prompt.Length, content.Length, sw.ElapsedMilliseconds);
             return content;
         }
         finally
@@ -383,6 +409,20 @@ public sealed class GitHubCopilotSdkGateway : ICopilotSdkGateway
             Mode = CopilotClientMode.CodingAgent,
             Runtime = runtime
         };
+
+        if (_loggerFactory is not NullLoggerFactory)
+        {
+            var sdkLogLevel = _loggerFactory is StderrLoggerFactory stderrFactory
+                ? CliLogLevelResolver.MapToCopilotLogLevel(stderrFactory.MinimumLevel)
+                : (CopilotLogLevel?)null;
+
+            // Only pass runtime LogLevel when spawning/hosting a local runtime; external TCP runtimes own their own CLI flags.
+            options.Observability = new ClientObservabilityOptions
+            {
+                Logger = _loggerFactory.CreateLogger("Microsoft.Copilot.SDK"),
+                LogLevel = runtime is TcpRuntimeConnection ? null : sdkLogLevel
+            };
+        }
 
         // ForTcp connects to an external runtime that owns its process-wide GitHub identity;
         // Microsoft.Copilot.SDK throws if ClientGitHubOptions.Token or UseLoggedInUser is set on ForTcp.

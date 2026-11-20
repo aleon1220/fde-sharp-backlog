@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 namespace SmartBacklogAssistant.Services;
 
 /// <summary>
@@ -5,6 +8,13 @@ namespace SmartBacklogAssistant.Services;
 /// </summary>
 public sealed class RawDataCollector
 {
+    private readonly ILogger<RawDataCollector> _logger;
+
+    public RawDataCollector(ILogger<RawDataCollector>? logger = null)
+    {
+        _logger = logger ?? NullLogger<RawDataCollector>.Instance;
+    }
+
     public string CollectFromFile(string filePath)
     {
         if (string.IsNullOrWhiteSpace(filePath))
@@ -33,6 +43,7 @@ public sealed class RawDataCollector
             throw new FileNotFoundException($"Raw input file not found at '{filePath}'.", filePath);
         }
 
+        LogEvents.CollectingFromFile(_logger, filePath);
         var content = File.ReadAllText(filePath);
         return CollectFromText(content);
     }
@@ -151,12 +162,14 @@ public sealed class RawDataCollector
             return [];
         }
 
-        return Directory
+        var files = Directory
             .EnumerateFiles(directoryPath)
             .Where(f => f.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) ||
                         f.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
             .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        LogEvents.EnumeratedInputFiles(_logger, files.Length, directoryPath);
+        return files;
     }
 
     public string CollectFromText(string rawText)
@@ -166,7 +179,9 @@ public sealed class RawDataCollector
             throw new InvalidOperationException("Collected raw data cannot be empty or whitespace.");
         }
 
-        return rawText.Trim().Replace("\r\n", "\n");
+        var normalized = rawText.Trim().Replace("\r\n", "\n");
+        LogEvents.RawTextCollected(_logger, normalized.Length);
+        return normalized;
     }
 
     private static string StripStandaloneSearchFlags(string text, ref bool enableSearch)

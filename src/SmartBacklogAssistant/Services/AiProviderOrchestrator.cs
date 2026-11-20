@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using SmartBacklogAssistant.Domain;
 
 namespace SmartBacklogAssistant.Services;
@@ -28,14 +31,18 @@ public sealed class AiProviderOrchestrator
     private readonly GeminiApiClient _geminiApiClient;
     private readonly ICopilotSdkGateway _copilotGateway;
     private readonly Func<string, string?> _environmentReader;
+    private readonly ILogger<AiProviderOrchestrator> _logger;
 
     public AiProviderOrchestrator(
         GeminiApiClient? geminiApiClient = null,
         ICopilotSdkGateway? copilotGateway = null,
-        Func<string, string?>? environmentReader = null)
+        Func<string, string?>? environmentReader = null,
+        ILoggerFactory? loggerFactory = null)
     {
-        _geminiApiClient = geminiApiClient ?? new GeminiApiClient();
-        _copilotGateway = copilotGateway ?? new GitHubCopilotSdkGateway();
+        var effectiveFactory = loggerFactory ?? NullLoggerFactory.Instance;
+        _logger = effectiveFactory.CreateLogger<AiProviderOrchestrator>();
+        _geminiApiClient = geminiApiClient ?? new GeminiApiClient(logger: effectiveFactory.CreateLogger<GeminiApiClient>());
+        _copilotGateway = copilotGateway ?? new GitHubCopilotSdkGateway(environmentReader, loggerFactory: effectiveFactory);
         _environmentReader = environmentReader ?? Environment.GetEnvironmentVariable;
     }
 
@@ -96,6 +103,30 @@ public sealed class AiProviderOrchestrator
     }
 
     private MultiProviderGenerationResult ExecuteProviderCall(
+        MultiProviderGenerationRequest request,
+        string promptText,
+        string systemPrompt)
+    {
+        LogEvents.ProviderCallDispatching(
+            _logger,
+            request.Provider.ToString(),
+            request.ModelName ?? "default",
+            request.BacklogType.ToString(),
+            request.LiveEnabled);
+        var sw = Stopwatch.StartNew();
+        var result = ExecuteProviderCallCore(request, promptText, systemPrompt);
+        sw.Stop();
+        LogEvents.ProviderCallCompleted(
+            _logger,
+            result.ProviderUsed.ToString(),
+            result.ResolvedModel ?? "default",
+            result.UsedLiveProvider,
+            result.GeneratedContent?.Length ?? 0,
+            sw.ElapsedMilliseconds);
+        return result;
+    }
+
+    private MultiProviderGenerationResult ExecuteProviderCallCore(
         MultiProviderGenerationRequest request,
         string promptText,
         string systemPrompt)

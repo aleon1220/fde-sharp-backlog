@@ -168,6 +168,22 @@ public enum CliThemeStyle
 }
 
 /// <summary>
+/// Controls diagnostic log output serialization written to <c>stderr</c>.
+/// </summary>
+public enum LogOutputFormat
+{
+    /// <summary>
+    /// Compact timestamped human-readable lines (default).
+    /// </summary>
+    Text = 0,
+
+    /// <summary>
+    /// Structured newline-delimited JSON objects (NDJSON) for CI pipelines and log aggregators.
+    /// </summary>
+    Json = 1
+}
+
+/// <summary>
 /// Persistent CLI configuration settings for Smart Backlog Assistant.
 /// </summary>
 public sealed record CliSettings(
@@ -178,4 +194,6 @@ public sealed record CliSettings(
     string? CustomInputDirectory = null,
     string? CustomOutputDirectory = null,
     AiProviderType? PreferredProvider = null,
-    OutcomeVerbosity? DefaultVerbosity = null);
+    OutcomeVerbosity? DefaultVerbosity = null,
+    Microsoft.Extensions.Logging.LogLevel? LogLevel = null,
+    LogOutputFormat? LogFormat = null);
