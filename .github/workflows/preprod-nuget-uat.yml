@@ -81,6 +81,34 @@ jobs:
           HOME="$DIRTY_HOME" XDG_CONFIG_HOME="$DIRTY_HOME/.config" NUGET_PACKAGES="$DIRTY_HOME/pkgs" \
             dotnet restore SmartBacklogAssistant.slnx --locked-mode
 
+      - name: Verify non-clean workstation NuGet.Config drift resilience (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dirtyRoot = Join-Path $env:RUNNER_TEMP ("dirty-nuget-" + [System.Guid]::NewGuid().ToString("N"))
+          $dirtyAppData = Join-Path $dirtyRoot "AppData\NuGet"
+          New-Item -ItemType Directory -Force -Path $dirtyAppData | Out-Null
+          try {
+            @(
+              '<?xml version="1.0" encoding="utf-8"?>'
+              '<configuration>'
+              '  <packageSources>'
+              '    <add key="broken-corporate-feed" value="http://127.0.0.1:59999/v3/index.json" />'
+              '  </packageSources>'
+              '  <disabledPackageSources>'
+              '    <add key="nuget.org" value="true" />'
+              '  </disabledPackageSources>'
+              '</configuration>'
+            ) | Set-Content -Path (Join-Path $dirtyAppData "NuGet.Config") -Encoding UTF8
+            $env:APPDATA = Join-Path $dirtyRoot "AppData"
+            $env:USERPROFILE = $dirtyRoot
+            $env:NUGET_PACKAGES = Join-Path $dirtyRoot "pkgs"
+            dotnet restore SmartBacklogAssistant.slnx --locked-mode
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally {
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $dirtyRoot
+          }
+
       - name: Hardened NuGet restore with ephemeral token-scoped auth (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -98,7 +126,7 @@ jobs:
           NUGET_PROXY_FEED_URL: ${{ github.event.inputs.proxy_feed_url || vars.NUGET_PROXY_FEED_URL }}
           NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./scripts/restore-nuget.ps1 -LockedMode:`$true
+          ./scripts/restore-nuget.ps1 -LockedMode:$true
 
       - name: Build solution (Release, warnings as errors)
         run: dotnet build SmartBacklogAssistant.slnx -c Release --no-restore -p:TreatWarningsAsErrors=true
