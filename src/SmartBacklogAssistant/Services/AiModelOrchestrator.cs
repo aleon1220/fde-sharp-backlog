@@ -32,6 +32,7 @@ public sealed class AiModelOrchestrator
             "2" or "gemini" or "google" or "google-gemini" or "googlegemini" => AiProviderType.GoogleGemini,
             "3" or "claude" or "anthropic" or "anthropic-claude" or "anthropicclaude" => AiProviderType.AnthropicClaude,
             "4" or "copilot-sdk" or "github-copilot" or "gh-copilot" or "ghcp" or "copilot_sdk" => AiProviderType.GitHubCopilot,
+            "5" or "openai" or "openai-gateway" or "openaigateway" or "openai_gateway" or "gateway" or "openai-api" => AiProviderType.OpenAiGateway,
             _ => AiProviderType.ManualPrompt
         };
     }
@@ -188,9 +189,11 @@ public sealed class AiModelOrchestrator
             ? $"API key injected ({GeminiSecretProvider.MaskKey(apiKey)})"
             : provider == AiProviderType.GoogleGemini && !liveGenerated
                 ? "API key not required (offline mode)"
-                : provider == AiProviderType.GitHubCopilot
-                    ? "Copilot CLI auth / BYOK"
-                    : "no API key provided";
+                : provider == AiProviderType.OpenAiGateway && !liveGenerated
+                    ? "gateway key not configured / offline mode"
+                    : provider == AiProviderType.GitHubCopilot
+                        ? "Copilot CLI auth / BYOK"
+                        : "no API key provided";
 
         return provider switch
         {
@@ -198,9 +201,13 @@ public sealed class AiModelOrchestrator
                 liveGenerated
                     ? $"[GitHub Copilot SDK ({modelName ?? RuntimeEnvironmentService.DefaultCopilotModel}) | {keyStatus}] Generated backlog draft via Copilot agent runtime."
                     : $"[Offline Copilot Draft ({modelName ?? RuntimeEnvironmentService.DefaultCopilotModel})] Processed prompt using local deterministic fallback.",
+            AiProviderType.OpenAiGateway =>
+                liveGenerated
+                    ? $"[OpenAI Gateway API ({modelName ?? RuntimeEnvironmentService.DefaultOpenAiModel}) | {keyStatus}] Generated backlog draft via OpenAI-compatible gateway."
+                    : $"[Offline OpenAI Gateway Draft ({modelName ?? RuntimeEnvironmentService.DefaultOpenAiModel}) | {keyStatus}] Processed prompt using local deterministic fallback.",
             AiProviderType.AzureOpenAi =>
                 liveGenerated
-                    ? $"[Azure OpenAI / Copilot BYOK ({modelName ?? "gpt-4o"}) | {keyStatus}] Generated backlog draft via live endpoint."
+                    ? $"[Azure OpenAI / Gateway ({modelName ?? "gpt-4o"}) | {keyStatus}] Generated backlog draft via live endpoint."
                     : $"[Mock Orchestrator -> Azure OpenAI ({keyStatus})] Processed prompt using mocked Azure OpenAI model.",
             AiProviderType.GoogleGemini =>
                 liveGenerated
@@ -211,7 +218,7 @@ public sealed class AiModelOrchestrator
                     ? $"[Anthropic Claude / Copilot BYOK ({modelName ?? "claude-sonnet-4.5"}) | {keyStatus}] Generated backlog draft via live endpoint."
                     : $"[Mock Orchestrator -> Anthropic Claude ({keyStatus})] Processed prompt using mocked Claude model.",
             _ =>
-                "[Default Mode -> Prompt from Markdown] Copy the rendered prompt above and run it in your desired AI model (e.g., Microsoft Copilot, Azure OpenAI, Gemini, or Claude). Using baseline draft outcome for review."
+                "[Default Mode -> Prompt from Markdown] Copy the rendered prompt above and run it in your desired AI model (e.g., Microsoft Copilot, OpenAI Gateway, Azure OpenAI, Gemini, or Claude). Using baseline draft outcome for review."
         };
     }
 

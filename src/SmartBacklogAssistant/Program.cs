@@ -27,7 +27,9 @@ public static class Program
         "--copy",
         "--verbosity",
         "--log-level",
-        "--log-format"
+        "--log-format",
+        "--gateway-url", "--base-url", "--openai-base-url",
+        "--wire-api", "--gateway-api"
     };
 
     private static readonly HashSet<string> OptionalBoolValueFlags = new(StringComparer.OrdinalIgnoreCase)
@@ -46,7 +48,7 @@ public static class Program
         TextReader input,
         TextWriter output,
         TextWriter error) =>
-        Execute(args, input, output, error, clipboardService: null, environmentReader: null);
+        Execute(args, input, output, error, clipboardService: null, environmentReader: null, openAiGatewayClient: null);
 
     internal static int Execute(
         string[] args,
@@ -54,7 +56,8 @@ public static class Program
         TextWriter output,
         TextWriter error,
         IClipboardService? clipboardService,
-        Func<string, string?>? environmentReader = null)
+        Func<string, string?>? environmentReader = null,
+        OpenAiGatewayClient? openAiGatewayClient = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(input);
@@ -119,11 +122,13 @@ public static class Program
             var runtimeEnvService = new RuntimeEnvironmentService();
             var secretProvider = new GeminiSecretProvider(environmentReader: environmentReader);
             var geminiApiClient = new GeminiApiClient(logger: loggerFactory.CreateLogger<GeminiApiClient>());
+            var effectiveOpenAiGateway = openAiGatewayClient ?? new OpenAiGatewayClient(logger: loggerFactory.CreateLogger<OpenAiGatewayClient>());
             var modelOrchestrator = new AiModelOrchestrator(loggerFactory.CreateLogger<AiModelOrchestrator>());
             var providerOrchestrator = new AiProviderOrchestrator(
                 geminiApiClient,
                 environmentReader: environmentReader,
-                loggerFactory: loggerFactory);
+                loggerFactory: loggerFactory,
+                openAiGatewayClient: effectiveOpenAiGateway);
             var diagnosticService = new WorkspaceDiagnosticService(
                 workspaceService,
                 runtimeEnvService,
@@ -214,7 +219,8 @@ public static class Program
                 secretProvider,
                 geminiApiClient,
                 providerOrchestrator,
-                loggerFactory);
+                loggerFactory,
+                effectiveOpenAiGateway);
 
             if (ShouldLaunchMenu(args, options))
             {
@@ -339,6 +345,12 @@ public static class Program
         var logFormatInput = TryGetRequiredFlagValue(args, out var parsedLogFormatToken, "--log-format")
             ? parsedLogFormatToken
             : null;
+        var openAiBaseUrl = TryGetRequiredFlagValue(args, out var parsedGatewayUrl, "--gateway-url", "--base-url", "--openai-base-url")
+            ? parsedGatewayUrl
+            : null;
+        var openAiWireApi = TryGetRequiredFlagValue(args, out var parsedWireApi, "--wire-api", "--gateway-api")
+            ? parsedWireApi
+            : null;
         var showAlternatives = HasAnyFlag(args, "--alternatives", "--alts");
         var verbosityArg = GetArgValue(args, "--verbosity");
         var verbosity = HasAnyFlag(args, "--minimal", "--minimalistic")
@@ -376,7 +388,9 @@ public static class Program
             Verbosity: verbosity,
             LogLevelInput: logLevelInput,
             LogFormatInput: logFormatInput,
-            Quiet: quiet);
+            Quiet: quiet,
+            OpenAiBaseUrl: openAiBaseUrl,
+            OpenAiWireApi: openAiWireApi);
     }
 
     public static bool ShouldLaunchMenu(string[] args, WorkflowOptions options)
@@ -716,7 +730,16 @@ public static class Program
 
             if (TryGetRequiredFlagValue(args, out var providerValue, "--provider"))
             {
-                updated = updated with { PreferredProvider = orchestrator.ResolveProvider(providerValue) };
+                var nextProvider = orchestrator.ResolveProvider(providerValue);
+                var previousProvider = updated.PreferredProvider ?? AiProviderType.GoogleGemini;
+                var modelProvidedOnCommandLine = TryGetRequiredFlagValue(args, out _, "--model", "-m");
+                updated = updated with
+                {
+                    PreferredProvider = nextProvider,
+                    ModelName = nextProvider != previousProvider && !modelProvidedOnCommandLine
+                        ? null
+                        : updated.ModelName
+                };
                 changed = true;
             }
 
@@ -728,6 +751,36 @@ public static class Program
                                 modelValue.Equals("default", StringComparison.OrdinalIgnoreCase)
                         ? null
                         : modelValue.Trim()
+                };
+                changed = true;
+            }
+
+            if (TryGetRequiredFlagValue(args, out var gatewayUrlValue, "--gateway-url", "--base-url", "--openai-base-url"))
+            {
+                if (IsResetToken(gatewayUrlValue))
+                {
+                    updated = updated with { OpenAiBaseUrl = null };
+                }
+                else
+                {
+                    if (!OpenAiGatewayClient.TryNormalizeBaseUrl(gatewayUrlValue, out var normalizedGatewayUrl, out var urlError))
+                    {
+                        throw new ArgumentException(urlError ?? $"Invalid OpenAI Gateway URL '{gatewayUrlValue}'.");
+                    }
+
+                    updated = updated with { OpenAiBaseUrl = normalizedGatewayUrl };
+                }
+
+                changed = true;
+            }
+
+            if (TryGetRequiredFlagValue(args, out var wireApiValue, "--wire-api", "--gateway-api"))
+            {
+                updated = updated with
+                {
+                    OpenAiWireApi = IsResetToken(wireApiValue)
+                        ? null
+                        : OpenAiGatewayClient.FormatWireApiCode(OpenAiGatewayClient.ParseWireApiOrThrow(wireApiValue, "--wire-api"))
                 };
                 changed = true;
             }
@@ -852,6 +905,44 @@ public static class Program
             return 0;
         }
 
+        if (activeProvider == AiProviderType.OpenAiGateway)
+        {
+            var openAiConfig = providerOrchestrator.ResolveOpenAiGatewayConfig(
+                explicitApiKey: options.ApiKey,
+                explicitBaseUrl: options.OpenAiBaseUrl,
+                persistedBaseUrl: settings.OpenAiBaseUrl,
+                explicitWireApi: options.OpenAiWireApi,
+                persistedWireApi: settings.OpenAiWireApi);
+
+            if (options.GeminiLive == false || (!openAiConfig.HasApiKey && options.NonInteractive))
+            {
+                var recs = ModelCatalogService.GetRecommendations(AiProviderType.OpenAiGateway);
+                color.WriteHeader($"Recommended OpenAI Gateway Models ({openAiConfig.BaseUrl}):");
+                foreach (var rec in recs)
+                {
+                    output.WriteLine($"{rec.ModelId}\t{rec.DisplayName}\t{rec.Reason}");
+                }
+
+                return 0;
+            }
+
+            var oaSw = Stopwatch.StartNew();
+            var openAiModels = TerminalUx.RunWithSpinner(
+                $"Discovering OpenAI Gateway models ({openAiConfig.BaseUrl})...",
+                () => providerOrchestrator.OpenAiGateway.ListModels(openAiConfig),
+                color);
+            oaSw.Stop();
+            TerminalUx.WriteStepDone(color, "Listed", $"{openAiModels.Count} OpenAI Gateway model(s)", oaSw.Elapsed);
+            foreach (var model in openAiModels)
+            {
+                output.WriteLine(string.IsNullOrWhiteSpace(model.OwnedBy)
+                    ? model.ModelId
+                    : $"{model.ModelId}\t{model.OwnedBy}");
+            }
+
+            return 0;
+        }
+
         var gemSw = Stopwatch.StartNew();
         var secret = secretProvider.ResolveOrPrompt(options.ApiKey, input, output, options.NonInteractive);
         var models = TerminalUx.RunWithSpinner(
@@ -890,14 +981,17 @@ public static class Program
                 output.WriteLine("  --no-json               Write .md artifacts only for this run");
                 output.WriteLine("  -i, --input <path>      Explicit input file or directory override");
                 output.WriteLine("  --output-dir <path>     Explicit output directory override");
-                output.WriteLine("  --provider <name>       AI provider: gemini, copilot-sdk, azure, claude, manual");
+                output.WriteLine("  --provider <name>       AI provider: gemini, copilot-sdk, openai, azure, claude, manual");
                 output.WriteLine("  -m, --model <name>      Target model ID override");
+                output.WriteLine("  --gateway-url <url>     OpenAI-compatible gateway base URL override (env: OPENAI_BASE_URL)");
+                output.WriteLine("  --wire-api <chat|responses> OpenAI Gateway wire API override (default: chat)");
                 output.WriteLine("  --offline               Use local deterministic draft without live API calls");
                 output.WriteLine("  -w, --workspace <path>  Workspace root override");
                 output.WriteLine();
                 output.WriteLine("EXAMPLES:");
                 output.WriteLine("  backlog process all --dry-run");
                 output.WriteLine("  backlog process notes.txt --type both --json");
+                output.WriteLine("  backlog process all --provider openai --gateway-url https://api.openai.com/v1");
                 output.WriteLine("  backlog process all --provider copilot-sdk --offline");
                 return;
 
@@ -916,13 +1010,16 @@ public static class Program
                 output.WriteLine("  --search, --web            Run live Google Search grounding first (Gemini Live mode)");
                 output.WriteLine("  --preview, --dry-run       Preview generated Jira draft in terminal without writing files");
                 output.WriteLine("  --json [on|off]            Write .json alongside .md output");
-                output.WriteLine("  --provider <name>          AI provider: gemini, copilot-sdk, azure, claude, manual");
+                output.WriteLine("  --provider <name>          AI provider: gemini, copilot-sdk, openai, azure, claude, manual");
                 output.WriteLine("  -m, --model <name>         Target model ID override");
+                output.WriteLine("  --gateway-url <url>        OpenAI-compatible gateway base URL override (env: OPENAI_BASE_URL)");
+                output.WriteLine("  --wire-api <chat|responses> OpenAI Gateway wire API override (default: chat)");
                 output.WriteLine("  --offline                  Draft deterministically without live API calls");
                 output.WriteLine();
                 output.WriteLine("EXAMPLES:");
                 output.WriteLine("  backlog draft \"Implement OAuth2 PKCE Login\" --type 01 --preview");
                 output.WriteLine("  backlog draft \"Check Geocaching 2026 hiding movie theme\" -t 02 -d \"Include rules and dates\" --search");
+                output.WriteLine("  backlog draft \"Implement API Rate Limiter\" --provider openai -m gpt-4.1-mini --preview");
                 output.WriteLine("  backlog draft \"Migrate Redis Cache\" --type both --json");
                 return;
 
@@ -934,8 +1031,10 @@ public static class Program
                 output.WriteLine("  --json <on|off>         Enable/disable persistent .json + .md dual export");
                 output.WriteLine("  --in <path|default>     Set custom input directory (./in) or reset to default");
                 output.WriteLine("  --out <path|default>    Set custom output directory (./out) or reset to default");
-                output.WriteLine("  --provider <name>       Set default AI provider (gemini, copilot-sdk, azure, claude, manual)");
+                output.WriteLine("  --provider <name>       Set default AI provider (gemini, copilot-sdk, openai, azure, claude, manual)");
                 output.WriteLine("  -m, --model <name|auto> Pin a model ID or reset to automatic selection");
+                output.WriteLine("  --gateway-url <url|default> Persist OpenAI-compatible gateway base URL (or reset to env/default)");
+                output.WriteLine("  --wire-api <chat|responses|default> Persist OpenAI Gateway wire API (default: chat)");
                 output.WriteLine("  --live <on|off>         Enable/disable live AI generation by default");
                 output.WriteLine("  --theme <agy|uv|kubectl> Set interactive CLI theme palette");
                 output.WriteLine("  --verbosity <min|bal|det> Set default outcome verbosity (Minimalistic, Balanced, Detailed)");
@@ -946,6 +1045,7 @@ public static class Program
                 output.WriteLine();
                 output.WriteLine("EXAMPLES:");
                 output.WriteLine("  backlog config --json on --in ./in --out ./out");
+                output.WriteLine("  backlog config --provider openai --gateway-url https://gateway.internal/v1 --model gpt-4.1-mini");
                 output.WriteLine("  backlog config --provider copilot-sdk --theme uv --log-level debug --log-format json");
                 return;
 
@@ -954,20 +1054,22 @@ public static class Program
                 color.WriteMuted("USAGE: backlog status [OPTIONS]");
                 output.WriteLine();
                 output.WriteLine("Displays a diagnostic table of WSL2/Windows resolved paths, queued ./in file count,");
-                output.WriteLine("active log level/format, export mode (.md / .json), active AI model, Gemini API key status, and Copilot SDK runtime readiness.");
+                output.WriteLine("active log level/format, export mode (.md / .json), active AI model, Gemini API key status, OpenAI Gateway, and Copilot SDK runtime readiness.");
                 output.WriteLine();
                 output.WriteLine("OPTIONS:");
                 output.WriteLine("  -w, --workspace <path>  Inspect a custom workspace root");
                 output.WriteLine("  --provider <name>       Inspect readiness with a specific provider selected");
+                output.WriteLine("  --gateway-url <url>     Inspect readiness with a custom OpenAI Gateway base URL");
+                output.WriteLine("  --wire-api <chat|responses> Inspect readiness with a specific OpenAI Gateway wire API");
                 output.WriteLine("  --log-level <level>     Override effective log level for inspection");
                 output.WriteLine("  --theme <agy|uv|kubectl> Override table color palette");
                 return;
 
             case "models":
                 color.WriteHeader("List Supported AI Models");
-                color.WriteMuted("USAGE: backlog models [--provider <gemini|copilot-sdk>]");
+                color.WriteMuted("USAGE: backlog models [--provider <gemini|copilot-sdk|openai>]");
                 output.WriteLine();
-                output.WriteLine("Lists models available to your active provider (Google Gemini or GitHub Copilot SDK).");
+                output.WriteLine("Lists models available to your active provider (Google Gemini, GitHub Copilot SDK, or OpenAI Gateway).");
                 return;
 
             case "preview":
@@ -999,7 +1101,7 @@ public static class Program
         output.WriteLine("  draft \"<Goal or Title>\"  Draft a Type01 User Story and/or Type02 Schedule Item (alias: add)");
         output.WriteLine("  preview [<file>|latest]  Preview a saved ./out/*.md file in one colored table (alias: view)");
         output.WriteLine("  status                   Show WSL2/Windows paths, queued files, & AI readiness table (alias: doctor)");
-        output.WriteLine("  config                   Configure persisted settings (--json, --in, --out, --provider, --log-level, --theme)");
+        output.WriteLine("  config                   Configure persisted settings (--json, --in, --out, --provider, --gateway-url, --log-level, --theme)");
         output.WriteLine("  models                   List available models for the active AI provider");
         output.WriteLine("  menu | tui               Launch interactive Gemini Agy REPL/TUI (default when no args given)");
         output.WriteLine("  version                  Print build, .NET runtime, and architecture information");
@@ -1011,13 +1113,15 @@ public static class Program
         output.WriteLine("  universal submenu [b]ack/[q]uit navigation, theme-matched option highlights, and @filename context mentions.");
         output.WriteLine();
         output.WriteLine("AI PROVIDERS (--provider):");
-        output.WriteLine("  gemini (default) | copilot-sdk (Microsoft.Copilot.SDK) | azure | claude | manual");
+        output.WriteLine("  gemini (default) | copilot-sdk (Microsoft.Copilot.SDK) | openai (OpenAI Gateway API) | azure | claude | manual");
         output.WriteLine();
         output.WriteLine("GLOBAL OPTIONS:");
         output.WriteLine("  -w, --workspace <path>       Workspace root override (c:\\workspace on Win, /mnt/c/workspace on WSL)");
         output.WriteLine("  -p, --prompt <path>          Markdown prompt template path override");
         output.WriteLine("  --api-key <key>              Provider API key or GitHub token");
         output.WriteLine("  -m, --model <name>           Model ID override");
+        output.WriteLine("  --gateway-url <url>          OpenAI-compatible gateway base URL (env: OPENAI_BASE_URL)");
+        output.WriteLine("  --wire-api <chat|responses>  OpenAI Gateway wire API: chat (default) or responses (env: OPENAI_WIRE_API)");
         output.WriteLine("  -d, --details <text>         Additional context/requirements for goal drafts");
         output.WriteLine("  --search, --web              Run Google Search grounding on goal drafts (Gemini Live)");
         output.WriteLine("  --offline / --live           Toggle live AI generation vs local deterministic drafting");
@@ -1035,6 +1139,7 @@ public static class Program
         output.WriteLine("  backlog                                              # Launch Gemini/Agy interactive REPL");
         output.WriteLine("  backlog process all --dry-run --log-level debug      # Preview all ./in files with stderr diagnostics");
         output.WriteLine("  backlog draft \"OAuth2 PKCE Login\" -t 01 --preview    # Quick-draft without disk write");
+        output.WriteLine("  backlog draft \"OAuth2 PKCE\" --provider openai --gateway-url https://api.openai.com/v1");
         output.WriteLine("  backlog config --json on --log-level info            # Persist workspace & logging overrides");
         output.WriteLine("  backlog status                                       # Crisp WSL2/Windows & AI table");
     }
@@ -1210,6 +1315,13 @@ public static class Program
         }
 
         var hasExplicitVerbosity = HasAnyFlag(args, "--verbosity", "--minimal", "--minimalistic", "--detailed");
+        var modelOrchestrator = new AiModelOrchestrator();
+        var explicitProviderOverride = !string.IsNullOrWhiteSpace(options.ProviderInput)
+            ? modelOrchestrator.ResolveProvider(options.ProviderInput)
+            : (AiProviderType?)null;
+        var persistedProvider = persistedSettings.PreferredProvider ?? AiProviderType.GoogleGemini;
+        var switchedProviderWithoutModel = explicitProviderOverride is { } overrideProv &&
+                                           overrideProv != persistedProvider;
 
         return options with
         {
@@ -1222,11 +1334,17 @@ public static class Program
             ProviderInput = effectiveProvider,
             JsonFileOut = effectiveJsonOut,
             CliTheme = effectiveTheme,
-            ModelName = options.ModelName ?? persistedSettings.ModelName,
+            ModelName = !string.IsNullOrWhiteSpace(options.ModelName)
+                ? options.ModelName
+                : switchedProviderWithoutModel
+                    ? null
+                    : persistedSettings.ModelName,
             GeminiLive = options.GeminiLive ?? persistedSettings.GeminiLive ?? true,
             Verbosity = hasExplicitVerbosity
                 ? options.Verbosity
-                : persistedSettings.DefaultVerbosity ?? options.Verbosity
+                : persistedSettings.DefaultVerbosity ?? options.Verbosity,
+            PersistedOpenAiBaseUrl = persistedSettings.OpenAiBaseUrl,
+            PersistedOpenAiWireApi = persistedSettings.OpenAiWireApi
         };
     }
 

@@ -200,11 +200,32 @@ public static class TerminalUx
             return "Check network/proxy connectivity or rerun with '--offline' for deterministic local drafting.";
         }
 
+        if (msg.Contains("wire API", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("--wire-api", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains(OpenAiGatewayClient.WireApiEnvVar, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"Use '--wire-api <{OpenAiGatewayClient.ValidWireApisDisplay}>' or set {OpenAiGatewayClient.WireApiEnvVar} (default: chat).";
+        }
+
+        if (msg.Contains("Gateway URL", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("--gateway-url", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains(OpenAiGatewayClient.BaseUrlEnvVar, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"Pass a valid http:// or https:// base URL via '--gateway-url <url>' or {OpenAiGatewayClient.BaseUrlEnvVar} (e.g. https://api.openai.com/v1).";
+        }
+
         if (msg.Contains("API key", StringComparison.OrdinalIgnoreCase) ||
             msg.Contains("401", StringComparison.OrdinalIgnoreCase) ||
             msg.Contains("403", StringComparison.OrdinalIgnoreCase) ||
             msg.Contains("API_KEY_INVALID", StringComparison.OrdinalIgnoreCase))
         {
+            if (msg.Contains("OpenAI", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("gateway", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("AZURE_OPENAI", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"Set {OpenAiGatewayClient.ApiKeyEnvVar} (+ optional {OpenAiGatewayClient.BaseUrlEnvVar}), pass '--api-key <key>', or rerun with '--offline'.";
+            }
+
             return $"Set GEMINI_API_KEY (from {GeminiSecretProvider.GeminiApiKeysUrl}), pass '--api-key <key>', or use '--offline' / '--provider copilot-sdk'.";
         }
 
@@ -236,9 +257,11 @@ public static class TerminalUx
                 ? ModelCatalogService.CopilotSupportedModelsDocsUrl
                 : msg.Contains("Azure", StringComparison.OrdinalIgnoreCase)
                     ? ModelCatalogService.AzureOpenAiModelsDocsUrl
-                    : msg.Contains("Claude", StringComparison.OrdinalIgnoreCase) || msg.Contains("Anthropic", StringComparison.OrdinalIgnoreCase)
-                        ? ModelCatalogService.AnthropicModelsDocsUrl
-                        : ModelCatalogService.GeminiModelsDocsUrl;
+                    : msg.Contains("OpenAI", StringComparison.OrdinalIgnoreCase)
+                        ? ModelCatalogService.OpenAiModelsDocsUrl
+                        : msg.Contains("Claude", StringComparison.OrdinalIgnoreCase) || msg.Contains("Anthropic", StringComparison.OrdinalIgnoreCase)
+                            ? ModelCatalogService.AnthropicModelsDocsUrl
+                            : ModelCatalogService.GeminiModelsDocsUrl;
 
             return $"Selected model may be retired, embedding/media-only, or restricted by your plan/region/policy. Official docs: {docs} — or run 'backlog models' / Workspace & Settings -> [1] Select AI Provider.";
         }

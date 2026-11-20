@@ -105,11 +105,20 @@ public sealed class CliMenuRunner
             ? _orchestrator.ResolveProvider(baseOptions.ProviderInput)
             : persistedSettings.PreferredProvider ?? AiProviderType.GoogleGemini;
 
+        var persistedProvider = persistedSettings.PreferredProvider ?? AiProviderType.GoogleGemini;
+        var switchedProviderWithoutModel = !string.IsNullOrWhiteSpace(baseOptions.ProviderInput) &&
+                                           string.IsNullOrWhiteSpace(baseOptions.ModelName) &&
+                                           resolvedProvider != persistedProvider;
+
         var currentSettings = persistedSettings with
         {
             JsonFileOut = baseOptions.JsonFileOut ?? persistedSettings.JsonFileOut,
             Theme = resolvedTheme,
-            ModelName = baseOptions.ModelName ?? persistedSettings.ModelName,
+            ModelName = !string.IsNullOrWhiteSpace(baseOptions.ModelName)
+                ? baseOptions.ModelName
+                : switchedProviderWithoutModel
+                    ? null
+                    : persistedSettings.ModelName,
             GeminiLive = baseOptions.GeminiLive ?? persistedSettings.GeminiLive ?? true,
             PreferredProvider = resolvedProvider,
             DefaultVerbosity = persistedSettings.DefaultVerbosity,
@@ -140,7 +149,9 @@ public sealed class CliMenuRunner
             ModelName = currentSettings.ModelName,
             GeminiLive = currentSettings.GeminiLive,
             ProviderInput = RuntimeEnvironmentService.FormatProviderCode(resolvedProvider),
-            Verbosity = resolvedVerbosity
+            Verbosity = resolvedVerbosity,
+            PersistedOpenAiBaseUrl = currentSettings.OpenAiBaseUrl,
+            PersistedOpenAiWireApi = currentSettings.OpenAiWireApi
         };
 
         SyncActiveLogging(sessionOptions, currentSettings);
@@ -184,9 +195,7 @@ public sealed class CliMenuRunner
         var themeCode = ConsoleColorWriter.GetThemeCode(currentSettings.Theme);
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
         var providerCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
-        var modelLabel = currentSettings.ModelName ?? (activeProvider == AiProviderType.GitHubCopilot
-            ? RuntimeEnvironmentService.DefaultCopilotModel
-            : "auto");
+        var modelLabel = currentSettings.ModelName ?? ResolveDefaultModelLabel(activeProvider);
 
         var inDisplay = WorkspacePathService.FormatCompactLabel(workspace.InputDirectory, baseWorkspace.InputDirectory, "./in");
         var outDisplay = WorkspacePathService.FormatCompactLabel(
@@ -333,9 +342,7 @@ public sealed class CliMenuRunner
         var savedFiles = GetSavedMarkdownFiles(sessionOptions.OutputDirectory ?? workspace.OutputDirectory);
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
         var providerCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
-        var modelLabel = currentSettings.ModelName ?? (activeProvider == AiProviderType.GitHubCopilot
-            ? RuntimeEnvironmentService.DefaultCopilotModel
-            : "auto");
+        var modelLabel = currentSettings.ModelName ?? ResolveDefaultModelLabel(activeProvider);
 
         var activeLogging = ResolveActiveLogging(sessionOptions, currentSettings);
         color.WriteLine();
@@ -492,9 +499,7 @@ public sealed class CliMenuRunner
         var files = _workspaceService.GetInputFiles(workspace.InputDirectory);
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
         var providerCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
-        var modelLabel = currentSettings.ModelName ?? (activeProvider == AiProviderType.GitHubCopilot
-            ? RuntimeEnvironmentService.DefaultCopilotModel
-            : "auto");
+        var modelLabel = currentSettings.ModelName ?? ResolveDefaultModelLabel(activeProvider);
 
         color.WriteLine();
         color.WriteHeader("=== Create / Generate Backlog ===");
@@ -718,9 +723,18 @@ public sealed class CliMenuRunner
                         return MenuState.ProviderSelector;
                     }
 
+                    var previousProvider = currentSettings.PreferredProvider ?? AiProviderType.GoogleGemini;
                     var resolved = _orchestrator.ResolveProvider(args[0]);
-                    currentSettings = currentSettings with { PreferredProvider = resolved };
-                    sessionOptions = sessionOptions with { ProviderInput = RuntimeEnvironmentService.FormatProviderCode(resolved) };
+                    currentSettings = currentSettings with
+                    {
+                        PreferredProvider = resolved,
+                        ModelName = resolved != previousProvider ? null : currentSettings.ModelName
+                    };
+                    sessionOptions = sessionOptions with
+                    {
+                        ProviderInput = RuntimeEnvironmentService.FormatProviderCode(resolved),
+                        ModelName = currentSettings.ModelName
+                    };
                     var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
                     color.WriteSuccess($"Active AI Provider set to '{RuntimeEnvironmentService.FormatProviderCode(resolved)}'. Saved settings to '{savedPath}'.");
                     return returnState;
@@ -1211,7 +1225,14 @@ public sealed class CliMenuRunner
             var providerArg = GetInlineFlagValue(args, "--provider");
             if (!string.IsNullOrWhiteSpace(providerArg))
             {
-                updated = updated with { PreferredProvider = _orchestrator.ResolveProvider(providerArg) };
+                var nextProvider = _orchestrator.ResolveProvider(providerArg);
+                var previousProvider = updated.PreferredProvider ?? AiProviderType.GoogleGemini;
+                var hasInlineModel = !string.IsNullOrWhiteSpace(GetInlineFlagValue(args, "--model", "-m"));
+                updated = updated with
+                {
+                    PreferredProvider = nextProvider,
+                    ModelName = nextProvider != previousProvider && !hasInlineModel ? null : updated.ModelName
+                };
             }
 
             var modelArg = GetInlineFlagValue(args, "--model", "-m");
@@ -1220,6 +1241,37 @@ public sealed class CliMenuRunner
                 updated = updated with
                 {
                     ModelName = string.Equals(modelArg, "auto", StringComparison.OrdinalIgnoreCase) ? null : modelArg.Trim()
+                };
+            }
+
+            var gatewayUrlArg = GetInlineFlagValue(args, "--gateway-url", "--base-url", "--openai-base-url");
+            if (!string.IsNullOrWhiteSpace(gatewayUrlArg))
+            {
+                if (gatewayUrlArg.Equals("default", StringComparison.OrdinalIgnoreCase) ||
+                    gatewayUrlArg.Equals("reset", StringComparison.OrdinalIgnoreCase))
+                {
+                    updated = updated with { OpenAiBaseUrl = null };
+                }
+                else
+                {
+                    if (!OpenAiGatewayClient.TryNormalizeBaseUrl(gatewayUrlArg, out var normalizedGatewayUrl, out var urlError))
+                    {
+                        throw new ArgumentException(urlError ?? $"Invalid OpenAI Gateway URL '{gatewayUrlArg}'.");
+                    }
+
+                    updated = updated with { OpenAiBaseUrl = normalizedGatewayUrl };
+                }
+            }
+
+            var wireApiArg = GetInlineFlagValue(args, "--wire-api", "--gateway-api");
+            if (!string.IsNullOrWhiteSpace(wireApiArg))
+            {
+                updated = updated with
+                {
+                    OpenAiWireApi = wireApiArg.Equals("default", StringComparison.OrdinalIgnoreCase) ||
+                                    wireApiArg.Equals("reset", StringComparison.OrdinalIgnoreCase)
+                        ? null
+                        : OpenAiGatewayClient.FormatWireApiCode(OpenAiGatewayClient.ParseWireApiOrThrow(wireApiArg, "--wire-api"))
                 };
             }
 
@@ -1287,6 +1339,8 @@ public sealed class CliMenuRunner
             ProviderInput = RuntimeEnvironmentService.FormatProviderCode(
                 currentSettings.PreferredProvider ?? AiProviderType.GoogleGemini),
             Verbosity = currentSettings.DefaultVerbosity ?? OutcomeVerbosity.Balanced,
+            PersistedOpenAiBaseUrl = currentSettings.OpenAiBaseUrl,
+            PersistedOpenAiWireApi = currentSettings.OpenAiWireApi,
             LogLevelInput = resetRequested
                 ? null
                 : !string.IsNullOrWhiteSpace(updatedLogLevelArg)
@@ -1608,7 +1662,7 @@ public sealed class CliMenuRunner
         var details = MergeDetails(parsedGoal.InlineDetails, extraDetailsLine);
         var webSearch = parsedGoal.EnableWebSearch;
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
-        var liveEnabled = currentSettings.GeminiLive ?? (activeProvider == AiProviderType.GitHubCopilot);
+        var liveEnabled = currentSettings.GeminiLive ?? (activeProvider is AiProviderType.GitHubCopilot or AiProviderType.OpenAiGateway);
 
         if (!webSearch && activeProvider == AiProviderType.GoogleGemini && liveEnabled)
         {
@@ -2426,36 +2480,50 @@ public sealed class CliMenuRunner
     {
         var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
         var activeProviderCode = RuntimeEnvironmentService.FormatProviderCode(activeProvider);
+        var openAiConfig = _workflow.ProviderOrchestrator.ResolveOpenAiGatewayConfig(
+            explicitApiKey: activeProvider == AiProviderType.OpenAiGateway ? sessionOptions.ApiKey : null,
+            explicitBaseUrl: sessionOptions.OpenAiBaseUrl,
+            persistedBaseUrl: currentSettings.OpenAiBaseUrl,
+            explicitWireApi: sessionOptions.OpenAiWireApi,
+            persistedWireApi: currentSettings.OpenAiWireApi);
         color.WriteLine();
         color.WriteHeader("=== AI Provider Orchestrator ===");
-        color.WriteMuted($"  Active Provider : {activeProviderCode} │ Model: {currentSettings.ModelName ?? "automatic"}");
-        color.WriteMuted("  Recommendation  : 'gemini' (fast AI Studio tier) or 'copilot-sdk' (GitHub Copilot runtime).");
+        color.WriteMuted($"  Active Provider : {activeProviderCode} │ Model: {currentSettings.ModelName ?? ResolveDefaultModelLabel(activeProvider)}");
+        if (activeProvider == AiProviderType.OpenAiGateway || currentSettings.OpenAiBaseUrl is not null)
+        {
+            color.WriteMuted($"  OpenAI Gateway  : {openAiConfig.BaseUrl} ({openAiConfig.WireApiCode}) │ Key: {(openAiConfig.HasApiKey ? openAiConfig.MaskedApiKey : "not set")}");
+        }
+
+        color.WriteMuted("  Recommendation  : 'gemini' (AI Studio), 'copilot-sdk' (Copilot), or 'openai' (OpenAI Gateway API).");
         color.WriteLine();
 
         var options = new List<HighlightedMenuOption>
         {
             BuildProviderOption("1", "Google Gemini (gemini)", "Live REST generateContent or offline deterministic mode", activeProvider == AiProviderType.GoogleGemini, isRecommended: true),
             BuildProviderOption("2", "GitHub Copilot SDK (copilot-sdk)", "Official Microsoft.Copilot.SDK agent runtime & BYOK", activeProvider == AiProviderType.GitHubCopilot, isRecommended: true),
-            BuildProviderOption("3", "Azure OpenAI / Foundry (azure)", "Copilot SDK BYOK when configured, else mock fallback", activeProvider == AiProviderType.AzureOpenAi, isRecommended: false),
-            BuildProviderOption("4", "Anthropic Claude (claude)", "Copilot SDK BYOK when configured, else mock fallback", activeProvider == AiProviderType.AnthropicClaude, isRecommended: false),
-            BuildProviderOption("5", "Manual Prompt (manual)", "Render Markdown prompt for copy/paste into Copilot or any AI", activeProvider == AiProviderType.ManualPrompt, isRecommended: false),
+            BuildProviderOption("3", "OpenAI Gateway API (openai)", "Direct HTTP /v1/chat/completions or /v1/responses + custom URL", activeProvider == AiProviderType.OpenAiGateway, isRecommended: true),
+            BuildProviderOption("4", "Azure OpenAI / Foundry (azure)", "Direct HTTP or Copilot SDK BYOK when configured, else mock fallback", activeProvider == AiProviderType.AzureOpenAi, isRecommended: false),
+            BuildProviderOption("5", "Anthropic Claude (claude)", "Copilot SDK BYOK when configured, else mock fallback", activeProvider == AiProviderType.AnthropicClaude, isRecommended: false),
+            BuildProviderOption("6", "Manual Prompt (manual)", "Render Markdown prompt for copy/paste into Copilot or any AI", activeProvider == AiProviderType.ManualPrompt, isRecommended: false),
             new("M", $"Select Model for '{activeProviderCode}'", null, null, null, "Configure model, view recommendations & official docs"),
+            new("G", "Configure OpenAI Gateway URL / API", currentSettings.OpenAiBaseUrl ?? "default", ConsoleColor.Black, ConsoleColor.Cyan, "Set custom gateway base URL & chat/responses wire API"),
             new("0", "Back to Workspace & Settings")
         };
 
         var activeProviderIndex = activeProvider switch
         {
             AiProviderType.GitHubCopilot => 1,
-            AiProviderType.AzureOpenAi => 2,
-            AiProviderType.AnthropicClaude => 3,
-            AiProviderType.ManualPrompt => 4,
+            AiProviderType.OpenAiGateway => 2,
+            AiProviderType.AzureOpenAi => 3,
+            AiProviderType.AnthropicClaude => 4,
+            AiProviderType.ManualPrompt => 5,
             _ => 0
         };
 
         var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
             options,
             activeProviderIndex,
-            "Select AI provider (0-5, M=model, ↑/↓, b=back, q=quit): ",
+            "Select AI provider (0-6, M=model, G=gateway, ↑/↓, b=back, q=quit): ",
             input,
             color);
         if (choice is null)
@@ -2479,19 +2547,25 @@ public sealed class CliMenuRunner
             return MenuState.ModelSelector;
         }
 
+        if (normalized is "g" or "gateway")
+        {
+            return ConfigureOpenAiGatewayInteractive(baseWorkspace, ref sessionOptions, ref currentSettings, input, color);
+        }
+
         AiProviderType? selected = normalized switch
         {
             "1" or "gemini" => AiProviderType.GoogleGemini,
             "2" or "copilot-sdk" or "github-copilot" => AiProviderType.GitHubCopilot,
-            "3" or "azure" => AiProviderType.AzureOpenAi,
-            "4" or "claude" or "anthropic" => AiProviderType.AnthropicClaude,
-            "5" or "manual" => AiProviderType.ManualPrompt,
+            "3" or "openai" or "openai-gateway" or "gateway" => AiProviderType.OpenAiGateway,
+            "4" or "azure" => AiProviderType.AzureOpenAi,
+            "5" or "claude" or "anthropic" => AiProviderType.AnthropicClaude,
+            "6" or "manual" => AiProviderType.ManualPrompt,
             _ => null
         };
 
         if (selected is null)
         {
-            return WarnAndStay(color, choice, "0-5, M=model", MenuState.ProviderSelector);
+            return WarnAndStay(color, choice, "0-6, M=model, G=gateway", MenuState.ProviderSelector);
         }
 
         var providerCode = RuntimeEnvironmentService.FormatProviderCode(selected.Value);
@@ -2516,6 +2590,88 @@ public sealed class CliMenuRunner
         }
 
         return MenuState.ModelSelector;
+    }
+
+    private MenuState ConfigureOpenAiGatewayInteractive(
+        WorkspaceDirectories baseWorkspace,
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        TextReader input,
+        ConsoleColorWriter color)
+    {
+        color.WriteLine();
+        color.WriteSubHeader("--- OpenAI Gateway Configuration ---");
+        color.WriteMuted($"  Current URL     : {currentSettings.OpenAiBaseUrl ?? "(env OPENAI_BASE_URL or https://api.openai.com/v1)"}");
+        color.WriteMuted($"  Current Wire API: {currentSettings.OpenAiWireApi ?? "chat (default: /v1/chat/completions)"}");
+        color.WriteColored("Enter Gateway Base URL (or 'default' to clear, Enter to keep current): ", ConsoleColor.Yellow);
+        var urlInput = input.ReadLine();
+        if (urlInput is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var updated = currentSettings;
+        var trimmedUrl = urlInput.Trim();
+        if (!string.IsNullOrEmpty(trimmedUrl))
+        {
+            if (trimmedUrl.Equals("default", StringComparison.OrdinalIgnoreCase) ||
+                trimmedUrl.Equals("reset", StringComparison.OrdinalIgnoreCase))
+            {
+                updated = updated with { OpenAiBaseUrl = null };
+            }
+            else if (OpenAiGatewayClient.TryNormalizeBaseUrl(trimmedUrl, out var normalizedUrl, out var urlError))
+            {
+                updated = updated with { OpenAiBaseUrl = normalizedUrl };
+            }
+            else
+            {
+                color.WriteWarning($"  [!] {urlError}");
+                return MenuState.ProviderSelector;
+            }
+        }
+
+        color.WriteColored("Wire API ([1] chat/completions, [2] responses, 'default' to clear, Enter to keep): ", ConsoleColor.Yellow);
+        var wireInput = input.ReadLine();
+        if (wireInput is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var trimmedWire = wireInput.Trim().ToLowerInvariant();
+        if (!string.IsNullOrEmpty(trimmedWire))
+        {
+            if (trimmedWire is "default" or "reset")
+            {
+                updated = updated with { OpenAiWireApi = null };
+            }
+            else if (trimmedWire is "1" or "chat")
+            {
+                updated = updated with { OpenAiWireApi = "chat" };
+            }
+            else if (trimmedWire is "2" or "responses" or "response")
+            {
+                updated = updated with { OpenAiWireApi = "responses" };
+            }
+            else if (OpenAiGatewayClient.TryParseWireApi(trimmedWire, out var parsedWire))
+            {
+                updated = updated with { OpenAiWireApi = OpenAiGatewayClient.FormatWireApiCode(parsedWire) };
+            }
+            else
+            {
+                color.WriteWarning($"  [!] Unknown wire API '{wireInput.Trim()}'. Choose chat or responses.");
+                return MenuState.ProviderSelector;
+            }
+        }
+
+        currentSettings = updated;
+        sessionOptions = sessionOptions with
+        {
+            PersistedOpenAiBaseUrl = currentSettings.OpenAiBaseUrl,
+            PersistedOpenAiWireApi = currentSettings.OpenAiWireApi
+        };
+        var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
+        color.WriteSuccess($"OpenAI Gateway settings updated (URL: {currentSettings.OpenAiBaseUrl ?? "default"}, API: {currentSettings.OpenAiWireApi ?? "chat"}). Saved to '{savedPath}'.");
+        return MenuState.ProviderSelector;
     }
 
     private MenuState ShowModelMenu(
@@ -2606,6 +2762,55 @@ public sealed class CliMenuRunner
                 discoveryNote = "Copilot runtime unavailable offline; showing recommended Copilot models.";
             }
         }
+        else if (activeProvider == AiProviderType.OpenAiGateway)
+        {
+            var gatewayConfig = _workflow.ProviderOrchestrator.ResolveOpenAiGatewayConfig(
+                explicitApiKey: sessionOptions.ApiKey,
+                explicitBaseUrl: sessionOptions.OpenAiBaseUrl,
+                persistedBaseUrl: currentSettings.OpenAiBaseUrl,
+                explicitWireApi: sessionOptions.OpenAiWireApi,
+                persistedWireApi: currentSettings.OpenAiWireApi);
+
+            if (!gatewayConfig.IsValidBaseUrl)
+            {
+                discoveryNote = $"{gatewayConfig.ValidationError} Showing curated OpenAI recommendations.";
+            }
+            else if (gatewayConfig.HasApiKey)
+            {
+                try
+                {
+                    var explicitApiKey = sessionOptions.ApiKey;
+                    var explicitBaseUrl = sessionOptions.OpenAiBaseUrl;
+                    var persistedBaseUrl = currentSettings.OpenAiBaseUrl;
+                    var catalog = TerminalUx.RunWithSpinner(
+                        $"Discovering OpenAI Gateway models ({gatewayConfig.BaseUrl})...",
+                        () => _workflow.ListOpenAiModelCatalog(
+                            explicitApiKey,
+                            explicitBaseUrl,
+                            persistedBaseUrl),
+                        color);
+                    unsupportedHints = catalog.UnsupportedModelCapabilities;
+                    (liveModelIds, discoveryNote) = MergeLiveDiscoveryEntries(
+                        catalogEntries,
+                        catalog.SupportedModels.Select(m => new ModelRecommendation(
+                            m.ModelId,
+                            m.ModelId,
+                            "live",
+                            string.IsNullOrWhiteSpace(m.OwnedBy)
+                                ? "Available on configured OpenAI Gateway"
+                                : $"Available via OpenAI Gateway ({m.OwnedBy})")),
+                        providerCode);
+                }
+                catch (Exception ex)
+                {
+                    discoveryNote = $"Could not query live OpenAI Gateway models ({ex.Message}); showing curated recommendations.";
+                }
+            }
+            else
+            {
+                discoveryNote = $"OPENAI_API_KEY not configured; showing recommended OpenAI models ({ModelCatalogService.OpenAiModelsDocsUrl}).";
+            }
+        }
 
         // When live catalog discovery succeeded, filter out curated entries that are absent on this key/account
         // unless they are currently pinned, so users see actionable choices and clear reasons.
@@ -2620,9 +2825,12 @@ public sealed class CliMenuRunner
 
         var defaultRecommendedId = displayEntries.FirstOrDefault(e => e.IsRecommended)?.ModelId
             ?? displayEntries.FirstOrDefault()?.ModelId
-            ?? (activeProvider == AiProviderType.GitHubCopilot
-                ? RuntimeEnvironmentService.DefaultCopilotModel
-                : RuntimeEnvironmentService.DefaultGeminiModel);
+            ?? (activeProvider switch
+            {
+                AiProviderType.GitHubCopilot => RuntimeEnvironmentService.DefaultCopilotModel,
+                AiProviderType.OpenAiGateway => RuntimeEnvironmentService.DefaultOpenAiModel,
+                _ => RuntimeEnvironmentService.DefaultGeminiModel
+            });
 
         while (true)
         {
@@ -2988,8 +3196,27 @@ public sealed class CliMenuRunner
             GeminiSecretProvider.FallbackEnvVar
         })
         {
-            var isConfigured = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(variableName));
+            var isConfigured = !string.IsNullOrWhiteSpace(_environmentReader(variableName));
             color.WriteLine($"  {variableName}: {(isConfigured ? "configured" : "not set")}");
+        }
+
+        color.WriteLine();
+        color.WriteSubHeader("--- OpenAI Gateway Environment Variables ---");
+        foreach (var variableName in new[]
+        {
+            OpenAiGatewayClient.ApiKeyEnvVar,
+            OpenAiGatewayClient.BaseUrlEnvVar,
+            OpenAiGatewayClient.WireApiEnvVar,
+            RuntimeEnvironmentService.OpenAiModelEnvVar
+        })
+        {
+            var rawValue = _environmentReader(variableName);
+            var status = string.IsNullOrWhiteSpace(rawValue)
+                ? "not set"
+                : string.Equals(variableName, OpenAiGatewayClient.ApiKeyEnvVar, StringComparison.Ordinal)
+                    ? $"configured [{GeminiSecretProvider.MaskKey(rawValue)}]"
+                    : rawValue.Trim();
+            color.WriteLine($"  {variableName}: {status}");
         }
 
         var provider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
@@ -3033,6 +3260,64 @@ public sealed class CliMenuRunner
                 color.WriteLine($"  • {model.Id,-28} {model.Name}");
             }
 
+            return;
+        }
+
+        if (provider == AiProviderType.OpenAiGateway)
+        {
+            var gatewayConfig = _workflow.ProviderOrchestrator.ResolveOpenAiGatewayConfig(
+                explicitApiKey: sessionOptions.ApiKey,
+                explicitBaseUrl: sessionOptions.OpenAiBaseUrl,
+                persistedBaseUrl: currentSettings.OpenAiBaseUrl,
+                explicitWireApi: sessionOptions.OpenAiWireApi,
+                persistedWireApi: currentSettings.OpenAiWireApi);
+
+            if (!gatewayConfig.IsValidBaseUrl)
+            {
+                color.WriteWarning($"  [!] {gatewayConfig.ValidationError}");
+            }
+            else if (gatewayConfig.HasApiKey && sessionOptions.GeminiLive != false)
+            {
+                try
+                {
+                    var catalog = TerminalUx.RunWithSpinner(
+                        $"Discovering OpenAI Gateway models ({gatewayConfig.BaseUrl})...",
+                        () => _workflow.ListOpenAiModelCatalog(
+                            sessionOptions.ApiKey,
+                            sessionOptions.OpenAiBaseUrl,
+                            currentSettings.OpenAiBaseUrl),
+                        color);
+                    if (catalog.SupportedModels.Count > 0)
+                    {
+                        color.WriteHeader($"Available OpenAI Gateway Models ({gatewayConfig.BaseUrl}):");
+                        foreach (var model in catalog.SupportedModels)
+                        {
+                            var ownerSuffix = string.IsNullOrWhiteSpace(model.OwnedBy) ? string.Empty : $" ({model.OwnedBy})";
+                            color.WriteLine($"  • {model.ModelId,-28} {model.ModelId}{ownerSuffix}");
+                        }
+
+                        return;
+                    }
+
+                    color.WriteWarning("  [i] Gateway returned no compatible chat/responses models; showing curated recommendations.");
+                }
+                catch (Exception ex)
+                {
+                    color.WriteWarning($"  [!] Could not query live OpenAI Gateway models ({ex.Message}); showing curated recommendations.");
+                }
+            }
+            else if (sessionOptions.GeminiLive == false)
+            {
+                color.WriteMuted("  Offline mode (--offline) active; showing curated OpenAI recommendations.");
+            }
+            else
+            {
+                color.WriteWarning($"  [i] {OpenAiGatewayClient.ApiKeyEnvVar} not configured; showing curated OpenAI recommendations.");
+            }
+
+            color.WriteHeader("Recommended Models (openai):");
+            WriteModelRecommendations(color, ModelCatalogService.GetRecommendations(provider));
+            color.WriteMuted($"  Official Docs: {ModelCatalogService.GetOfficialDocsUrl(provider)}");
             return;
         }
 
@@ -3920,8 +4205,8 @@ public sealed class CliMenuRunner
         color.WriteLine("  /log-level     Set stderr log severity: /log-level [trace|debug|info|warning|error|critical|none|default]");
         color.WriteLine("  /log-format    Switch stderr log serialization: /log-format [text|json|default]");
         color.WriteLine("  /status        Show crisp WSL2/Windows paths, queued files, & AI provider readiness table");
-        color.WriteLine("  /config        Show or update settings: /config [--json on|off] [--in <dir>] [--out <dir>] [--verbosity min|bal|det] [--log-level <lvl>] [--log-format text|json]");
-        color.WriteLine("  /provider      Switch AI orchestrator provider (gemini, copilot-sdk, azure, claude, manual)");
+        color.WriteLine("  /config        Show or update settings: /config [--json on|off] [--in <dir>] [--out <dir>] [--verbosity min|bal|det] [--log-level <lvl>] [--log-format text|json] [--gateway-url <url>] [--wire-api chat|responses]");
+        color.WriteLine("  /provider      Switch AI orchestrator provider (gemini, copilot-sdk, openai, azure, claude, manual)");
         color.WriteLine("  /models        List available models for the active provider");
         color.WriteLine("  /theme         Switch CLI theme (agy, uv, kubectl)");
         color.WriteLine("  /json [on|off] Toggle dual .md + .json artifact export");
@@ -4152,6 +4437,13 @@ public sealed class CliMenuRunner
 
         return positional;
     }
+
+    private static string ResolveDefaultModelLabel(AiProviderType activeProvider) => activeProvider switch
+    {
+        AiProviderType.GitHubCopilot => RuntimeEnvironmentService.DefaultCopilotModel,
+        AiProviderType.OpenAiGateway => RuntimeEnvironmentService.DefaultOpenAiModel,
+        _ => "auto"
+    };
 
     private static MenuState WarnAndStay(
         ConsoleColorWriter color,

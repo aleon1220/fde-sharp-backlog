@@ -761,6 +761,186 @@ public sealed class CliSubcommandTests : IDisposable
         Assert.DoesNotContain(" ERR]", quietErr.ToString());
     }
 
+    [Fact]
+    public void Execute_ConfigAndStatus_WithOpenAiGateway_PersistsGatewaySettingsAndRendersProviderMatrix()
+    {
+        var env = new Dictionary<string, string?>
+        {
+            [OpenAiGatewayClient.ApiKeyEnvVar] = "sk-live-status-4242"
+        };
+
+        using var cfgOut = new StringWriter();
+        using var cfgErr = new StringWriter();
+        var cfgExit = Program.Execute(
+            [
+                "-w", _tempRoot,
+                "config",
+                "--provider", "openai",
+                "--gateway-url", "https://gateway.internal/v1/",
+                "--wire-api", "responses",
+                "-m", "gpt-4.1-mini"
+            ],
+            new StringReader(string.Empty),
+            cfgOut,
+            cfgErr,
+            clipboardService: null,
+            environmentReader: key => env.TryGetValue(key, out var val) ? val : null);
+
+        Assert.Equal(0, cfgExit);
+        Assert.Empty(cfgErr.ToString());
+
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var settingsService = new CliSettingsService();
+        var persisted = settingsService.Load(workspaceService.Resolve(_tempRoot));
+        Assert.Equal(AiProviderType.OpenAiGateway, persisted.PreferredProvider);
+        Assert.Equal("https://gateway.internal/v1", persisted.OpenAiBaseUrl);
+        Assert.Equal("responses", persisted.OpenAiWireApi);
+        Assert.Equal("gpt-4.1-mini", persisted.ModelName);
+
+        using var statusOut = new StringWriter();
+        using var statusErr = new StringWriter();
+        var statusExit = Program.Execute(
+            ["-w", _tempRoot, "status"],
+            new StringReader(string.Empty),
+            statusOut,
+            statusErr,
+            clipboardService: null,
+            environmentReader: key => env.TryGetValue(key, out var val) ? val : null);
+
+        Assert.Equal(0, statusExit);
+        var statusText = statusOut.ToString();
+        Assert.Contains("OpenAI Gateway", statusText);
+        Assert.Contains("https://gateway.internal/v1 (responses)", statusText);
+        Assert.Contains("****4242", statusText);
+        Assert.DoesNotContain("sk-live-status-4242", statusText);
+    }
+
+    [Fact]
+    public void Execute_ModelsDraftAndProcess_WithOpenAiGateway_ExecutesLiveHttpAndOfflineFallback()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var dirs = workspaceService.Resolve(_tempRoot);
+        Directory.CreateDirectory(dirs.InputDirectory);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        var notesFile = Path.Combine(dirs.InputDirectory, "notes.txt");
+        File.WriteAllText(notesFile, "User story notes for OpenAI Gateway offline fallback.");
+
+        var calls = 0;
+        var handler = new StubHttpMessageHandler((request, _) =>
+        {
+            calls++;
+            if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/models", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"object":"list","data":[{"id":"gpt-4o","owned_by":"openai"},{"id":"gpt-4.1-mini","owned_by":"openai"}]}""");
+            }
+
+            if (request.RequestUri!.AbsolutePath.EndsWith("/responses", StringComparison.Ordinal))
+            {
+                return JsonResponse("""
+                    {
+                      "output_text": "{\"title\":\"Gateway Schedule Check\",\"description\":\"**Objective:** Validate responses gateway integration.\\n* Verify auth header\\n* Confirm JSON parsing\"}"
+                    }
+                    """);
+            }
+
+            return JsonResponse("""
+                {
+                  "choices": [
+                    {
+                      "message": {
+                        "content": "{\"title\":\"Ship OAuth Gateway\",\"description\":\"**Objective:** Deliver OpenAI Gateway support.\\n* Send bearer auth\\n* Parse structured JSON\",\"userStory\":\"As a senior FDE, I want OpenAI Gateway integration so teams can use enterprise endpoints.\",\"scenarios\":[{\"given\":\"OPENAI_API_KEY is set\",\"when\":\"draft executes\",\"then\":\"Type01 backlog item is generated\"}]}"
+                      }
+                    }
+                  ]
+                }
+                """);
+        });
+
+        var stubClient = new OpenAiGatewayClient(new HttpClient(handler));
+        var secretKey = "sk-live-subcmd-9988";
+        var env = new Dictionary<string, string?>
+        {
+            [OpenAiGatewayClient.ApiKeyEnvVar] = secretKey
+        };
+        string? ReadEnv(string key) => env.TryGetValue(key, out var val) ? val : null;
+
+        // 1. models
+        using var modelsOut = new StringWriter();
+        using var modelsErr = new StringWriter();
+        var modelsExit = Program.Execute(
+            ["-w", _tempRoot, "models", "--provider", "openai", "--gateway-url", "https://gateway.internal/v1"],
+            new StringReader(string.Empty),
+            modelsOut,
+            modelsErr,
+            clipboardService: null,
+            environmentReader: ReadEnv,
+            openAiGatewayClient: stubClient);
+        Assert.Equal(0, modelsExit);
+        Assert.Contains("gpt-4o", modelsOut.ToString());
+        Assert.Contains("gpt-4.1-mini", modelsOut.ToString());
+
+        // 2. draft Type01 via /chat/completions + --json + stderr secret redaction check
+        using var draft1Out = new StringWriter();
+        using var draft1Err = new StringWriter();
+        var draft1Exit = Program.Execute(
+            ["-w", _tempRoot, "-p", _promptFile, "draft", "Ship OAuth Gateway", "--provider", "openai", "-t", "01", "--json", "--log-level", "debug"],
+            new StringReader(string.Empty),
+            draft1Out,
+            draft1Err,
+            clipboardService: null,
+            environmentReader: ReadEnv,
+            openAiGatewayClient: stubClient);
+        Assert.Equal(0, draft1Exit);
+        Assert.Contains("Ship OAuth Gateway", draft1Out.ToString());
+        Assert.True(File.Exists(Path.Combine(dirs.OutputDirectory, "jira-backlog-item.json")));
+        Assert.Contains("OpenAI", draft1Err.ToString());
+        Assert.DoesNotContain(secretKey, draft1Err.ToString());
+        Assert.DoesNotContain(secretKey, draft1Out.ToString());
+
+        // 3. draft Type02 via /responses
+        using var draft2Out = new StringWriter();
+        using var draft2Err = new StringWriter();
+        var draft2Exit = Program.Execute(
+            ["-w", _tempRoot, "-p", _promptFile, "draft", "Gateway Schedule Check", "--provider", "openai", "--gateway-url", "https://gateway.internal/v1", "--wire-api", "responses", "-t", "02", "--preview"],
+            new StringReader(string.Empty),
+            draft2Out,
+            draft2Err,
+            clipboardService: null,
+            environmentReader: ReadEnv,
+            openAiGatewayClient: stubClient);
+        Assert.Equal(0, draft2Exit);
+        Assert.Contains("Gateway Schedule Check", draft2Out.ToString());
+
+        var callsBeforeOffline = calls;
+
+        // 4. process --offline with no env key -> deterministic fallback with zero HTTP requests
+        using var procOut = new StringWriter();
+        using var procErr = new StringWriter();
+        var procExit = Program.Execute(
+            ["-w", _tempRoot, "-p", _promptFile, "process", "notes.txt", "--provider", "openai", "--offline", "--preview"],
+            new StringReader(string.Empty),
+            procOut,
+            procErr,
+            clipboardService: null,
+            environmentReader: _ => null,
+            openAiGatewayClient: stubClient);
+        Assert.Equal(0, procExit);
+        Assert.Equal(callsBeforeOffline, calls);
+        Assert.Contains("User story notes for OpenAI Gateway offline fallback", procOut.ToString());
+    }
+
+    private static HttpResponseMessage JsonResponse(string json) => new(System.Net.HttpStatusCode.OK)
+    {
+        Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
+    };
+
+    private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> responder)
+        : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(responder(request, cancellationToken));
+    }
+
     private sealed class RecordingClipboardService : IClipboardService
     {
         public List<string> CopiedTexts { get; } = [];

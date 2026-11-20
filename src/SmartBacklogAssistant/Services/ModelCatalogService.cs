@@ -25,6 +25,7 @@ public static class ModelCatalogService
 {
     public const string GeminiModelsDocsUrl = "https://ai.google.dev/gemini-api/docs/models";
     public const string CopilotSupportedModelsDocsUrl = "https://docs.github.com/en/copilot/reference/ai-models/supported-models";
+    public const string OpenAiModelsDocsUrl = "https://platform.openai.com/docs/models";
     public const string AzureOpenAiModelsDocsUrl = "https://learn.microsoft.com/azure/ai-services/openai/concepts/models";
     public const string AnthropicModelsDocsUrl = "https://docs.anthropic.com/en/docs/about-claude/models/overview";
     public const string ProjectProviderDocsUrl = "https://github.com/aleon1220/fde-sharp-backlog#multi-provider-ai-orchestration-gemini--microsoftcopilotsdk";
@@ -71,6 +72,7 @@ public static class ModelCatalogService
     {
         AiProviderType.GoogleGemini => GeminiModelsDocsUrl,
         AiProviderType.GitHubCopilot => CopilotSupportedModelsDocsUrl,
+        AiProviderType.OpenAiGateway => OpenAiModelsDocsUrl,
         AiProviderType.AzureOpenAi => AzureOpenAiModelsDocsUrl,
         AiProviderType.AnthropicClaude => AnthropicModelsDocsUrl,
         _ => ProjectProviderDocsUrl
@@ -92,6 +94,13 @@ public static class ModelCatalogService
             new("claude-sonnet-4.5", "Claude Sonnet 4.5", "reasoning", "Strong INVEST user story framing and nuanced requirements"),
             new("gpt-5", "GPT-5", "pro", "Deep analysis for large technical specifications")
         ],
+        AiProviderType.OpenAiGateway =>
+        [
+            new("gpt-4o", "GPT-4o", "recommended", "Balanced flagship model widely supported across OpenAI & enterprise gateways", IsRecommended: true),
+            new("gpt-4.1-mini", "GPT-4.1 mini", "recommended", "Fast, low-cost model with strong structured JSON instruction following", IsRecommended: true),
+            new("gpt-4.1", "GPT-4.1", "reasoning", "High-precision extraction for complex specs and multi-file discovery notes"),
+            new("gpt-4o-mini", "GPT-4o mini", "fast", "Lightweight fallback supported by most OpenAI-compatible gateways")
+        ],
         AiProviderType.AzureOpenAi =>
         [
             new("gpt-4o", "GPT-4o (Deployment)", "recommended", "Broad Azure region availability and dependable JSON schema output", IsRecommended: true),
@@ -112,7 +121,7 @@ public static class ModelCatalogService
         var recs = GetRecommendations(provider);
         if (recs.Count == 0)
         {
-            return "Manual mode renders Markdown prompts locally; switch to 'gemini' or 'copilot-sdk' for live AI drafting.";
+            return "Manual mode renders Markdown prompts locally; switch to 'gemini', 'copilot-sdk', or 'openai' for live AI drafting.";
         }
 
         var top = recs.Where(r => r.IsRecommended).ToArray();
@@ -134,7 +143,7 @@ public static class ModelCatalogService
             return new ModelSupportCheckResult(
                 IsSupported: false,
                 IsKnownWarning: false,
-                Reason: "Manual Prompt mode renders Markdown prompts for copy/paste and does not invoke an AI model API directly. Switch to 'gemini', 'copilot-sdk', 'azure', or 'claude' to select a model.",
+                Reason: "Manual Prompt mode renders Markdown prompts for copy/paste and does not invoke an AI model API directly. Switch to 'gemini', 'copilot-sdk', 'openai', 'azure', or 'claude' to select a model.",
                 OfficialDocsUrl: docsUrl,
                 Recommendations: GetRecommendations(AiProviderType.GoogleGemini));
         }
@@ -159,11 +168,7 @@ public static class ModelCatalogService
             normalized = normalized["models/".Length..].Trim();
         }
 
-        if (string.IsNullOrWhiteSpace(normalized) ||
-            normalized.Contains('/') ||
-            normalized.Contains('?') ||
-            normalized.Contains('#') ||
-            normalized.Any(char.IsWhiteSpace))
+        if (IsMalformedModelIdentifier(provider, normalized))
         {
             return new ModelSupportCheckResult(
                 IsSupported: false,
@@ -306,5 +311,33 @@ public static class ModelCatalogService
 
         value = [];
         return false;
+    }
+
+    private static bool IsMalformedModelIdentifier(AiProviderType provider, string normalized)
+    {
+        if (string.IsNullOrWhiteSpace(normalized) ||
+            normalized.Contains('?') ||
+            normalized.Contains('#') ||
+            normalized.Contains("..", StringComparison.Ordinal) ||
+            normalized.Contains("://", StringComparison.Ordinal) ||
+            normalized.Any(char.IsWhiteSpace))
+        {
+            return true;
+        }
+
+        if (!normalized.Contains('/'))
+        {
+            return false;
+        }
+
+        if (provider != AiProviderType.OpenAiGateway)
+        {
+            return true;
+        }
+
+        var slashSegments = normalized.Split('/');
+        return slashSegments.Length != 2 ||
+               string.IsNullOrWhiteSpace(slashSegments[0]) ||
+               string.IsNullOrWhiteSpace(slashSegments[1]);
     }
 }
