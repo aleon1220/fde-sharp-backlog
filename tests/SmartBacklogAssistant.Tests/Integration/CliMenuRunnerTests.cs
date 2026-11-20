@@ -1360,6 +1360,100 @@ public sealed class CliMenuRunnerTests : IDisposable
         Assert.DoesNotContain("\"eventName\":\"ReplLoggingReconfigured\"", text);
     }
 
+    [Fact]
+    public void Run_SettingsProviderMenu_ConfiguresOpenAiGatewayUrlWireApiAndProviderSelection()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var settingsService = new CliSettingsService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var runner = CreateMenuRunner(
+            workspaceService,
+            settingsService,
+            environmentReader: _ => null);
+
+        // 4 (Settings) -> 1 (AI Provider) -> G (Gateway config) -> URL -> 2 (responses)
+        // -> 3 (Select OpenAI Gateway) -> A (Auto model) -> 0 (Back to Main) -> 0 (Exit)
+        using var input = new StringReader("4\n1\nG\nhttps://gateway.corp.internal/v1\n2\n3\nA\n0\n0\n");
+        using var output = new StringWriter();
+
+        var exitCode = runner.Run(
+            new WorkflowOptions(dirs.InputDirectory, _promptFilePath, WorkspaceRoot: _tempWorkspaceRoot, GeminiLive: false),
+            input,
+            output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("[3] OpenAI Gateway API (openai)", text);
+        Assert.Contains("OpenAI Gateway settings updated (URL: https://gateway.corp.internal/v1, API: responses).", text);
+        Assert.Contains("Active AI Provider set to 'openai'.", text);
+
+        var saved = settingsService.Load(dirs);
+        Assert.Equal(AiProviderType.OpenAiGateway, saved.PreferredProvider);
+        Assert.Equal("https://gateway.corp.internal/v1", saved.OpenAiBaseUrl);
+        Assert.Equal("responses", saved.OpenAiWireApi);
+    }
+
+    [Fact]
+    public void Run_ReplSlashCommands_WithOpenAiGateway_ExecutesModelsDraftAndStatusSafely()
+    {
+        var workspaceService = new WorkspacePathService(environmentReader: _ => null);
+        var settingsService = new CliSettingsService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        var secretKey = "sk-menu-secret-5566";
+        var env = new Dictionary<string, string?>
+        {
+            [OpenAiGatewayClient.ApiKeyEnvVar] = secretKey
+        };
+
+        var capturedPaths = new List<string>();
+        var openAiHandler = new StubHttpMessageHandler(request =>
+        {
+            capturedPaths.Add(request.RequestUri!.AbsoluteUri);
+            if (request.Method == HttpMethod.Get && request.RequestUri.AbsolutePath.EndsWith("/models", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"object":"list","data":[{"id":"gpt-4o","owned_by":"openai"},{"id":"gpt-4.1-mini","owned_by":"openai"}]}""");
+            }
+
+            return JsonResponse("""
+                {
+                  "output_text": "{\"title\":\"Add OpenAI Gateway REPL\",\"description\":\"**Objective:** Support OpenAI Gateway inside REPL.\\n* Wire /provider and /config\"}"
+                }
+                """);
+        });
+
+        var runner = CreateMenuRunner(
+            workspaceService,
+            settingsService,
+            openAiGatewayClient: new OpenAiGatewayClient(new HttpClient(openAiHandler)),
+            environmentReader: key => env.TryGetValue(key, out var val) ? val : null);
+
+        using var input = new StringReader(
+            "/provider openai\n" +
+            "/config --gateway-url https://proxy.internal/v1 --wire-api responses\n" +
+            "/models\n" +
+            "/draft \"Add OpenAI Gateway REPL\" -t 02 --preview\n" +
+            "/status\n" +
+            "4\n7\n0\n0\n");
+        using var output = new StringWriter();
+
+        var exitCode = runner.Run(
+            new WorkflowOptions(dirs.InputDirectory, _promptFilePath, WorkspaceRoot: _tempWorkspaceRoot, GeminiLive: true),
+            input,
+            output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("Active AI Provider set to 'openai'.", text);
+        Assert.Contains("Available OpenAI Gateway Models (https://proxy.internal/v1):", text);
+        Assert.Contains("gpt-4.1-mini", text);
+        Assert.Contains("Add OpenAI Gateway REPL", text);
+        Assert.Contains("OPENAI_API_KEY: configured [****5566]", text);
+        Assert.Contains("https://proxy.internal/v1 (responses)", text);
+        Assert.Contains("https://proxy.internal/v1/models", capturedPaths);
+        Assert.Contains("https://proxy.internal/v1/responses", capturedPaths);
+        Assert.DoesNotContain(secretKey, text);
+    }
+
     private static CliMenuRunner CreateMenuRunner(
         WorkspacePathService workspaceService,
         CliSettingsService? settingsService = null,
@@ -1367,8 +1461,10 @@ public sealed class CliMenuRunnerTests : IDisposable
         IClipboardService? clipboardService = null,
         ICopilotSdkGateway? copilotGateway = null,
         StderrLoggerFactory? loggerFactory = null,
-        Func<string, string?>? environmentReader = null)
+        Func<string, string?>? environmentReader = null,
+        OpenAiGatewayClient? openAiGatewayClient = null)
     {
+        var effectiveEnvReader = environmentReader ?? (_ => null);
         var secretProvider = new GeminiSecretProvider(
             environmentReader: _ => null,
             environmentWriter: (_, _) => { });
@@ -1379,8 +1475,9 @@ public sealed class CliMenuRunnerTests : IDisposable
         var providerOrchestrator = new AiProviderOrchestrator(
             effectiveGemini,
             effectiveCopilot,
-            environmentReader: _ => null,
-            loggerFactory: loggerFactory);
+            environmentReader: effectiveEnvReader,
+            loggerFactory: loggerFactory,
+            openAiGatewayClient: openAiGatewayClient);
 
         var workflow = new AsIsV1Workflow(
             new RawDataCollector(loggerFactory?.CreateLogger<RawDataCollector>()),
@@ -1402,7 +1499,7 @@ public sealed class CliMenuRunnerTests : IDisposable
             settingsService ?? new CliSettingsService(),
             clipboardService: clipboardService,
             loggerFactory: loggerFactory,
-            environmentReader: environmentReader);
+            environmentReader: effectiveEnvReader);
     }
 
     private sealed class StubCopilotSdkGateway(

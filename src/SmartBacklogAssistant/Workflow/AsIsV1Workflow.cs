@@ -38,7 +38,11 @@ public sealed record WorkflowOptions(
     OutcomeVerbosity Verbosity = OutcomeVerbosity.Balanced,
     string? LogLevelInput = null,
     string? LogFormatInput = null,
-    bool Quiet = false);
+    bool Quiet = false,
+    string? OpenAiBaseUrl = null,
+    string? OpenAiWireApi = null,
+    string? PersistedOpenAiBaseUrl = null,
+    string? PersistedOpenAiWireApi = null);
 
 public sealed class AsIsV1Workflow
 {
@@ -75,7 +79,8 @@ public sealed class AsIsV1Workflow
         GeminiSecretProvider? secretProvider = null,
         GeminiApiClient? geminiApiClient = null,
         AiProviderOrchestrator? providerOrchestrator = null,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        OpenAiGatewayClient? openAiGatewayClient = null)
     {
         _collector = collector ?? throw new ArgumentNullException(nameof(collector));
         _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
@@ -87,7 +92,10 @@ public sealed class AsIsV1Workflow
         _logger = _loggerFactory.CreateLogger<AsIsV1Workflow>();
         _secretRedactor = (_loggerFactory as StderrLoggerFactory)?.Redactor;
         _geminiApiClient = geminiApiClient ?? new GeminiApiClient(logger: _loggerFactory.CreateLogger<GeminiApiClient>());
-        _providerOrchestrator = providerOrchestrator ?? new AiProviderOrchestrator(_geminiApiClient, loggerFactory: _loggerFactory);
+        _providerOrchestrator = providerOrchestrator ?? new AiProviderOrchestrator(
+            _geminiApiClient,
+            loggerFactory: _loggerFactory,
+            openAiGatewayClient: openAiGatewayClient);
     }
 
     public string? LastSelectedModel { get; private set; }
@@ -116,6 +124,18 @@ public sealed class AsIsV1Workflow
 
     public IReadOnlyList<CopilotModelDescriptor> ListCopilotModels(string? gitHubToken = null) =>
         _providerOrchestrator.CopilotGateway.ListModelsAsync(gitHubToken).GetAwaiter().GetResult();
+
+    public OpenAiModelCatalogResult ListOpenAiModelCatalog(
+        string? apiKey = null,
+        string? explicitBaseUrl = null,
+        string? persistedBaseUrl = null)
+    {
+        var config = _providerOrchestrator.ResolveOpenAiGatewayConfig(
+            explicitApiKey: apiKey,
+            explicitBaseUrl: explicitBaseUrl,
+            persistedBaseUrl: persistedBaseUrl);
+        return _providerOrchestrator.OpenAiGateway.ListModelCatalog(config);
+    }
 
     public JiraBacklogTicket Execute(WorkflowOptions options, TextReader input, TextWriter output)
     {
@@ -345,6 +365,32 @@ public sealed class AsIsV1Workflow
             _secretRedactor?.RegisterSecret(apiKey);
             LogEvents.SecretResolved(_logger, string.IsNullOrWhiteSpace(apiKey) ? "Copilot runtime / env" : "CLI Argument (--api-key)", GeminiSecretProvider.MaskKey(apiKey));
         }
+        else if (provider == AiProviderType.OpenAiGateway)
+        {
+            var gatewayConfig = _providerOrchestrator.ResolveOpenAiGatewayConfig(
+                explicitApiKey: options.ApiKey,
+                explicitBaseUrl: options.OpenAiBaseUrl,
+                persistedBaseUrl: options.PersistedOpenAiBaseUrl,
+                explicitWireApi: options.OpenAiWireApi,
+                persistedWireApi: options.PersistedOpenAiWireApi);
+            apiKey = gatewayConfig.ApiKey;
+            LastResolvedApiKey = apiKey;
+            _secretRedactor?.RegisterSecret(apiKey);
+            LogEvents.SecretResolved(_logger, gatewayConfig.ApiKeySourceDetail, gatewayConfig.MaskedApiKey);
+
+            if (string.IsNullOrWhiteSpace(apiKey) && gatewayConfig.IsValidBaseUrl && !options.NonInteractive && options.GeminiLive != false)
+            {
+                colorWriter.WriteColored($"Enter OpenAI Gateway API key for {gatewayConfig.BaseUrl} (or press Enter for offline fallback): ", ConsoleColor.Yellow);
+                var enteredKey = input.ReadLine();
+                if (!string.IsNullOrWhiteSpace(enteredKey))
+                {
+                    apiKey = enteredKey.Trim();
+                    LastResolvedApiKey = apiKey;
+                    _secretRedactor?.RegisterSecret(apiKey);
+                    LogEvents.SecretResolved(_logger, "Interactive CLI Prompt", GeminiSecretProvider.MaskKey(apiKey));
+                }
+            }
+        }
         else if (provider != AiProviderType.ManualPrompt && string.IsNullOrWhiteSpace(apiKey) && !options.NonInteractive)
         {
             colorWriter.WriteColored($"Enter API key for {provider} (or press Enter for mock key): ", ConsoleColor.Yellow);
@@ -392,7 +438,8 @@ public sealed class AsIsV1Workflow
             modelName = SelectGeminiModel(availableModels, modelName, input, output, options.NonInteractive);
             LastSelectedModel = modelName;
         }
-        else if (options.GeminiLive == true && provider != AiProviderType.GoogleGemini && provider != AiProviderType.GitHubCopilot && provider != AiProviderType.AzureOpenAi && provider != AiProviderType.AnthropicClaude)
+        else if (options.GeminiLive == true &&
+                 provider is not (AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot or AiProviderType.OpenAiGateway or AiProviderType.AzureOpenAi or AiProviderType.AnthropicClaude))
         {
             throw new InvalidOperationException("--gemini-live can only be used with live AI providers.");
         }
@@ -439,11 +486,12 @@ public sealed class AsIsV1Workflow
             }
         }
 
-        var liveEnabled = options.GeminiLive ?? (provider == AiProviderType.GitHubCopilot);
+        var liveEnabled = options.GeminiLive ?? (provider is AiProviderType.GitHubCopilot or AiProviderType.OpenAiGateway);
         var isProviderLiveForGeneration = provider switch
         {
             AiProviderType.GoogleGemini => options.GeminiLive == true,
             AiProviderType.GitHubCopilot => liveEnabled,
+            AiProviderType.OpenAiGateway => liveEnabled && !string.IsNullOrWhiteSpace(apiKey),
             AiProviderType.AzureOpenAi or AiProviderType.AnthropicClaude => liveEnabled,
             _ => false
         };
@@ -467,35 +515,35 @@ public sealed class AsIsV1Workflow
             {
                 AiProviderType.GoogleGemini => modelName ?? RuntimeEnvironmentService.DefaultGeminiModel,
                 AiProviderType.GitHubCopilot => modelName ?? RuntimeEnvironmentService.DefaultCopilotModel,
+                AiProviderType.OpenAiGateway => modelName ?? RuntimeEnvironmentService.DefaultOpenAiModel,
                 _ => modelName ?? provider.ToString()
             };
 
-            if (provider is AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot)
+            if (provider is AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot or AiProviderType.OpenAiGateway)
             {
                 LogEvents.WorkflowProcessStage(_logger, $"Expanding goal with INVEST User Story principles ({expandModelLabel})...");
             }
 
+            var expandRequest = new MultiProviderGenerationRequest(
+                Provider: provider,
+                RenderedPrompt: renderedExpandPrompt,
+                BacklogType: promptType,
+                ApiKey: apiKey,
+                ModelName: modelName,
+                LiveEnabled: provider is AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot or AiProviderType.OpenAiGateway || liveEnabled,
+                WorkingDirectory: options.WorkspaceRoot,
+                GatewayBaseUrl: options.OpenAiBaseUrl,
+                GatewayWireApi: options.OpenAiWireApi,
+                PersistedGatewayBaseUrl: options.PersistedOpenAiBaseUrl,
+                PersistedGatewayWireApi: options.PersistedOpenAiWireApi);
+
             var expandSw = System.Diagnostics.Stopwatch.StartNew();
-            var expansionGen = provider is AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot
+            var expansionGen = provider is AiProviderType.GoogleGemini or AiProviderType.GitHubCopilot or AiProviderType.OpenAiGateway
                 ? TerminalUx.RunWithSpinner(
                     $"Synthesizing goal brief & 3 title alternatives ({expandModelLabel})...",
-                    () => _providerOrchestrator.GenerateGoalExpansion(new MultiProviderGenerationRequest(
-                        Provider: provider,
-                        RenderedPrompt: renderedExpandPrompt,
-                        BacklogType: promptType,
-                        ApiKey: apiKey,
-                        ModelName: modelName,
-                        LiveEnabled: true,
-                        WorkingDirectory: options.WorkspaceRoot)),
+                    () => _providerOrchestrator.GenerateGoalExpansion(expandRequest),
                     colorWriter)
-                : _providerOrchestrator.GenerateGoalExpansion(new MultiProviderGenerationRequest(
-                    Provider: provider,
-                    RenderedPrompt: renderedExpandPrompt,
-                    BacklogType: promptType,
-                    ApiKey: apiKey,
-                    ModelName: modelName,
-                    LiveEnabled: liveEnabled,
-                    WorkingDirectory: options.WorkspaceRoot));
+                : _providerOrchestrator.GenerateGoalExpansion(expandRequest);
             expandSw.Stop();
 
             if (expansionGen.UsedLiveProvider && !string.IsNullOrWhiteSpace(expansionGen.GeneratedContent))
@@ -627,6 +675,58 @@ public sealed class AsIsV1Workflow
                 LogEvents.WorkflowProcessStage(_logger, "Offline mode active; using local deterministic draft.");
             }
         }
+        else if (provider == AiProviderType.OpenAiGateway)
+        {
+            var gatewayDisplayModel = modelName ?? RuntimeEnvironmentService.DefaultOpenAiModel;
+            if (liveEnabled)
+            {
+                var gatewayConfig = _providerOrchestrator.ResolveOpenAiGatewayConfig(
+                    explicitApiKey: apiKey,
+                    explicitBaseUrl: options.OpenAiBaseUrl,
+                    persistedBaseUrl: options.PersistedOpenAiBaseUrl,
+                    explicitWireApi: options.OpenAiWireApi,
+                    persistedWireApi: options.PersistedOpenAiWireApi);
+
+                if (gatewayConfig.HasApiKey || !gatewayConfig.IsValidBaseUrl)
+                {
+                    LogEvents.WorkflowProcessStage(_logger, $"Calling OpenAI Gateway ({gatewayDisplayModel} @ {gatewayConfig.BaseUrl}) with '{Path.GetFileName(existingSelectedPrompt ?? selectedPromptPath)}'...");
+
+                    var aiSw = System.Diagnostics.Stopwatch.StartNew();
+                    var generationResult = TerminalUx.RunWithSpinner(
+                        $"Generating {promptType} draft via OpenAI Gateway ({gatewayDisplayModel})...",
+                        () => _providerOrchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+                            Provider: AiProviderType.OpenAiGateway,
+                            RenderedPrompt: renderedPrompt,
+                            BacklogType: promptType,
+                            ApiKey: apiKey,
+                            ModelName: modelName,
+                            LiveEnabled: true,
+                            WorkingDirectory: options.WorkspaceRoot,
+                            GatewayBaseUrl: options.OpenAiBaseUrl,
+                            GatewayWireApi: options.OpenAiWireApi,
+                            PersistedGatewayBaseUrl: options.PersistedOpenAiBaseUrl,
+                            PersistedGatewayWireApi: options.PersistedOpenAiWireApi)),
+                        colorWriter);
+                    aiSw.Stop();
+                    generatedContent = generationResult.GeneratedContent;
+                    modelName = generationResult.ResolvedModel ?? gatewayDisplayModel;
+                    if (generationResult.UsedLiveProvider)
+                    {
+                        LastSelectedModel = modelName;
+                        loggedLiveGenerationStep = true;
+                        TerminalUx.WriteStepDone(colorWriter, "Generated", $"structured {promptType} draft via OpenAI Gateway ({modelName})", aiSw.Elapsed);
+                    }
+                }
+                else
+                {
+                    LogEvents.WorkflowProcessStage(_logger, "No OpenAI Gateway API key configured; using local deterministic draft.");
+                }
+            }
+            else
+            {
+                LogEvents.WorkflowProcessStage(_logger, "Offline mode active; using local deterministic draft.");
+            }
+        }
         else if (provider is AiProviderType.AzureOpenAi or AiProviderType.AnthropicClaude)
         {
             var byokSw = System.Diagnostics.Stopwatch.StartNew();
@@ -637,7 +737,11 @@ public sealed class AsIsV1Workflow
                 ApiKey: apiKey,
                 ModelName: modelName,
                 LiveEnabled: liveEnabled,
-                WorkingDirectory: options.WorkspaceRoot));
+                WorkingDirectory: options.WorkspaceRoot,
+                GatewayBaseUrl: options.OpenAiBaseUrl,
+                GatewayWireApi: options.OpenAiWireApi,
+                PersistedGatewayBaseUrl: options.PersistedOpenAiBaseUrl,
+                PersistedGatewayWireApi: options.PersistedOpenAiWireApi));
             byokSw.Stop();
             generatedContent = generationResult.GeneratedContent;
             modelName = generationResult.ResolvedModel ?? modelName;
@@ -694,7 +798,7 @@ public sealed class AsIsV1Workflow
 
         if (!loggedLiveGenerationStep)
         {
-            var keyStatusDetail = initialSecret.IsConfigured
+            var keyStatusDetail = provider == AiProviderType.GoogleGemini && initialSecret.IsConfigured
                 ? $"{initialSecret.SourceDetail} [{initialSecret.MaskedKey}]"
                 : !string.IsNullOrWhiteSpace(apiKey)
                     ? $"API key [{GeminiSecretProvider.MaskKey(apiKey)}]"

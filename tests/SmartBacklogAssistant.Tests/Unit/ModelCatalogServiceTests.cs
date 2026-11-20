@@ -100,4 +100,56 @@ public sealed class ModelCatalogServiceTests
         Assert.NotNull(hint);
         Assert.Contains(ModelCatalogService.CopilotSupportedModelsDocsUrl, hint);
     }
+
+    [Fact]
+    public void OpenAiGateway_CatalogAndValidation_SupportVendorPrefixedModelsAndActionableHints()
+    {
+        var docs = ModelCatalogService.GetOfficialDocsUrl(AiProviderType.OpenAiGateway);
+        Assert.Equal(ModelCatalogService.OpenAiModelsDocsUrl, docs);
+
+        var recs = ModelCatalogService.GetRecommendations(AiProviderType.OpenAiGateway);
+        Assert.Contains(recs, r => r.ModelId == "gpt-4o" && r.IsRecommended);
+        Assert.Contains(recs, r => r.ModelId == "gpt-4.1-mini" && r.IsRecommended);
+
+        // Single vendor/model slug allowed on OpenAI-compatible gateways (OpenRouter/LiteLLM)
+        var gatewaySlug = ModelCatalogService.ValidateModelSelection(
+            AiProviderType.OpenAiGateway,
+            "openai/gpt-4o",
+            Array.Empty<string>());
+        Assert.True(gatewaySlug.IsSupported);
+
+        // Multi-segment slash slug still rejected even on OpenAiGateway
+        var badSlug = ModelCatalogService.ValidateModelSelection(
+            AiProviderType.OpenAiGateway,
+            "org/vendor/gpt-4o",
+            Array.Empty<string>());
+        Assert.False(badSlug.IsSupported);
+
+        // Vendor slug rejected on Gemini (only single bare ID or models/ prefix allowed)
+        var geminiSlug = ModelCatalogService.ValidateModelSelection(
+            AiProviderType.GoogleGemini,
+            "openai/gpt-4o",
+            Array.Empty<string>());
+        Assert.False(geminiSlug.IsSupported);
+
+        var wireHint = TerminalUx.ResolveActionableHint(
+            new InvalidOperationException("Invalid wire API 'xml' for '--wire-api'."));
+        Assert.NotNull(wireHint);
+        Assert.Contains("--wire-api", wireHint);
+
+        var urlHint = TerminalUx.ResolveActionableHint(
+            new InvalidOperationException("Invalid Gateway URL 'not-a-url'; check OPENAI_BASE_URL."));
+        Assert.NotNull(urlHint);
+        Assert.Contains("OPENAI_BASE_URL", urlHint);
+
+        var keyHint = TerminalUx.ResolveActionableHint(
+            new InvalidOperationException("OpenAI Gateway API key is missing (401 Unauthorized)."));
+        Assert.NotNull(keyHint);
+        Assert.Contains("OPENAI_API_KEY", keyHint);
+
+        var modelHint = TerminalUx.ResolveActionableHint(
+            new InvalidOperationException("OpenAI Gateway model 'o9-secret' is not supported."));
+        Assert.NotNull(modelHint);
+        Assert.Contains(ModelCatalogService.OpenAiModelsDocsUrl, modelHint);
+    }
 }

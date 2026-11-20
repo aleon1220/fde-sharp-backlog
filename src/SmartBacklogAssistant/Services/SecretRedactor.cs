@@ -19,7 +19,8 @@ public sealed partial class SecretRedactor
         GitHubCopilotSdkGateway.GhTokenEnvVar,
         "AZURE_OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
-        "COPILOT_BYOK_API_KEY"
+        "COPILOT_BYOK_API_KEY",
+        OpenAiGatewayClient.ApiKeyEnvVar
     ];
 
     private readonly object _lock = new();

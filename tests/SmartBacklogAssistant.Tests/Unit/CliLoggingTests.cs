@@ -294,6 +294,46 @@ public sealed class CliLoggingTests
         Assert.Equal("none", CliLogLevelResolver.MapToCopilotLogLevel(LogLevel.None).ToString());
     }
 
+    [Fact]
+    public void SecretRedactor_AndOpenAiGatewayClient_MaskOpenAiApiKeyAndLogHttpLifecycle()
+    {
+        var env = new Dictionary<string, string?>
+        {
+            [OpenAiGatewayClient.ApiKeyEnvVar] = "sk-openai-live-secret-9988"
+        };
+        var redactor = new SecretRedactor();
+        redactor.RegisterEnvironmentSecrets(k => env.TryGetValue(k, out var val) ? val : null);
+
+        var redacted = redactor.Redact("Authorization failed for key sk-openai-live-secret-9988");
+        Assert.DoesNotContain("sk-openai-live-secret-9988", redacted);
+        Assert.Contains("****9988", redacted);
+
+        using var stderr = new StringWriter();
+        using var factory = new StderrLoggerFactory(stderr, LogLevel.Debug, LogOutputFormat.Text, enableColor: false, secretRedactor: redactor);
+        var handler = new StubHttpMessageHandler((_, _) => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"choices":[{"message":{"content":"{\"title\":\"Logged\",\"description\":\"Safe\"}"}}]}""", System.Text.Encoding.UTF8, "application/json")
+        });
+
+        var client = new OpenAiGatewayClient(new HttpClient(handler), factory.CreateLogger<OpenAiGatewayClient>());
+        _ = client.GenerateContent(new OpenAiGatewayGenerationRequest(
+            ModelId: "gpt-4o",
+            Prompt: "Return JSON",
+            ApiKey: "sk-openai-live-secret-9988",
+            BaseUrl: "https://gateway.internal/v1"));
+
+        var logOutput = stderr.ToString();
+        Assert.Contains("POST", logOutput);
+        Assert.Contains("https://gateway.internal/v1/chat/completions", logOutput);
+        Assert.DoesNotContain("sk-openai-live-secret-9988", logOutput);
+    }
+
+    private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> responder) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(responder(request, cancellationToken));
+    }
+
     private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
     {
         public override DateTimeOffset GetUtcNow() => utcNow;

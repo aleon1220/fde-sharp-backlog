@@ -49,4 +49,16 @@ public sealed class RuntimeEnvironmentServiceTests
         Assert.Contains("https://aistudio.google.com/api-keys", banner);
         Assert.DoesNotContain("AIzaSySecretKey7788", banner);
     }
+
+    [Fact]
+    public void InspectAndFormatProviderCode_SupportsOpenAiGateway()
+    {
+        var defaultInfo = _sut.Inspect(AiProviderType.OpenAiGateway);
+        Assert.Equal(AiProviderType.OpenAiGateway, defaultInfo.EnabledProvider);
+        Assert.Equal($"OpenAI Gateway ({RuntimeEnvironmentService.DefaultOpenAiModel})", defaultInfo.EnabledAiModel);
+
+        var customInfo = _sut.Inspect(AiProviderType.OpenAiGateway, "gpt-4.1-mini");
+        Assert.Equal("OpenAI Gateway (gpt-4.1-mini)", customInfo.EnabledAiModel);
+        Assert.Equal("openai", RuntimeEnvironmentService.FormatProviderCode(AiProviderType.OpenAiGateway));
+    }
 }

@@ -351,4 +351,47 @@ internal static partial class LogEvents
         int promptChars,
         int responseChars,
         long elapsedMs);
+
+    [LoggerMessage(
+        EventId = 4010,
+        Level = LogLevel.Debug,
+        Message = "OpenAI Gateway HTTP {Method} {EndpointUri} (wireApi={WireApi}, model={ModelId})")]
+    public static partial void OpenAiHttpRequest(
+        ILogger logger,
+        string method,
+        string endpointUri,
+        string wireApi,
+        string modelId);
+
+    [LoggerMessage(
+        EventId = 4011,
+        Level = LogLevel.Trace,
+        Message = "OpenAI Gateway HTTP {Method} {EndpointUri} responded HTTP {StatusCode} ({ResponseLength} chars) in {ElapsedMs}ms")]
+    public static partial void OpenAiHttpResponse(
+        ILogger logger,
+        string method,
+        string endpointUri,
+        int statusCode,
+        int responseLength,
+        long elapsedMs);
+
+    [LoggerMessage(
+        EventId = 4012,
+        Level = LogLevel.Error,
+        Message = "OpenAI Gateway HTTP {Method} {EndpointUri} failed with HTTP {StatusCode} ({ReasonPhrase}): {ResponsePreview}")]
+    public static partial void OpenAiHttpError(
+        ILogger logger,
+        string method,
+        string endpointUri,
+        int statusCode,
+        string reasonPhrase,
+        string responsePreview);
+
+    [LoggerMessage(
+        EventId = 4013,
+        Level = LogLevel.Debug,
+        Message = "OpenAI Gateway offline/unconfigured fallback: {Reason}")]
+    public static partial void OpenAiGatewayFallback(
+        ILogger logger,
+        string reason);
 }

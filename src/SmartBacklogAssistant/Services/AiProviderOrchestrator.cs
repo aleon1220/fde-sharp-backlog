@@ -12,7 +12,11 @@ public sealed record MultiProviderGenerationRequest(
     string? ApiKey = null,
     string? ModelName = null,
     bool LiveEnabled = true,
-    string? WorkingDirectory = null);
+    string? WorkingDirectory = null,
+    string? GatewayBaseUrl = null,
+    string? GatewayWireApi = null,
+    string? PersistedGatewayBaseUrl = null,
+    string? PersistedGatewayWireApi = null);
 
 public sealed record MultiProviderGenerationResult(
     AiProviderType ProviderUsed,
@@ -23,13 +27,15 @@ public sealed record MultiProviderGenerationResult(
 
 /// <summary>
 /// Coordinates multi-provider AI execution across Google Gemini, GitHub Copilot SDK
-/// (native Copilot CLI runtime and BYOK providers), Azure OpenAI, Anthropic Claude,
-/// and Manual Prompt fallback while preserving zero-regression deterministic behavior.
+/// (native Copilot CLI runtime and BYOK providers), OpenAI Gateway API (direct HTTP),
+/// Azure OpenAI, Anthropic Claude, and Manual Prompt fallback while preserving
+/// zero-regression deterministic behavior.
 /// </summary>
 public sealed class AiProviderOrchestrator
 {
     private readonly GeminiApiClient _geminiApiClient;
     private readonly ICopilotSdkGateway _copilotGateway;
+    private readonly OpenAiGatewayClient _openAiGatewayClient;
     private readonly Func<string, string?> _environmentReader;
     private readonly ILogger<AiProviderOrchestrator> _logger;
 
@@ -37,16 +43,36 @@ public sealed class AiProviderOrchestrator
         GeminiApiClient? geminiApiClient = null,
         ICopilotSdkGateway? copilotGateway = null,
         Func<string, string?>? environmentReader = null,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        OpenAiGatewayClient? openAiGatewayClient = null)
     {
         var effectiveFactory = loggerFactory ?? NullLoggerFactory.Instance;
         _logger = effectiveFactory.CreateLogger<AiProviderOrchestrator>();
         _geminiApiClient = geminiApiClient ?? new GeminiApiClient(logger: effectiveFactory.CreateLogger<GeminiApiClient>());
         _copilotGateway = copilotGateway ?? new GitHubCopilotSdkGateway(environmentReader, loggerFactory: effectiveFactory);
+        _openAiGatewayClient = openAiGatewayClient ?? new OpenAiGatewayClient(logger: effectiveFactory.CreateLogger<OpenAiGatewayClient>());
         _environmentReader = environmentReader ?? Environment.GetEnvironmentVariable;
     }
 
     public ICopilotSdkGateway CopilotGateway => _copilotGateway;
+
+    public OpenAiGatewayClient OpenAiGateway => _openAiGatewayClient;
+
+    public OpenAiGatewayConfiguration ResolveOpenAiGatewayConfig(
+        string? explicitApiKey = null,
+        string? explicitBaseUrl = null,
+        string? persistedBaseUrl = null,
+        string? explicitWireApi = null,
+        string? persistedWireApi = null,
+        bool preferAzureEnvironment = false) =>
+        OpenAiGatewayClient.ResolveConfiguration(
+            _environmentReader,
+            explicitApiKey,
+            explicitBaseUrl,
+            persistedBaseUrl,
+            explicitWireApi,
+            persistedWireApi,
+            preferAzureEnvironment);
 
     public static string BuildStructuredJsonPrompt(string renderedPrompt, BacklogType backlogType)
     {
@@ -168,12 +194,69 @@ public sealed class AiProviderOrchestrator
                     UsedLiveProvider: true);
             }
 
+            case AiProviderType.OpenAiGateway:
+            {
+                var gatewayConfig = ResolveOpenAiGatewayConfig(
+                    explicitApiKey: request.ApiKey,
+                    explicitBaseUrl: request.GatewayBaseUrl,
+                    persistedBaseUrl: request.PersistedGatewayBaseUrl,
+                    explicitWireApi: request.GatewayWireApi,
+                    persistedWireApi: request.PersistedGatewayWireApi);
+
+                var modelId = ResolveOpenAiModelId(request.ModelName, gatewayConfig);
+
+                if (!request.LiveEnabled)
+                {
+                    LogEvents.OpenAiGatewayFallback(_logger, "Offline mode active (--offline / --live off).");
+                    return new MultiProviderGenerationResult(
+                        ProviderUsed: AiProviderType.OpenAiGateway,
+                        GeneratedContent: null,
+                        ResolvedModel: modelId,
+                        ResolvedApiKey: gatewayConfig.ApiKey,
+                        UsedLiveProvider: false);
+                }
+
+                if (!gatewayConfig.IsValidBaseUrl)
+                {
+                    throw new InvalidOperationException(gatewayConfig.ValidationError ?? "Invalid OpenAI Gateway URL.");
+                }
+
+                if (!gatewayConfig.HasApiKey)
+                {
+                    LogEvents.OpenAiGatewayFallback(_logger, "No OPENAI_API_KEY configured; falling back to deterministic synthesis.");
+                    return new MultiProviderGenerationResult(
+                        ProviderUsed: AiProviderType.OpenAiGateway,
+                        GeneratedContent: null,
+                        ResolvedModel: modelId,
+                        ResolvedApiKey: null,
+                        UsedLiveProvider: false);
+                }
+
+                var content = _openAiGatewayClient.GenerateContent(
+                    new OpenAiGatewayGenerationRequest(
+                        ModelId: modelId,
+                        Prompt: promptText,
+                        SystemPrompt: systemPrompt,
+                        ApiKey: gatewayConfig.ApiKey,
+                        BaseUrl: gatewayConfig.BaseUrl,
+                        WireApi: gatewayConfig.WireApi),
+                    gatewayConfig);
+
+                return new MultiProviderGenerationResult(
+                    ProviderUsed: AiProviderType.OpenAiGateway,
+                    GeneratedContent: content,
+                    ResolvedModel: modelId,
+                    ResolvedApiKey: gatewayConfig.ApiKey,
+                    UsedLiveProvider: true);
+            }
+
             case AiProviderType.AzureOpenAi:
             {
                 var azureEndpoint = _environmentReader("AZURE_OPENAI_ENDPOINT")?.Trim();
+                var envAzureKey = _environmentReader("AZURE_OPENAI_API_KEY")?.Trim();
                 var azureKey = !string.IsNullOrWhiteSpace(request.ApiKey)
                     ? request.ApiKey.Trim()
-                    : _environmentReader("AZURE_OPENAI_API_KEY")?.Trim();
+                    : envAzureKey;
                 var copilotDiag = _copilotGateway.InspectDiagnostics();
 
                 if (request.LiveEnabled &&
@@ -209,7 +292,46 @@ public sealed class AiProviderOrchestrator
                         UsedLiveProvider: true);
                 }
 
-                // Preserve mocked / deterministic fallback when Azure endpoint or runtime is not configured
+                // Direct HTTP OpenAI Gateway fallback for Azure OpenAI when AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY
+                // are configured without requiring the external Copilot CLI runtime.
+                if (request.LiveEnabled &&
+                    !string.IsNullOrWhiteSpace(azureEndpoint) &&
+                    !string.IsNullOrWhiteSpace(envAzureKey))
+                {
+                    var azureGatewayConfig = ResolveOpenAiGatewayConfig(
+                        explicitApiKey: request.ApiKey,
+                        explicitBaseUrl: request.GatewayBaseUrl,
+                        persistedBaseUrl: request.PersistedGatewayBaseUrl,
+                        explicitWireApi: request.GatewayWireApi,
+                        persistedWireApi: request.PersistedGatewayWireApi,
+                        preferAzureEnvironment: true);
+
+                    if (azureGatewayConfig.IsConfiguredForLive)
+                    {
+                        var modelId = string.IsNullOrWhiteSpace(request.ModelName)
+                            ? _environmentReader("AZURE_OPENAI_DEPLOYMENT")?.Trim() ?? "gpt-4o"
+                            : request.ModelName.Trim();
+
+                        var content = _openAiGatewayClient.GenerateContent(
+                            new OpenAiGatewayGenerationRequest(
+                                ModelId: modelId,
+                                Prompt: promptText,
+                                SystemPrompt: systemPrompt,
+                                ApiKey: azureGatewayConfig.ApiKey,
+                                BaseUrl: azureGatewayConfig.BaseUrl,
+                                WireApi: azureGatewayConfig.WireApi),
+                            azureGatewayConfig);
+
+                        return new MultiProviderGenerationResult(
+                            ProviderUsed: AiProviderType.AzureOpenAi,
+                            GeneratedContent: content,
+                            ResolvedModel: modelId,
+                            ResolvedApiKey: azureGatewayConfig.ApiKey,
+                            UsedLiveProvider: true);
+                    }
+                }
+
+                // Preserve mocked / deterministic fallback when Azure endpoint/key or runtime is not configured
                 return new MultiProviderGenerationResult(
                     ProviderUsed: AiProviderType.AzureOpenAi,
                     GeneratedContent: null,
@@ -304,14 +426,65 @@ public sealed class AiProviderOrchestrator
     public IReadOnlyList<ProviderAvailability> InspectProviderMatrix(
         GeminiSecretResolution geminiSecret,
         AiProviderType activeProvider,
-        bool liveEnabled)
+        bool liveEnabled) =>
+        InspectProviderMatrix(geminiSecret, activeProvider, liveEnabled, explicitApiKey: null);
+
+    public IReadOnlyList<ProviderAvailability> InspectProviderMatrix(
+        GeminiSecretResolution geminiSecret,
+        AiProviderType activeProvider,
+        bool liveEnabled,
+        string? explicitApiKey,
+        string? explicitOpenAiBaseUrl = null,
+        string? persistedOpenAiBaseUrl = null,
+        string? explicitOpenAiWireApi = null,
+        string? persistedOpenAiWireApi = null)
     {
         ArgumentNullException.ThrowIfNull(geminiSecret);
 
         var copilotDiag = _copilotGateway.InspectDiagnostics();
+        var openAiGatewayKeyOverride = activeProvider == AiProviderType.OpenAiGateway ? explicitApiKey : null;
+        var openAiDiag = ResolveOpenAiGatewayConfig(
+            explicitApiKey: openAiGatewayKeyOverride,
+            explicitBaseUrl: explicitOpenAiBaseUrl,
+            persistedBaseUrl: persistedOpenAiBaseUrl,
+            explicitWireApi: explicitOpenAiWireApi,
+            persistedWireApi: persistedOpenAiWireApi);
+
         var azureEndpointConfigured = !string.IsNullOrWhiteSpace(_environmentReader("AZURE_OPENAI_ENDPOINT"));
         var azureKeyConfigured = !string.IsNullOrWhiteSpace(_environmentReader("AZURE_OPENAI_API_KEY"));
         var anthropicKeyConfigured = !string.IsNullOrWhiteSpace(_environmentReader("ANTHROPIC_API_KEY"));
+
+        var openAiIsReady = !liveEnabled || openAiDiag.IsConfiguredForLive;
+        var openAiMode = !liveEnabled
+            ? "Offline"
+            : !openAiDiag.IsValidBaseUrl
+                ? "Invalid URL"
+                : openAiDiag.HasApiKey
+                    ? "Live API"
+                    : "Needs Key";
+        var openAiDetail = !openAiDiag.IsValidBaseUrl
+            ? openAiDiag.ValidationError!
+            : openAiDiag.HasApiKey
+                ? $"{openAiDiag.ApiKeySourceDetail} [{openAiDiag.MaskedApiKey}] -> {openAiDiag.BaseUrl} ({openAiDiag.WireApiCode})"
+                : openAiDiag.IsCustomBaseUrl
+                    ? $"Gateway {openAiDiag.BaseUrl} ({openAiDiag.WireApiCode}) ready; set OPENAI_API_KEY (or --offline)"
+                    : "Set OPENAI_API_KEY (+ optional OPENAI_BASE_URL, or --offline)";
+
+        var azureLiveByok = azureEndpointConfigured && azureKeyConfigured && copilotDiag.RuntimeAvailable;
+        var azureLiveDirect = azureEndpointConfigured && azureKeyConfigured && !copilotDiag.RuntimeAvailable;
+        var azureReady = azureLiveByok || azureLiveDirect;
+        var azureMode = azureLiveByok
+            ? "BYOK Live"
+            : azureLiveDirect
+                ? (liveEnabled ? "Direct HTTP" : "Offline")
+                : "Mock Fallback";
+        var azureDetail = azureLiveByok
+            ? "AZURE_OPENAI_ENDPOINT configured (Copilot SDK BYOK)"
+            : azureLiveDirect
+                ? $"Direct OpenAI Gateway HTTP -> {_environmentReader("AZURE_OPENAI_ENDPOINT")?.Trim()}"
+                : azureEndpointConfigured
+                    ? "AZURE_OPENAI_ENDPOINT set (needs AZURE_OPENAI_API_KEY)"
+                    : "Mocked unless AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY set";
 
         return
         [
@@ -323,7 +496,7 @@ public sealed class AiProviderOrchestrator
                 Mode: liveEnabled ? (geminiSecret.IsConfigured ? "Live API" : "Needs Key") : "Offline",
                 Detail: geminiSecret.IsConfigured
                     ? $"{geminiSecret.SourceDetail} [{geminiSecret.MaskedKey}]"
-                    : $"Set GEMINI_API_KEY (or pass --offline)"),
+                    : "Set GEMINI_API_KEY (or pass --offline)"),
 
             new ProviderAvailability(
                 Provider: AiProviderType.GitHubCopilot,
@@ -336,14 +509,20 @@ public sealed class AiProviderOrchestrator
                 Detail: copilotDiag.Summary),
 
             new ProviderAvailability(
+                Provider: AiProviderType.OpenAiGateway,
+                Code: "openai",
+                DisplayName: "OpenAI Gateway API",
+                IsReady: openAiIsReady,
+                Mode: openAiMode,
+                Detail: openAiDetail),
+
+            new ProviderAvailability(
                 Provider: AiProviderType.AzureOpenAi,
                 Code: "azure",
                 DisplayName: "Azure OpenAI / Foundry",
-                IsReady: azureEndpointConfigured && azureKeyConfigured && copilotDiag.RuntimeAvailable,
-                Mode: azureEndpointConfigured && azureKeyConfigured && copilotDiag.RuntimeAvailable ? "BYOK Live" : "Mock Fallback",
-                Detail: azureEndpointConfigured
-                    ? "AZURE_OPENAI_ENDPOINT configured"
-                    : "Mocked unless AZURE_OPENAI_ENDPOINT + Copilot CLI set"),
+                IsReady: azureReady,
+                Mode: azureMode,
+                Detail: azureDetail),
 
             new ProviderAvailability(
                 Provider: AiProviderType.AnthropicClaude,
@@ -363,5 +542,30 @@ public sealed class AiProviderOrchestrator
                 Mode: activeProvider == AiProviderType.ManualPrompt ? "Active" : "Always Ready",
                 Detail: "Renders prompt Markdown + deterministic baseline draft")
         ];
+    }
+
+    private string ResolveOpenAiModelId(string? requestModelName, OpenAiGatewayConfiguration gatewayConfig)
+    {
+        if (!string.IsNullOrWhiteSpace(requestModelName))
+        {
+            return requestModelName.Trim();
+        }
+
+        var envModel = _environmentReader(RuntimeEnvironmentService.OpenAiModelEnvVar)?.Trim();
+        if (!string.IsNullOrWhiteSpace(envModel))
+        {
+            return envModel;
+        }
+
+        if (gatewayConfig.BaseUrlSource.Contains(OpenAiGatewayClient.AzureEndpointEnvVar, StringComparison.Ordinal))
+        {
+            var azureDeployment = _environmentReader(OpenAiGatewayClient.AzureDeploymentEnvVar)?.Trim();
+            if (!string.IsNullOrWhiteSpace(azureDeployment))
+            {
+                return azureDeployment;
+            }
+        }
+
+        return RuntimeEnvironmentService.DefaultOpenAiModel;
     }
 }

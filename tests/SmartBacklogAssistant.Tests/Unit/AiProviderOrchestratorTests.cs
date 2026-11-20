@@ -145,7 +145,7 @@ public sealed class AiProviderOrchestratorTests
     }
 
     [Fact]
-    public void InspectProviderMatrix_ReportsAllFiveProvidersWithReadinessAndActiveMode()
+    public void InspectProviderMatrix_ReportsAllSixProvidersWithReadinessAndActiveMode()
     {
         var fakeGateway = new FakeCopilotSdkGateway(
             diagnostics: new CopilotRuntimeDiagnostics(true, "remote-tcp", "localhost:4321", false, false, "Remote Copilot runtime TCP at localhost:4321"));
@@ -154,9 +154,10 @@ public sealed class AiProviderOrchestratorTests
 
         var matrix = orchestrator.InspectProviderMatrix(secret, AiProviderType.GitHubCopilot, liveEnabled: true);
 
-        Assert.Equal(5, matrix.Count);
+        Assert.Equal(6, matrix.Count);
         Assert.Contains(matrix, p => p.Provider == AiProviderType.GoogleGemini && p.IsReady);
         Assert.Contains(matrix, p => p.Provider == AiProviderType.GitHubCopilot && p.IsReady && p.Mode == "SDK Ready");
+        Assert.Contains(matrix, p => p.Provider == AiProviderType.OpenAiGateway && !p.IsReady && p.Mode == "Needs Key");
         Assert.Contains(matrix, p => p.Provider == AiProviderType.ManualPrompt && p.IsReady);
     }
 
@@ -572,5 +573,199 @@ public sealed class AiProviderOrchestratorTests
                 ? """{"title":"Default Fake Title","description":"Default Fake Description"}"""
                 : responseFactory(request));
         }
+    }
+
+    [Fact]
+    public void GenerateDraft_OpenAiGateway_LiveChatAndResponses_CallsHttpClientWithResolvedConfig()
+    {
+        var capturedUris = new List<Uri>();
+        var handler = new StubHttpMessageHandler((request, _) =>
+        {
+            capturedUris.Add(request.RequestUri!);
+            var isResponses = request.RequestUri!.AbsolutePath.EndsWith("/responses", StringComparison.Ordinal);
+            var json = isResponses
+                ? """{"output_text":"{\"title\":\"Responses Draft\",\"description\":\"Via /v1/responses\"}"}"""
+                : """{"choices":[{"message":{"content":"{\"title\":\"Chat Draft\",\"description\":\"Via /v1/chat/completions\"}"}}]}""";
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json")
+            };
+        });
+
+        var env = new Dictionary<string, string?>
+        {
+            [OpenAiGatewayClient.ApiKeyEnvVar] = "sk-test-openai-4321"
+        };
+        var orchestrator = new AiProviderOrchestrator(
+            environmentReader: key => env.TryGetValue(key, out var val) ? val : null,
+            openAiGatewayClient: new OpenAiGatewayClient(new HttpClient(handler)));
+
+        var chatResult = orchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+            Provider: AiProviderType.OpenAiGateway,
+            RenderedPrompt: "Return JSON for feature login",
+            BacklogType: BacklogType.Type01,
+            LiveEnabled: true));
+
+        Assert.True(chatResult.UsedLiveProvider);
+        Assert.Equal(AiProviderType.OpenAiGateway, chatResult.ProviderUsed);
+        Assert.Equal(RuntimeEnvironmentService.DefaultOpenAiModel, chatResult.ResolvedModel);
+        Assert.Contains("Chat Draft", chatResult.GeneratedContent);
+        Assert.Equal("https://api.openai.com/v1/chat/completions", capturedUris[0].AbsoluteUri);
+
+        var responsesResult = orchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+            Provider: AiProviderType.OpenAiGateway,
+            RenderedPrompt: "Return JSON schedule check",
+            BacklogType: BacklogType.Type02,
+            ModelName: "gpt-4.1-mini",
+            LiveEnabled: true,
+            GatewayBaseUrl: "https://gateway.corp.internal/llm/v1",
+            GatewayWireApi: "responses"));
+
+        Assert.True(responsesResult.UsedLiveProvider);
+        Assert.Equal("gpt-4.1-mini", responsesResult.ResolvedModel);
+        Assert.Contains("Responses Draft", responsesResult.GeneratedContent);
+        Assert.Equal("https://gateway.corp.internal/llm/v1/responses", capturedUris[1].AbsoluteUri);
+    }
+
+    [Fact]
+    public void GenerateDraft_OpenAiGateway_WhenOfflineOrMissingKey_FallsBackToDeterministicCleanly()
+    {
+        var httpCalls = 0;
+        var handler = new StubHttpMessageHandler((_, _) =>
+        {
+            httpCalls++;
+            return new HttpResponseMessage(System.Net.HttpStatusCode.InternalServerError);
+        });
+
+        var orchestrator = new AiProviderOrchestrator(
+            environmentReader: _ => null,
+            openAiGatewayClient: new OpenAiGatewayClient(new HttpClient(handler)));
+
+        var offlineResult = orchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+            Provider: AiProviderType.OpenAiGateway,
+            RenderedPrompt: "Goal: Offline check",
+            BacklogType: BacklogType.Type01,
+            ApiKey: "sk-live-9999",
+            LiveEnabled: false));
+
+        var noKeyResult = orchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+            Provider: AiProviderType.OpenAiGateway,
+            RenderedPrompt: "Goal: Missing key check",
+            BacklogType: BacklogType.Type02,
+            LiveEnabled: true));
+
+        Assert.Equal(0, httpCalls);
+        Assert.False(offlineResult.UsedLiveProvider);
+        Assert.Null(offlineResult.GeneratedContent);
+        Assert.False(noKeyResult.UsedLiveProvider);
+        Assert.Null(noKeyResult.GeneratedContent);
+    }
+
+    [Fact]
+    public void GenerateDraft_OpenAiGateway_WithInvalidUrl_ThrowsInvalidOperationException()
+    {
+        var orchestrator = new AiProviderOrchestrator(environmentReader: _ => null);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            orchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+                Provider: AiProviderType.OpenAiGateway,
+                RenderedPrompt: "Goal",
+                BacklogType: BacklogType.Type01,
+                ApiKey: "sk-1234",
+                LiveEnabled: true,
+                GatewayBaseUrl: "https://user:pass@gateway.internal/v1")));
+
+        Assert.Contains("username/password", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void GenerateDraft_AzureOpenAi_WhenCopilotRuntimeUnavailableAndEnvKeyPresent_UsesDirectHttpFallback()
+    {
+        Uri? capturedUri = null;
+        string? azureHeader = null;
+        var handler = new StubHttpMessageHandler((request, _) =>
+        {
+            capturedUri = request.RequestUri;
+            if (request.Headers.TryGetValues("api-key", out var values))
+            {
+                azureHeader = values.Single();
+            }
+
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("""{"choices":[{"message":{"content":"{\"title\":\"Azure Direct HTTP\",\"description\":\"No Copilot CLI needed\"}"}}]}""", System.Text.Encoding.UTF8, "application/json")
+            };
+        });
+
+        var fakeCopilot = new FakeCopilotSdkGateway(
+            diagnostics: new CopilotRuntimeDiagnostics(false, "unavailable", null, false, false, "Copilot CLI absent"));
+        var env = new Dictionary<string, string?>
+        {
+            ["AZURE_OPENAI_ENDPOINT"] = "https://enterprise-ai.openai.azure.com",
+            ["AZURE_OPENAI_API_KEY"] = "az-env-secret-7777",
+            ["AZURE_OPENAI_DEPLOYMENT"] = "gpt-4o-prod"
+        };
+
+        var orchestrator = new AiProviderOrchestrator(
+            copilotGateway: fakeCopilot,
+            environmentReader: key => env.TryGetValue(key, out var val) ? val : null,
+            openAiGatewayClient: new OpenAiGatewayClient(new HttpClient(handler)));
+
+        var result = orchestrator.GenerateDraft(new MultiProviderGenerationRequest(
+            Provider: AiProviderType.AzureOpenAi,
+            RenderedPrompt: "Generate Azure JSON item",
+            BacklogType: BacklogType.Type02,
+            LiveEnabled: true));
+
+        Assert.True(result.UsedLiveProvider);
+        Assert.Equal("gpt-4o-prod", result.ResolvedModel);
+        Assert.Equal("az-env-secret-7777", azureHeader);
+        Assert.Contains("/openai/deployments/gpt-4o-prod/chat/completions", capturedUri?.AbsoluteUri);
+        Assert.Contains("Azure Direct HTTP", result.GeneratedContent);
+    }
+
+    [Fact]
+    public void InspectProviderMatrix_OpenAiGateway_ReportsLiveInvalidUrlAndOfflineModes()
+    {
+        var fakeGateway = new FakeCopilotSdkGateway(
+            diagnostics: new CopilotRuntimeDiagnostics(false, "unavailable", null, false, false, "Absent"));
+        var env = new Dictionary<string, string?>
+        {
+            [OpenAiGatewayClient.ApiKeyEnvVar] = "sk-matrix-6543",
+            [OpenAiGatewayClient.BaseUrlEnvVar] = "https://proxy.acme.internal/v1",
+            [OpenAiGatewayClient.WireApiEnvVar] = "responses"
+        };
+        var orchestrator = new AiProviderOrchestrator(
+            copilotGateway: fakeGateway,
+            environmentReader: key => env.TryGetValue(key, out var val) ? val : null);
+        var geminiSecret = new GeminiSecretResolution(null, "not set", SecretSource.None, "None", GeminiSecretProvider.GeminiApiKeysUrl);
+
+        var liveMatrix = orchestrator.InspectProviderMatrix(geminiSecret, AiProviderType.OpenAiGateway, liveEnabled: true);
+        var liveEntry = Assert.Single(liveMatrix, p => p.Provider == AiProviderType.OpenAiGateway);
+        Assert.True(liveEntry.IsReady);
+        Assert.Equal("Live API", liveEntry.Mode);
+        Assert.Contains("https://proxy.acme.internal/v1 (responses)", liveEntry.Detail);
+        Assert.Contains("****6543", liveEntry.Detail);
+
+        var invalidMatrix = orchestrator.InspectProviderMatrix(
+            geminiSecret,
+            AiProviderType.OpenAiGateway,
+            liveEnabled: true,
+            explicitApiKey: null,
+            explicitOpenAiBaseUrl: "invalid-url");
+        var invalidEntry = Assert.Single(invalidMatrix, p => p.Provider == AiProviderType.OpenAiGateway);
+        Assert.False(invalidEntry.IsReady);
+        Assert.Equal("Invalid URL", invalidEntry.Mode);
+
+        var offlineMatrix = orchestrator.InspectProviderMatrix(geminiSecret, AiProviderType.OpenAiGateway, liveEnabled: false);
+        var offlineEntry = Assert.Single(offlineMatrix, p => p.Provider == AiProviderType.OpenAiGateway);
+        Assert.True(offlineEntry.IsReady);
+        Assert.Equal("Offline", offlineEntry.Mode);
+    }
+
+    private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> responder) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(responder(request, cancellationToken));
     }
 }

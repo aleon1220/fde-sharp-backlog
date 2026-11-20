@@ -112,6 +112,8 @@ public sealed class RuntimeEnvironmentService
 
     public const string DefaultCopilotModel = "gpt-5-mini";
     public const string CopilotModelEnvVar = "COPILOT_MODEL";
+    public const string DefaultOpenAiModel = "gpt-4o";
+    public const string OpenAiModelEnvVar = "OPENAI_MODEL";
 
     private static string ResolveEnabledModelDisplay(AiProviderType provider, string? customModelName)
     {
@@ -127,10 +129,17 @@ public sealed class RuntimeEnvironmentService
                 ? copilotEnvModel.Trim()
                 : DefaultCopilotModel;
 
+        var configuredOpenAiModel = !string.IsNullOrWhiteSpace(customModelName)
+            ? customModelName.Trim()
+            : Environment.GetEnvironmentVariable(OpenAiModelEnvVar) is { Length: > 0 } openAiEnvModel
+                ? openAiEnvModel.Trim()
+                : DefaultOpenAiModel;
+
         return provider switch
         {
             AiProviderType.GoogleGemini => $"Google Gemini ({configuredGeminiModel})",
             AiProviderType.GitHubCopilot => $"GitHub Copilot SDK ({configuredCopilotModel})",
+            AiProviderType.OpenAiGateway => $"OpenAI Gateway ({configuredOpenAiModel})",
             AiProviderType.AzureOpenAi => $"Azure OpenAI ({(!string.IsNullOrWhiteSpace(customModelName) ? customModelName.Trim() : "gpt-4o")})",
             AiProviderType.AnthropicClaude => $"Anthropic Claude ({(!string.IsNullOrWhiteSpace(customModelName) ? customModelName.Trim() : "claude-sonnet-4.5")})",
             _ => $"Manual Prompt Mode (Google Gemini {configuredGeminiModel} / Copilot Ready)"
@@ -141,6 +150,7 @@ public sealed class RuntimeEnvironmentService
     {
         AiProviderType.GoogleGemini => "gemini",
         AiProviderType.GitHubCopilot => "copilot-sdk",
+        AiProviderType.OpenAiGateway => "openai",
         AiProviderType.AzureOpenAi => "azure",
         AiProviderType.AnthropicClaude => "claude",
         _ => "manual"

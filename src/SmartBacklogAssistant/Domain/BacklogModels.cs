@@ -10,7 +10,7 @@ public enum AiProviderType
     [Description("Default: Load prompt from Markdown file and suggest running it in your desired AI model (e.g. Copilot)")]
     ManualPrompt = 0,
 
-    [Description("Mocked Azure OpenAI Service")]
+    [Description("Azure OpenAI / Foundry (Direct HTTP or Copilot SDK BYOK)")]
     AzureOpenAi = 1,
 
     [Description("Google Gemini API (Secret Key Injected at Runtime)")]
@@ -20,7 +20,10 @@ public enum AiProviderType
     AnthropicClaude = 3,
 
     [Description("GitHub Copilot SDK (Agentic Runtime / BYOK)")]
-    GitHubCopilot = 4
+    GitHubCopilot = 4,
+
+    [Description("OpenAI Gateway API (Direct HTTP /v1/chat/completions or /v1/responses)")]
+    OpenAiGateway = 5
 }
 
 /// <summary>
@@ -196,4 +199,6 @@ public sealed record CliSettings(
     AiProviderType? PreferredProvider = null,
     OutcomeVerbosity? DefaultVerbosity = null,
     Microsoft.Extensions.Logging.LogLevel? LogLevel = null,
-    LogOutputFormat? LogFormat = null);
+    LogOutputFormat? LogFormat = null,
+    string? OpenAiBaseUrl = null,
+    string? OpenAiWireApi = null);

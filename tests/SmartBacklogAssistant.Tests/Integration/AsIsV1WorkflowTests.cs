@@ -614,10 +614,131 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.DoesNotContain(" TRC]", stdoutText);
     }
 
+    [Fact]
+    public void Execute_OpenAiGateway_LiveInvalidUrlAndInteractiveFallback_BehavesDeterministically()
+    {
+        var secretKey = "sk-workflow-live-secret-3141";
+        var redactor = new SecretRedactor();
+        redactor.RegisterSecret(secretKey);
+        using var stderr = new StringWriter();
+        using var loggerFactory = new StderrLoggerFactory(
+            stderr,
+            Microsoft.Extensions.Logging.LogLevel.Trace,
+            LogOutputFormat.Text,
+            secretRedactor: redactor,
+            enableColor: false);
+
+        var httpCalls = 0;
+        var handler = new StubHttpMessageHandler(request =>
+        {
+            httpCalls++;
+            if (request.RequestUri!.AbsolutePath.EndsWith("/models", StringComparison.Ordinal))
+            {
+                return JsonResponse("""{"object":"list","data":[{"id":"gpt-4o","owned_by":"openai"},{"id":"tts-1","owned_by":"openai"}]}""");
+            }
+
+            return JsonResponse("""
+                {
+                  "choices": [
+                    {
+                      "message": {
+                        "content": "{\"title\":\"Workflow OpenAI Story\",\"description\":\"**Objective:** Live gateway generation succeeded.\",\"userStory\":\"As a user, I want live OpenAI Gateway synthesis.\",\"scenarios\":[{\"given\":\"Valid key\",\"when\":\"workflow runs\",\"then\":\"ticket is produced\"}]}"
+                      }
+                    }
+                  ]
+                }
+                """);
+        });
+
+        var openAiClient = new OpenAiGatewayClient(new HttpClient(handler), loggerFactory.CreateLogger<OpenAiGatewayClient>());
+        var env = new Dictionary<string, string?>
+        {
+            [OpenAiGatewayClient.ApiKeyEnvVar] = secretKey
+        };
+        var providerOrchestrator = new AiProviderOrchestrator(
+            environmentReader: key => env.TryGetValue(key, out var val) ? val : null,
+            loggerFactory: loggerFactory,
+            openAiGatewayClient: openAiClient);
+
+        var workflow = CreateWorkflow(
+            providerOrchestrator: providerOrchestrator,
+            loggerFactory: loggerFactory);
+
+        // 1. Live Type01 execution with custom gateway URL
+        using var liveOut = new StringWriter();
+        var liveTicket = workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _inputFilePath,
+                PromptFilePath: _promptFilePath,
+                ProviderInput: "openai",
+                BacklogTypeInput: "Type01",
+                DryRun: true,
+                NonInteractive: true,
+                GeminiLive: true,
+                OpenAiBaseUrl: "https://gateway.internal/v1"),
+            new StringReader(string.Empty),
+            liveOut);
+
+        Assert.Equal("Workflow OpenAI Story", liveTicket.Title);
+        Assert.Equal(AiProviderType.OpenAiGateway, workflow.LastOutcome?.ProviderUsed);
+        Assert.Contains("https://gateway.internal/v1/chat/completions", stderr.ToString());
+        Assert.DoesNotContain(secretKey, stderr.ToString());
+        Assert.DoesNotContain(secretKey, liveOut.ToString());
+
+        // 2. Live /models catalog discovery via workflow
+        var catalog = workflow.ListOpenAiModelCatalog(
+            apiKey: secretKey,
+            explicitBaseUrl: "https://gateway.internal/v1");
+        Assert.Single(catalog.SupportedModels);
+        Assert.Equal("gpt-4o", catalog.SupportedModels[0].ModelId);
+        Assert.True(catalog.UnsupportedModelCapabilities.ContainsKey("tts-1"));
+
+        // 3. Invalid gateway URL fails immediately without prompting for API key interactively
+        var offlineEnvWorkflow = CreateWorkflow(
+            providerOrchestrator: new AiProviderOrchestrator(
+                environmentReader: _ => null,
+                openAiGatewayClient: openAiClient));
+        using var errOut = new StringWriter();
+        Assert.Throws<InvalidOperationException>(() =>
+            offlineEnvWorkflow.Execute(
+                new WorkflowOptions(
+                    InputFilePath: _inputFilePath,
+                    PromptFilePath: _promptFilePath,
+                    ProviderInput: "openai",
+                    BacklogTypeInput: "Type02",
+                    DryRun: true,
+                    NonInteractive: false,
+                    GeminiLive: true,
+                    OpenAiBaseUrl: "not-a-valid-url"),
+                new StringReader(string.Empty),
+                errOut));
+
+        // 4. Missing API key in interactive mode prompts for key -> Enter falls back deterministically
+        var callsBeforePrompt = httpCalls;
+        using var promptOut = new StringWriter();
+        var fallbackTicket = offlineEnvWorkflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _inputFilePath,
+                PromptFilePath: _promptFilePath,
+                ProviderInput: "openai",
+                BacklogTypeInput: "Type02",
+                DryRun: true,
+                NonInteractive: false,
+                GeminiLive: true),
+            new StringReader("\n"),
+            promptOut);
+
+        Assert.Equal(callsBeforePrompt, httpCalls);
+        Assert.Contains("Enter OpenAI Gateway API key", promptOut.ToString());
+        Assert.False(string.IsNullOrWhiteSpace(fallbackTicket.Title));
+        Assert.Equal(AiProviderType.OpenAiGateway, offlineEnvWorkflow.LastOutcome?.ProviderUsed);
+    }
+
     private static AsIsV1Workflow CreateWorkflow(
         GeminiSecretProvider? secretProvider = null,
         GeminiApiClient? geminiApiClient = null,
-        Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null) =>
+        Microsoft.Extensions.Logging.ILoggerFactory? loggerFactory = null,
+        AiProviderOrchestrator? providerOrchestrator = null) =>
         new(
             new RawDataCollector(loggerFactory?.CreateLogger<RawDataCollector>()),
             new PromptTemplateService(),
@@ -628,7 +749,7 @@ public sealed class AsIsV1WorkflowTests : IDisposable
                 environmentReader: _ => null,
                 environmentWriter: (_, _) => { }),
             geminiApiClient,
-            providerOrchestrator: null,
+            providerOrchestrator: providerOrchestrator,
             loggerFactory: loggerFactory);
 
     private static HttpResponseMessage JsonResponse(string json) => new(System.Net.HttpStatusCode.OK)

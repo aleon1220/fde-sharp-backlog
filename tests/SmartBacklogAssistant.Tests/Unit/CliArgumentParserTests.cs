@@ -294,4 +294,34 @@ public sealed class CliArgumentParserTests
     {
         Assert.Throws<ArgumentException>(() => Program.ParseArgs([subcommand, flag]));
     }
+
+    [Fact]
+    public void ParseArgs_WithOpenAiGatewayFlagsAndAliases_ParsesGatewayUrlAndWireApi()
+    {
+        var primary = Program.ParseArgs([
+            "draft", "Support SSO gateway",
+            "--provider", "openai",
+            "--gateway-url", "https://proxy.corp.internal/v1",
+            "--wire-api", "responses",
+            "-m", "gpt-4.1-mini"
+        ]);
+
+        Assert.Equal("draft", primary.Subcommand);
+        Assert.Equal("openai", primary.ProviderInput);
+        Assert.Equal("https://proxy.corp.internal/v1", primary.OpenAiBaseUrl);
+        Assert.Equal("responses", primary.OpenAiWireApi);
+        Assert.Equal("gpt-4.1-mini", primary.ModelName);
+
+        var aliases = Program.ParseArgs([
+            "config",
+            "--provider", "openai-gateway",
+            "--base-url", "http://localhost:11434/v1",
+            "--gateway-api", "chat"
+        ]);
+
+        Assert.Equal("config", aliases.Subcommand);
+        Assert.Equal("openai-gateway", aliases.ProviderInput);
+        Assert.Equal("http://localhost:11434/v1", aliases.OpenAiBaseUrl);
+        Assert.Equal("chat", aliases.OpenAiWireApi);
+    }
 }

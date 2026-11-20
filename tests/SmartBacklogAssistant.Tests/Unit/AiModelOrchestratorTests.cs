@@ -292,4 +292,49 @@ public sealed class AiModelOrchestratorTests
         Assert.Equal("Alt Title 2", outcome.Alternatives[1].Title);
         Assert.Equal("Alt Desc 2.", outcome.Alternatives[1].Description);
     }
+
+    [Theory]
+    [InlineData("5", AiProviderType.OpenAiGateway)]
+    [InlineData("openai", AiProviderType.OpenAiGateway)]
+    [InlineData("openai-gateway", AiProviderType.OpenAiGateway)]
+    [InlineData("openaigateway", AiProviderType.OpenAiGateway)]
+    [InlineData("openai_gateway", AiProviderType.OpenAiGateway)]
+    [InlineData("gateway", AiProviderType.OpenAiGateway)]
+    [InlineData("openai-api", AiProviderType.OpenAiGateway)]
+    public void ResolveProvider_MapsOpenAiGatewayAliases(string rawProvider, AiProviderType expected)
+    {
+        Assert.Equal(expected, _sut.ResolveProvider(rawProvider));
+    }
+
+    [Fact]
+    public void Process_WithOpenAiGatewayGeneratedJson_ParsesStructuredOutcomeAndGuidance()
+    {
+        var json = """
+            {
+              "title": "Enable OpenAI Gateway Integration",
+              "description": "**Objective:** Support live `/v1/chat/completions` and `/v1/responses` calls.\n* Route bearer keys cleanly",
+              "userStory": "As a developer, I want OpenAI Gateway support so I can use custom endpoints.",
+              "scenarios": [
+                {
+                  "given": "OPENAI_API_KEY and OPENAI_BASE_URL are set",
+                  "when": "a draft is generated",
+                  "then": "the gateway returns structured JSON"
+                }
+              ]
+            }
+            """;
+
+        var outcome = _sut.Process(
+            rawData: "Goal: Enable OpenAI Gateway Integration",
+            renderedPrompt: "Type01 prompt",
+            provider: AiProviderType.OpenAiGateway,
+            generatedContent: json,
+            modelName: "gpt-4.1-mini",
+            backlogType: BacklogType.Type01);
+
+        Assert.Equal(AiProviderType.OpenAiGateway, outcome.ProviderUsed);
+        Assert.Equal("Enable OpenAI Gateway Integration", outcome.Title);
+        Assert.Contains("OpenAI Gateway", outcome.GuidanceMessage);
+        Assert.Single(outcome.Scenarios);
+    }
 }

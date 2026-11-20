@@ -57,8 +57,14 @@ public sealed class WorkspaceDiagnosticService
         var logging = CliLogLevelResolver.ResolveEffectiveLogging(options, settings, _environmentReader);
 
         var runtimeInfo = _runtimeEnvService.Inspect(activeProvider, effectiveModel);
-        var secret = _secretProvider.Resolve(options.ApiKey);
+        var secret = _secretProvider.Resolve(activeProvider == AiProviderType.GoogleGemini ? options.ApiKey : null);
         var copilotDiag = _providerOrchestrator.CopilotGateway.InspectDiagnostics();
+        var openAiDiag = _providerOrchestrator.ResolveOpenAiGatewayConfig(
+            explicitApiKey: activeProvider == AiProviderType.OpenAiGateway ? options.ApiKey : null,
+            explicitBaseUrl: options.OpenAiBaseUrl,
+            persistedBaseUrl: settings.OpenAiBaseUrl,
+            explicitWireApi: options.OpenAiWireApi,
+            persistedWireApi: settings.OpenAiWireApi);
         var inputFiles = _workspaceService.GetInputFiles(workspace.InputDirectory);
         var outputFiles = Directory.Exists(workspace.OutputDirectory)
             ? Directory.EnumerateFiles(workspace.OutputDirectory).Count()
@@ -69,6 +75,14 @@ public sealed class WorkspaceDiagnosticService
         var platformSummary = isWsl
             ? $"{runtimeInfo.OsPlatform} (WSL2) | {runtimeInfo.FrameworkDescription}"
             : $"{runtimeInfo.OsPlatform} ({runtimeInfo.ProcessArchitecture}) | {runtimeInfo.FrameworkDescription}";
+
+        var openAiSummary = !openAiDiag.IsValidBaseUrl
+            ? openAiDiag.ValidationError!
+            : openAiDiag.HasApiKey
+                ? $"{openAiDiag.ApiKeySourceDetail} [{openAiDiag.MaskedApiKey}] @ {openAiDiag.BaseUrl} ({openAiDiag.WireApiCode})"
+                : openAiDiag.IsCustomBaseUrl
+                    ? $"Needs OPENAI_API_KEY @ {openAiDiag.BaseUrl} ({openAiDiag.WireApiCode})"
+                    : $"Not set ({openAiDiag.BaseUrl} | {openAiDiag.WireApiCode})";
 
         var rows = new List<(string Section, string Setting, string Value, ConsoleColor ValueColor)>
         {
@@ -87,6 +101,7 @@ public sealed class WorkspaceDiagnosticService
             ("AI", "Active Provider", $"{RuntimeEnvironmentService.FormatProviderCode(activeProvider)} ({(effectiveLive ? "Live" : "Offline")})", ConsoleColor.Cyan),
             ("AI", "Active Model", runtimeInfo.EnabledAiModel, ConsoleColor.Green),
             ("AI", "Gemini API Key", secret.IsConfigured ? $"{secret.SourceDetail} [{secret.MaskedKey}]" : $"Not set ({secret.KeyPortalUrl})", secret.IsConfigured ? ConsoleColor.Green : ConsoleColor.Yellow),
+            ("AI", "OpenAI Gateway", openAiSummary, !openAiDiag.IsValidBaseUrl ? ConsoleColor.Red : openAiDiag.HasApiKey ? ConsoleColor.Green : ConsoleColor.Yellow),
             ("AI", "Copilot SDK", copilotDiag.Summary, copilotDiag.RuntimeAvailable ? ConsoleColor.Green : ConsoleColor.Yellow)
         };
 
@@ -97,7 +112,15 @@ public sealed class WorkspaceDiagnosticService
 
         color.WriteLine();
         color.WriteSubHeader("AI Provider Matrix:");
-        var matrix = _providerOrchestrator.InspectProviderMatrix(secret, activeProvider, effectiveLive);
+        var matrix = _providerOrchestrator.InspectProviderMatrix(
+            secret,
+            activeProvider,
+            effectiveLive,
+            options.ApiKey,
+            options.OpenAiBaseUrl,
+            settings.OpenAiBaseUrl,
+            options.OpenAiWireApi,
+            settings.OpenAiWireApi);
         foreach (var entry in matrix)
         {
             var marker = entry.IsReady ? "[✓]" : "[!]";
@@ -140,6 +163,8 @@ public sealed class WorkspaceDiagnosticService
             ("AI", "Provider (--provider)", RuntimeEnvironmentService.FormatProviderCode(activeProvider), ConsoleColor.Green),
             ("AI", "Live AI (--live)", (settings.GeminiLive ?? true) ? "ON" : "OFF", (settings.GeminiLive ?? true) ? ConsoleColor.Green : ConsoleColor.Yellow),
             ("AI", "Model (--model)", settings.ModelName ?? "automatic", ConsoleColor.Gray),
+            ("AI", "Gateway URL", settings.OpenAiBaseUrl ?? "(env / default api.openai.com/v1)", string.IsNullOrWhiteSpace(settings.OpenAiBaseUrl) ? ConsoleColor.DarkGray : ConsoleColor.Cyan),
+            ("AI", "Gateway API", settings.OpenAiWireApi ?? "chat (default)", string.IsNullOrWhiteSpace(settings.OpenAiWireApi) ? ConsoleColor.DarkGray : ConsoleColor.Cyan),
             ("Storage", "settings.json", _settingsService.GetSettingsFilePath(baseWorkspace), ConsoleColor.DarkGray)
         };
 
