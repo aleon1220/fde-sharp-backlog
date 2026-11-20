@@ -328,6 +328,36 @@ public sealed class CliLoggingTests
         Assert.DoesNotContain("sk-openai-live-secret-9988", logOutput);
     }
 
+    [Fact]
+    public void SecretRedactor_MasksNuGetAuthTokensAndCredentialPatterns()
+    {
+        var env = new Dictionary<string, string?>
+        {
+            ["NUGET_AUTH_TOKEN"] = "nuget-ephemeral-token-4321",
+            ["VSS_NUGET_ACCESSTOKEN"] = "azdo-workload-identity-8765"
+        };
+        var redactor = new SecretRedactor();
+        redactor.RegisterEnvironmentSecrets(k => env.TryGetValue(k, out var val) ? val : null);
+
+        var raw =
+            "NUGET_AUTH_TOKEN=nuget-ephemeral-token-4321 " +
+            "VSS_NUGET_ACCESSTOKEN=azdo-workload-identity-8765 " +
+            "NuGetPackageSourceCredentials_upstream_proxy=Username=azdo;Password=inlineFeedSecret9911 " +
+            "ClearTextPassword=xmlFeedSecret2233";
+
+        var redacted = redactor.Redact(raw);
+
+        Assert.DoesNotContain("nuget-ephemeral-token-4321", redacted);
+        Assert.DoesNotContain("azdo-workload-identity-8765", redacted);
+        Assert.DoesNotContain("inlineFeedSecret9911", redacted);
+        Assert.DoesNotContain("xmlFeedSecret2233", redacted);
+
+        Assert.Contains("****4321", redacted);
+        Assert.Contains("****8765", redacted);
+        Assert.Contains("****9911", redacted);
+        Assert.Contains("****2233", redacted);
+    }
+
     private sealed class StubHttpMessageHandler(Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> responder) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>

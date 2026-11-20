@@ -13,32 +13,46 @@
 
 ## Setup & Quick Start (`Microsoft.Copilot.SDK` & OpenAI Gateway)
 
-### 1. Prerequisites & NuGet Restore (UAT & Non-Clean Workstation Setup)
+### 1. Prerequisites & Hardened NuGet Restore (UAT & Pre-Production Runners)
 
 * **.NET 10 SDK** (`dotnet --version` >= `10.0`)
-* **Register Official `nuget.org` Feed & Restore Packages**:
-  The solution includes a root [`nuget.config`](nuget.config) pointing to `https://api.nuget.org/v3/index.json`. If your global user/machine `NuGet.Config` is not clean (e.g., missing `nuget.org`, disabled sources, or stale corporate/offline feed entries), register `nuget.org` explicitly and restore before running UAT:
+* **Isolated Sources & Lockfile Determinism ([Issue #57](https://github.com/aleon1220/fde-sharp-backlog/issues/57)):**
+  * Root [`nuget.config`](nuget.config) uses `<clear />` inside `<packageSources>` and `<disabledPackageSources>` while pinning `https://api.nuget.org/v3/index.json` (`protocolVersion="3"`), isolating restores from stale or disabled global/machine `NuGet.Config` entries.
+  * [`Directory.Build.props`](Directory.Build.props) enables `RestorePackagesWithLockFile` (committed [`src/SmartBacklogAssistant/packages.lock.json`](src/SmartBacklogAssistant/packages.lock.json) and [`tests/SmartBacklogAssistant.Tests/packages.lock.json`](tests/SmartBacklogAssistant.Tests/packages.lock.json)) and automatically enforces `RestoreLockedMode=true` when `ContinuousIntegrationBuild=true`.
+* **Recommended One-Command Hardened Restore (Linux / macOS / Windows):**
 
 ```bash
-# 1. Register the official NuGet v3 feed in your user profile (if not already present)
-dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org
+# Linux / macOS / WSL2 (enables HTTP retries, enforces --locked-mode, optionally repairs user NuGet.Config)
+./scripts/restore-nuget.sh --locked-mode --fix-user-config
 
-# 2. Restore all solution packages (Microsoft.Copilot.SDK, xunit, Microsoft.NET.Test.Sdk)
-dotnet restore
+# Direct dotnet CLI equivalent (or register nuget.org globally for other repos)
+dotnet nuget add source https://api.nuget.org/v3/index.json --name nuget.org
+NUGET_ENABLE_ENHANCED_HTTP_RETRY=true dotnet restore SmartBacklogAssistant.slnx --locked-mode
 ```
 
+```powershell
+# Windows / PowerShell (hardened restore with HTTP retries + --locked-mode)
+.\scripts\restore-nuget.ps1 -LockedMode $true -FixUserConfig
+```
+
+* **Upstream Caching Proxies, Local Fallback Feeds & Ephemeral Token Auth:**
+  * **Caching Proxy & Fallback Feeds:** Set `NUGET_PROXY_FEED_URL` (e.g., GitHub Packages `https://nuget.pkg.github.com/<owner>/index.json` or Azure Artifacts upstream to `nuget.org`; add `NUGET_PROXY_ONLY=true` for proxy-only air-gapped runners), `NUGET_FALLBACK_FEED_DIR` (local `.nupkg` directory), and/or `NUGET_FALLBACK_PACKAGES_DIR` (or repo-local `.nuget/fallback` expanded cache).
+  * **Token-Scoped / Workload Identity CI Auth (Zero Static PATs):** Supply short-lived credentials via `NUGET_AUTH_TOKEN`, `VSS_NUGET_ACCESSTOKEN`, or `GITHUB_TOKEN` (for GitHub Packages) — [`scripts/restore-nuget.sh`](scripts/restore-nuget.sh) and [`scripts/restore-nuget.ps1`](scripts/restore-nuget.ps1) pass credentials in memory via `NuGetPackageSourceCredentials_upstream_proxy` without persisting secrets to disk, and [`SecretRedactor`](src/SmartBacklogAssistant/Services/SecretRedactor.cs) redacts `NUGET_AUTH_TOKEN` / `VSS_NUGET_ACCESSTOKEN` from CLI `stderr` diagnostics.
+  * **Pre-Production CI Gate:** [`.github/workflows/preprod-nuget-uat.yml`](.github/workflows/preprod-nuget-uat.yml) verifies lockfile-cached restores on `ubuntu-latest` and `windows-latest`, simulates poisoned user `NuGet.Config` drift, enables `id-token: write` for OIDC workload identity, and runs UAT smoke checks.
+
 > [!NOTE]
-> **Troubleshooting Non-Clean Setups During UAT ([Issue #57](https://github.com/aleon1220/fde-sharp-backlog/issues/57)):**
-> * If `dotnet nuget add source` reports that `nuget.org` already exists or is disabled, inspect and re-enable it:
+> **Troubleshooting Non-Clean Setups & Lockfiles During UAT ([Issue #57](https://github.com/aleon1220/fde-sharp-backlog/issues/57)):**
+> * If `dotnet nuget add source` reports that `nuget.org` already exists or is disabled in your user profile, inspect and re-enable it (or run `--fix-user-config` / `-FixUserConfig`):
 >   ```bash
 >   dotnet nuget list source
 >   dotnet nuget enable source nuget.org
 >   ```
-> * If a stale HTTP cache or corrupted package folder blocks restore, force a clean restore using the repo-pinned [`nuget.config`](nuget.config):
+> * If a stale HTTP cache or corrupted package folder blocks restore, run `./scripts/restore-nuget.sh --clear-cache` (or `.\scripts\restore-nuget.ps1 -ClearCache`), or manually clear and force-restore:
 >   ```bash
 >   dotnet nuget locals http-cache --clear
->   dotnet restore --configfile nuget.config --force --no-cache
+>   NUGET_ENABLE_ENHANCED_HTTP_RETRY=true dotnet restore --configfile nuget.config --locked-mode --force --no-cache
 >   ```
+> * When intentionally adding or upgrading a NuGet package, regenerate `packages.lock.json` cleanly without `--locked-mode` (`dotnet restore --force-evaluate`) and commit the updated lockfiles.
 
 * **Build & Verify Locally for UAT** (runs all unit & integration tests with zero warnings, then checks live workspace readiness):
 
@@ -53,7 +67,7 @@ dotnet run --project src/SmartBacklogAssistant -- status
   * **Copilot SDK (`copilot-sdk`):** GitHub Copilot CLI (`copilot` on `PATH` or `COPILOT_CLI_PATH`), a remote runtime (`COPILOT_CLI_URL`), or bundled runtime (`-p:CopilotSkipCliDownload=false`) + authentication (`copilot login`, `COPILOT_GITHUB_TOKEN`, `GITHUB_TOKEN`, or `GH_TOKEN`).
   * **Azure / BYOK (`azure` / `claude` / Ollama):** `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_API_KEY` (uses direct HTTP gateway fallback even without Copilot CLI), `ANTHROPIC_API_KEY`, or `OLLAMA_HOST` routed via `Microsoft.Copilot.SDK`.
 
-### 2. Authentication & Runtime Environment Variables
+### 2. Authentication, NuGet Restore & Runtime Environment Variables
 
 | Variable | Purpose | Notes |
 | --- | --- | --- |
@@ -61,7 +75,7 @@ dotnet run --project src/SmartBacklogAssistant -- status
 | `OPENAI_BASE_URL` | Custom OpenAI Gateway base URL | Defaults to `https://api.openai.com/v1`; supports bare domains, custom subpaths, and Azure endpoints; overridden by `--gateway-url` (`--base-url`) |
 | `OPENAI_WIRE_API` | OpenAI Gateway wire protocol | `chat` (`/v1/chat/completions`, default) or `responses` (`/v1/responses`); alias `OPENAI_API_MODE`; overridden by `--wire-api` |
 | `OPENAI_MODEL` | Default OpenAI Gateway model ID | Defaults to `gpt-4o`; supports standard IDs (`gpt-4.1-mini`) and `vendor/model` gateway slugs |
-| `COPILOT_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` | GitHub auth for Copilot SDK | Evaluated in listed order; falls back to `copilot login` keychain auth when unset |
+| `COPILOT_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GH_TOKEN` | GitHub auth for Copilot SDK | Evaluated in listed order; falls back to `copilot login` keychain auth when unset (`GITHUB_TOKEN` also authenticates GitHub Packages NuGet proxies) |
 | `COPILOT_CLI_PATH` | Explicit Copilot CLI / runtime path | Uses in-process FFI when native runtime (`libcopilot_runtime.*` / `runtime.node`) is adjacent; otherwise spawns `--stdio` |
 | `COPILOT_CLI_URL` | Attached remote runtime over TCP | Accepts `host:port`, `http://host:port`, or `[::1]:port` (`RuntimeConnection.ForTcp`) |
 | `COPILOT_SDK_DEFAULT_CONNECTION` | Default local transport | `inprocess` (SDK v2 default) or `stdio` |
@@ -69,6 +83,10 @@ dotnet run --project src/SmartBacklogAssistant -- status
 | `GEMINI_API_KEY` | Google Gemini REST API key | Can also be persisted interactively or overridden via `--api-key` |
 | `SBA_LOG_LEVEL` | Diagnostic `stderr` log severity | `Trace`, `Debug`, `Information`, `Warning` (default), `Error`, `Critical`, `None` (`Quiet`) |
 | `SBA_LOG_FORMAT` | Diagnostic `stderr` log format | `text` (default timestamped) or `json` (structured NDJSON); always routed to `stderr` |
+| `NUGET_PROXY_FEED_URL` | Upstream NuGet caching proxy URL | HTTPS feed URL (GitHub Packages, Azure Artifacts, Artifactory); set `NUGET_PROXY_ONLY=true` to disable direct `nuget.org` fallback |
+| `NUGET_AUTH_TOKEN` / `VSS_NUGET_ACCESSTOKEN` | Ephemeral token-scoped NuGet feed auth | Supplied by CI OIDC / workload identity (`NUGET_AUTH_USER` defaults to `x-access-token` on GitHub Packages or `azdo`); redacted in `stderr` logs |
+| `NUGET_FALLBACK_FEED_DIR` / `NUGET_FALLBACK_PACKAGES_DIR` | Local NuGet fallback feed or cache dir | Auto-detected by [`Directory.Build.props`](Directory.Build.props) and restore scripts only when directory exists on disk (also auto-uses `.nuget/fallback`) |
+| `NUGET_ENABLE_ENHANCED_HTTP_RETRY` | Transient NuGet HTTP retry toggle | Set to `true` (`NUGET_ENHANCED_MAX_NETWORK_TRY_COUNT=6`, `NUGET_RETRY_HTTP_429=true`, `NUGET_OBSERVE_RETRY_AFTER=true`) on pre-production runners |
 
 > [!TIP]
 > Builds skip downloading the native Copilot runtime bundle by default (`CopilotSkipCliDownload=true`). Pass `-p:CopilotSkipCliDownload=false` when building/publishing if you want MSBuild to bundle the platform FFI native library (`runtimes/<rid>/native/`) for zero-external-CLI in-process execution.
@@ -138,7 +156,7 @@ Diagnostic telemetry uses standard `Microsoft.Extensions.Logging` (`LogLevel`: `
 
 * **Precedence:** `--log-level` → `--verbose`/`-V` (`Debug`) or `--quiet`/`-q` (`None`) → `SBA_LOG_LEVEL` → `settings.json` (`logLevel`) → `Warning` (default).
 * **Formatting:** Timestamped `text` (default) or structured NDJSON (`--log-format json` / `SBA_LOG_FORMAT=json` / `settings.json`).
-* **Secret Redaction:** Gemini keys (`AIza...`), OpenAI Gateway keys (`OPENAI_API_KEY` / `sk-...`), GitHub/Copilot tokens (`ghp_`, `gho_`, `github_pat_`), Anthropic/Azure/BYOK keys, and auth headers are masked via `GeminiSecretProvider.MaskKey` before writing to `stderr`.
+* **Secret Redaction:** Gemini keys (`AIza...`), OpenAI Gateway keys (`OPENAI_API_KEY` / `sk-...`), GitHub/Copilot tokens (`ghp_`, `gho_`, `github_pat_`), NuGet feed tokens (`NUGET_AUTH_TOKEN`, `VSS_NUGET_ACCESSTOKEN`), Anthropic/Azure/BYOK keys, and auth headers/passwords are masked via `GeminiSecretProvider.MaskKey` before writing to `stderr`.
 
 ## Interactive REPL & Menu (Gemini CLI / Agy Style)
 
@@ -169,6 +187,7 @@ Preserves strict **Zero Hallucination** prompt rules and Type `01`/`02` formatti
 ## Containers & Podman Kubernetes
 
 ```bash
+# Deterministic --locked-mode restore & --no-restore publish (optionally pass --build-arg NUGET_PROXY_FEED_URL=...)
 podman build -t localhost/smart-backlog-assistant:v1 -f Containerfile .
 podman kube play k8s/smart-backlog-pod.yaml
 podman logs smart-backlog-assistant-assistant
@@ -177,4 +196,4 @@ podman kube down k8s/smart-backlog-pod.yaml
 
 ## Findings & Iteration Backlog
 
-See [BACKLOG.md](BACKLOG.md) and [PLAN.md](PLAN.md) for architecture notes, runtime findings (`SBA-101`–`SBA-105`), and CLI/TUI UX standards.
+See [BACKLOG.md](BACKLOG.md) and [PLAN.md](PLAN.md) for architecture notes, runtime findings (`SBA-101`–`SBA-109`), and CLI/TUI UX standards.
