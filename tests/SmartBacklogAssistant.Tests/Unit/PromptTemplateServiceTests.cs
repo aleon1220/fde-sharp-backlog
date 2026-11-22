@@ -124,6 +124,40 @@ public sealed class PromptTemplateServiceTests
         Assert.Equal(expected, _sut.IsBuiltInPromptPath(path));
     }
 
+    [Theory]
+    [InlineData(PromptTemplateService.DefaultPromptFilePath, "As-Is v1 Prompt")]
+    [InlineData(PromptTemplateService.Type01PromptFilePath, "Complete User Story")]
+    [InlineData(PromptTemplateService.Type02PromptFilePath, "Schedule Item")]
+    [InlineData(PromptTemplateService.GoalExpandPromptFilePath, "Goal-to-Notes Expansion")]
+    public void TryReadEmbeddedPromptTemplate_LoadsBundledMarkdownFromAssembly(string promptPath, string expectedText)
+    {
+        var embedded = _sut.TryReadEmbeddedPromptTemplate(promptPath);
+
+        Assert.NotNull(embedded);
+        Assert.Contains(expectedText, embedded);
+    }
+
+    [Fact]
+    public void LoadAndRenderPrompt_WhenNoPromptsExistOnDisk_FallsBackToEmbeddedForBuiltInAndThrowsForMissingCustom()
+    {
+        var isolatedService = new PromptTemplateService(
+            fileExists: _ => false,
+            fileReader: _ => throw new InvalidOperationException("Disk reader should not be called when files do not exist."),
+            currentDirectoryProvider: () => Path.GetTempPath(),
+            baseDirectoryProvider: () => Path.GetTempPath());
+
+        var rendered = isolatedService.LoadAndRenderPromptForType(
+            PromptTemplateService.DefaultPromptFilePath,
+            "Goal: Ship standalone release binaries",
+            BacklogType.Type01);
+
+        Assert.Contains("Complete User Story", rendered);
+        Assert.Contains("Goal: Ship standalone release binaries", rendered);
+
+        Assert.Throws<FileNotFoundException>(() =>
+            isolatedService.LoadAndRenderPrompt("custom/missing-prompt.md", "Goal: Custom override"));
+    }
+
     private static string ReadRepoPrompt(string relativePath)
     {
         var repositoryRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../.."));

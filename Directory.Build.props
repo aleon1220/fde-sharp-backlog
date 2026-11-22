@@ -1,8 +1,9 @@
 <Project>
   <PropertyGroup>
-    <!-- Deterministic NuGet lockfiles for pre-production & UAT restores (Issue #57) -->
+    <!-- Deterministic NuGet lockfiles for RID-agnostic restores; redirect RID-specific lockfile into obj/ so repo packages.lock.json stays RID-agnostic (Issue #57, #59) -->
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true'">true</RestoreLockedMode>
+    <RestoreLockedMode Condition="'$(ContinuousIntegrationBuild)' == 'true' and '$(RuntimeIdentifier)' == ''">true</RestoreLockedMode>
+    <NuGetLockFilePath Condition="'$(RuntimeIdentifier)' != ''">$(MSBuildProjectDirectory)/obj/packages.$(RuntimeIdentifier).lock.json</NuGetLockFilePath>
 
     <!-- Optional upstream caching proxy & local fallback feeds (skipped when restore script passes a managed config) -->
     <RestoreSources Condition="'$(SBA_NUGET_CONFIG_MANAGED)' != 'true' and '$(NUGET_PROXY_FEED_URL)' != '' and '$(NUGET_PROXY_ONLY)' == 'true'">$(NUGET_PROXY_FEED_URL)</RestoreSources>

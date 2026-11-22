@@ -424,7 +424,6 @@ public sealed class AsIsV1Workflow
         var promptType = isCombinedType ? BacklogType.Type01 : backlogType;
         var selectedPromptPath = _promptService.ResolvePromptFilePath(options.PromptFilePath, promptType);
         var existingSelectedPrompt = _promptService.TryFindExistingPromptPath(selectedPromptPath);
-        var existingFallbackPrompt = _promptService.TryFindExistingPromptPath(options.PromptFilePath);
 
         var modelName = options.ModelName;
         if (provider == AiProviderType.GoogleGemini && options.GeminiLive == true)
@@ -506,9 +505,8 @@ public sealed class AsIsV1Workflow
 
         if (shouldExpandLive)
         {
-            var expandPromptPath = _promptService.TryFindExistingPromptPath(PromptTemplateService.GoalExpandPromptFilePath);
-            var renderedExpandPrompt = expandPromptPath is not null
-                ? _promptService.LoadAndRenderPrompt(expandPromptPath, rawData)
+            var renderedExpandPrompt = _promptService.TryLoadTemplate(PromptTemplateService.GoalExpandPromptFilePath, out var expandTemplate, out _)
+                ? _promptService.RenderPromptFromTemplate(expandTemplate, rawData)
                 : _promptService.RenderPromptFromTemplate(DefaultGoalExpandFallbackTemplate, rawData);
 
             var expandModelLabel = provider switch
@@ -593,12 +591,24 @@ public sealed class AsIsV1Workflow
                 expandOfflineSw.Elapsed);
         }
 
-        var promptSourceName = existingSelectedPrompt ?? existingFallbackPrompt ?? "built-in-fallback";
-        var renderedPrompt = existingSelectedPrompt is not null
-            ? _promptService.LoadAndRenderPrompt(existingSelectedPrompt, rawData)
-            : existingFallbackPrompt is not null
-                ? _promptService.LoadAndRenderPrompt(existingFallbackPrompt, rawData)
-                : _promptService.RenderPromptFromTemplate("# Practical Process As-Is v1\nAnalyze the following raw notes:\n{{RAW_DATA}}", rawData);
+        string promptSourceName;
+        string renderedPrompt;
+        if (_promptService.TryLoadTemplate(selectedPromptPath, out var selectedTemplate, out var selectedSource))
+        {
+            promptSourceName = selectedSource;
+            renderedPrompt = _promptService.RenderPromptFromTemplate(selectedTemplate, rawData);
+        }
+        else if (_promptService.TryLoadTemplate(options.PromptFilePath, out var fallbackTemplate, out var fallbackSource))
+        {
+            promptSourceName = fallbackSource;
+            renderedPrompt = _promptService.RenderPromptFromTemplate(fallbackTemplate, rawData);
+        }
+        else
+        {
+            promptSourceName = "built-in-fallback";
+            renderedPrompt = _promptService.RenderPromptFromTemplate("# Practical Process As-Is v1\nAnalyze the following raw notes:\n{{RAW_DATA}}", rawData);
+        }
+
         LogEvents.PromptRendered(_logger, promptSourceName, promptType.ToString(), renderedPrompt.Length);
 
         if (provider == AiProviderType.ManualPrompt)
