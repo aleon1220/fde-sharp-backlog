@@ -1,0 +1,269 @@
+name: Release Versioned CLI Binaries
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Semantic version tag (e.g., v1.1.0) stamped onto binaries"
+        required: false
+        default: "v1.1.0"
+      publish_release:
+        description: "Create/update GitHub Release after all checks pass (false = build & smoke-test artifacts only)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  NUGET_ENABLE_ENHANCED_HTTP_RETRY: "true"
+  NUGET_ENHANCED_MAX_NETWORK_TRY_COUNT: "6"
+  NUGET_ENHANCED_NETWORK_RETRY_DELAY_MILLISECONDS: "1000"
+  NUGET_RETRY_HTTP_429: "true"
+  NUGET_OBSERVE_RETRY_AFTER: "true"
+  ContinuousIntegrationBuild: "true"
+
+jobs:
+  verify:
+    name: Verify & Test Gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Cache NuGet global packages by lockfile
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/packages.lock.json', 'nuget.config', 'Directory.Build.props') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Hardened NuGet restore (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          NUGET_PROXY_FEED_URL: ${{ vars.NUGET_PROXY_FEED_URL }}
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x ./scripts/restore-nuget.sh
+          ./scripts/restore-nuget.sh --locked-mode
+
+      - name: Hardened NuGet restore (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          NUGET_PROXY_FEED_URL: ${{ vars.NUGET_PROXY_FEED_URL }}
+          NUGET_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./scripts/restore-nuget.ps1 -LockedMode:$true
+
+      - name: Build solution (Release, warnings as errors)
+        run: dotnet build SmartBacklogAssistant.slnx -c Release --no-restore -p:TreatWarningsAsErrors=true
+
+      - name: Run full unit & integration test suite
+        run: dotnet test SmartBacklogAssistant.slnx -c Release --no-restore --verbosity normal
+
+  package:
+    name: Build & Smoke-Test Binary (${{ matrix.rid }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            os: ubuntu-latest
+          - rid: win-x64
+            os: windows-latest
+          - rid: osx-arm64
+            os: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Resolve release version tag
+        id: meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          RAW_TAG="$REF_NAME"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            RAW_TAG="$INPUT_TAG"
+          fi
+          if [[ ! "$RAW_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "error: Invalid release tag '$RAW_TAG'. Expected semantic version such as v1.1.0." >&2
+            exit 1
+          fi
+          CLEAN_VERSION="${RAW_TAG#v}"
+          echo "tag=v${CLEAN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version=${CLEAN_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Package & smoke-test self-contained binary (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          chmod +x ./scripts/package-release.sh
+          ./scripts/package-release.sh \
+            --rid "${{ matrix.rid }}" \
+            --version "${{ steps.meta.outputs.version }}" \
+            --output-dir dist
+
+      - name: Package & smoke-test self-contained binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/package-release.ps1 `
+            -Rid "${{ matrix.rid }}" `
+            -Version "${{ steps.meta.outputs.version }}" `
+            -OutputDir dist
+
+      - name: Upload verified release package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package-${{ matrix.rid }}
+          path: dist/SmartBacklogAssistant-*
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish Verified GitHub Release
+    needs: [verify, package]
+    if: ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish_release == true) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download verified release packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-package-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Resolve release tag & assemble SHA256SUMS.txt
+        id: release_meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          RAW_TAG="$REF_NAME"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            RAW_TAG="$INPUT_TAG"
+          fi
+          CLEAN_VERSION="${RAW_TAG#v}"
+          TAG="v${CLEAN_VERSION}"
+          IS_PRERELEASE="false"
+          if [[ "$CLEAN_VERSION" == *-* ]]; then
+            IS_PRERELEASE="true"
+          fi
+
+          cd release-assets
+          for sha_file in *.sha256; do
+            sha256sum -c "$sha_file"
+          done
+          rm -f *.sha256
+          sha256sum SmartBacklogAssistant-*.tar.gz SmartBacklogAssistant-*.zip > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${CLEAN_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest build provenance for release archives and checksums
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            release-assets/SmartBacklogAssistant-*.tar.gz
+            release-assets/SmartBacklogAssistant-*.zip
+            release-assets/SHA256SUMS.txt
+
+      - name: Publish or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release_meta.outputs.tag }}
+          VERSION: ${{ steps.release_meta.outputs.version }}
+          IS_PRERELEASE: ${{ steps.release_meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          RELEASE_NOTES="$(mktemp)"
+          trap 'rm -f "$RELEASE_NOTES"' EXIT
+          cat > "$RELEASE_NOTES" <<EOF
+          CI-verified, self-contained single-file binaries for **SmartBacklogAssistant \`$TAG\`** (all matrix builds, unit/integration tests, and out-of-repo standalone binary smoke checks passed green before publication).
+
+          ### Checksums (\`SHA256SUMS.txt\`)
+          \`\`\`text
+          $(cat release-assets/SHA256SUMS.txt)
+          \`\`\`
+
+          ### Quick Verify & Run
+          \`\`\`bash
+          gh release download "$TAG" --repo aleon1220/fde-sharp-backlog
+          sha256sum -c SHA256SUMS.txt --ignore-missing
+          gh attestation verify SmartBacklogAssistant-$TAG-linux-x64.tar.gz --repo aleon1220/fde-sharp-backlog
+          \`\`\`
+
+          See [README.md](https://github.com/aleon1220/fde-sharp-backlog/blob/$TAG/README.md#install--run-from-tested-github-binary) for Windows, Linux/WSL2, and macOS installation steps.
+          EOF
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/* --clobber
+            gh release edit "$TAG" --notes-file "$RELEASE_NOTES"
+          else
+            RELEASE_FLAGS=()
+            if [[ "${{ github.event_name }}" == "push" ]]; then
+              RELEASE_FLAGS+=(--verify-tag)
+            else
+              RELEASE_FLAGS+=(--target "${{ github.sha }}")
+            fi
+            if [[ "$IS_PRERELEASE" == "true" ]]; then
+              RELEASE_FLAGS+=(--prerelease)
+            fi
+            gh release create "$TAG" release-assets/* \
+              --title "SmartBacklogAssistant $TAG" \
+              --notes-file "$RELEASE_NOTES" \
+              "${RELEASE_FLAGS[@]}"
+          fi

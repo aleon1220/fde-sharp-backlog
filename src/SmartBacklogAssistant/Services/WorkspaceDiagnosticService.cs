@@ -17,6 +17,7 @@ public sealed class WorkspaceDiagnosticService
     private readonly AiModelOrchestrator _modelOrchestrator;
     private readonly AiProviderOrchestrator _providerOrchestrator;
     private readonly Func<string, string?> _environmentReader;
+    private readonly PromptTemplateService _promptService;
 
     public WorkspaceDiagnosticService(
         WorkspacePathService? workspaceService = null,
@@ -25,7 +26,8 @@ public sealed class WorkspaceDiagnosticService
         CliSettingsService? settingsService = null,
         AiModelOrchestrator? modelOrchestrator = null,
         AiProviderOrchestrator? providerOrchestrator = null,
-        Func<string, string?>? environmentReader = null)
+        Func<string, string?>? environmentReader = null,
+        PromptTemplateService? promptService = null)
     {
         _workspaceService = workspaceService ?? new WorkspacePathService();
         _runtimeEnvService = runtimeEnvService ?? new RuntimeEnvironmentService();
@@ -34,6 +36,7 @@ public sealed class WorkspaceDiagnosticService
         _modelOrchestrator = modelOrchestrator ?? new AiModelOrchestrator();
         _providerOrchestrator = providerOrchestrator ?? new AiProviderOrchestrator();
         _environmentReader = environmentReader ?? Environment.GetEnvironmentVariable;
+        _promptService = promptService ?? new PromptTemplateService();
     }
 
     public int RenderStatusTable(
@@ -69,7 +72,14 @@ public sealed class WorkspaceDiagnosticService
         var outputFiles = Directory.Exists(workspace.OutputDirectory)
             ? Directory.EnumerateFiles(workspace.OutputDirectory).Count()
             : 0;
-        var promptExists = File.Exists(options.PromptFilePath);
+        var diskPromptPath = _promptService.TryFindExistingPromptPath(options.PromptFilePath);
+        var hasEmbeddedPrompt = diskPromptPath is null && _promptService.TryReadEmbeddedPromptTemplate(options.PromptFilePath) is not null;
+        var promptReady = diskPromptPath is not null || hasEmbeddedPrompt;
+        var promptStatusDisplay = diskPromptPath is not null
+            ? (File.Exists(options.PromptFilePath) ? options.PromptFilePath : diskPromptPath)
+            : hasEmbeddedPrompt
+                ? $"{options.PromptFilePath} (bundled in binary)"
+                : $"{options.PromptFilePath} (built-in fallback)";
         var isWsl = WorkspacePathService.IsWslEnvironment();
 
         var platformSummary = isWsl
@@ -97,7 +107,7 @@ public sealed class WorkspaceDiagnosticService
             ("Paths", "Active Out (./out)", $"{workspace.OutputDirectory} ({outputFiles} file(s))", ConsoleColor.Green),
             ("Paths", "Settings File", _settingsService.GetSettingsFilePath(baseWorkspace), ConsoleColor.DarkGray),
             ("Export", "Artifact Format", effectiveJson ? "ON (.md + .json)" : "OFF (.md only)", effectiveJson ? ConsoleColor.Green : ConsoleColor.Yellow),
-            ("Prompts", "Template Source", promptExists ? options.PromptFilePath : $"{options.PromptFilePath} (built-in fallback)", promptExists ? ConsoleColor.Green : ConsoleColor.Yellow),
+            ("Prompts", "Template Source", promptStatusDisplay, promptReady ? ConsoleColor.Green : ConsoleColor.Yellow),
             ("AI", "Active Provider", $"{RuntimeEnvironmentService.FormatProviderCode(activeProvider)} ({(effectiveLive ? "Live" : "Offline")})", ConsoleColor.Cyan),
             ("AI", "Active Model", runtimeInfo.EnabledAiModel, ConsoleColor.Green),
             ("AI", "Gemini API Key", secret.IsConfigured ? $"{secret.SourceDetail} [{secret.MaskedKey}]" : $"Not set ({secret.KeyPortalUrl})", secret.IsConfigured ? ConsoleColor.Green : ConsoleColor.Yellow),
