@@ -33,6 +33,15 @@ During the implementation and verification of the **Runtime Gemini Secret API Ke
   * Added cross-platform restore scripts ([`scripts/restore-nuget.sh`](scripts/restore-nuget.sh), [`scripts/restore-nuget.ps1`](scripts/restore-nuget.ps1)) supporting `--fix-user-config`, `--clear-cache`, `NUGET_ENABLE_ENHANCED_HTTP_RETRY=true` exponential backoff, upstream caching proxies (`NUGET_PROXY_FEED_URL` / `NUGET_PROXY_ONLY`), local fallback caches (`NUGET_FALLBACK_FEED_DIR` / `NUGET_FALLBACK_PACKAGES_DIR` / `.nuget/fallback`), and ephemeral token-scoped auth (`NUGET_AUTH_TOKEN` / `VSS_NUGET_ACCESSTOKEN` / `GITHUB_TOKEN`) via `NuGetPackageSourceCredentials_upstream_proxy`.
   * Updated [`Containerfile`](Containerfile) (`--locked-mode` restore, `--no-restore` publish, retry env vars), [`SecretRedactor`](src/SmartBacklogAssistant/Services/SecretRedactor.cs) (`NUGET_AUTH_TOKEN` / `VSS_NUGET_ACCESSTOKEN` masking), [`.github/workflows/preprod-nuget-uat.yml`](.github/workflows/preprod-nuget-uat.yml), [`README.md`](README.md), and [`NuGetHardeningContractTests`](tests/SmartBacklogAssistant.Tests/Unit/NuGetHardeningContractTests.cs).
 
+### Finding 6: Interactive TTY Secret Keystroke Masking via Intercepted `ReadKey` ([Issue #26](https://github.com/aleon1220/fde-sharp-backlog/issues/26) · [SBA-102])
+* **Observation:** Entering secrets (Google Gemini, OpenAI Gateway, Azure/BYOK API keys) during interactive terminal sessions risked credential exposure via plaintext terminal echo during screen-shares, pairing sessions, or over-the-shoulder viewing.
+* **Action Taken:**
+  * Added `GeminiSecretProvider.ReadMaskedLine` and `GeminiSecretProvider.ReadMaskedInput` utilizing `Console.ReadKey(intercept: true)` on interactive TTY sessions (`!Console.IsInputRedirected && !Console.IsOutputRedirected`).
+  * Typed keystrokes render as asterisks (`*`), with full support for `Backspace` (`\b \b`) and `Escape` (buffer clearing) in-line editing. Non-printable control characters are safely filtered.
+  * Preserves seamless `TextReader.ReadLine()` fallback for redirected pipes, CI environments, and unit testing streams.
+  * Updated `GeminiSecretProvider.ResolveOrPrompt` and `AsIsV1Workflow` (OpenAI Gateway and generic provider prompts) to use masked entry and display only masked confirmation (`****<last4>`).
+  * Added unit and integration tests verifying interactive TTY keystroke masking, editing keys, control key filtering, and redirected fallback.
+
 ---
 
 ## 2. Prioritized Backlog for Next Iteration
@@ -46,7 +55,7 @@ The following backlog items have been structured in Jira-ready `Type01` (`comple
   * **When** `AiModelOrchestrator` processes raw discovery notes with `AiProviderType.GoogleGemini`
   * **Then** the application invokes the Gemini endpoint with structured JSON output enforcement and binds the response to `ProcessedOutcome`
 
-### [SBA-102] Masked Character Input (`ReadKey`) for Interactive CLI Secret Prompt (`Type01` — `complete` | Priority: P1)
+### [SBA-102] Masked Character Input (`ReadKey`) for Interactive CLI Secret Prompt (`Type01` — `complete` | Priority: P1) — **COMPLETED** ([Issue #26](https://github.com/aleon1220/fde-sharp-backlog/issues/26))
 * **User Story:** As a developer entering my Gemini API key in a shared terminal or screen-share, I want keystrokes masked with `*` during interactive CLI entry, so that shoulder-surfing or screen recordings do not expose my plaintext key.
 * **Acceptance Criteria (Given / When / Then):**
   * **Given** `GEMINI_API_KEY` is not set in the OS environment and the user runs the CLI interactively

@@ -381,23 +381,36 @@ public sealed class AsIsV1Workflow
             if (string.IsNullOrWhiteSpace(apiKey) && gatewayConfig.IsValidBaseUrl && !options.NonInteractive && options.GeminiLive != false)
             {
                 colorWriter.WriteColored($"Enter OpenAI Gateway API key for {gatewayConfig.BaseUrl} (or press Enter for offline fallback): ", ConsoleColor.Yellow);
-                var enteredKey = input.ReadLine();
+                var enteredKey = _secretProvider.ReadMaskedInput(input, output);
                 if (!string.IsNullOrWhiteSpace(enteredKey))
                 {
                     apiKey = enteredKey.Trim();
                     LastResolvedApiKey = apiKey;
                     _secretRedactor?.RegisterSecret(apiKey);
                     LogEvents.SecretResolved(_logger, "Interactive CLI Prompt", GeminiSecretProvider.MaskKey(apiKey));
+                    output.WriteLine($"  [OpenAI Gateway Key Injected] Key registered for runtime session ({GeminiSecretProvider.MaskKey(apiKey)}).");
                 }
             }
         }
         else if (provider != AiProviderType.ManualPrompt && string.IsNullOrWhiteSpace(apiKey) && !options.NonInteractive)
         {
             colorWriter.WriteColored($"Enter API key for {provider} (or press Enter for mock key): ", ConsoleColor.Yellow);
-            apiKey = input.ReadLine();
-            LastResolvedApiKey = apiKey;
-            _secretRedactor?.RegisterSecret(apiKey);
-            LogEvents.SecretResolved(_logger, "Interactive CLI Prompt", GeminiSecretProvider.MaskKey(apiKey));
+            var enteredKey = _secretProvider.ReadMaskedInput(input, output);
+            if (!string.IsNullOrWhiteSpace(enteredKey))
+            {
+                apiKey = enteredKey.Trim();
+                LastResolvedApiKey = apiKey;
+                _secretRedactor?.RegisterSecret(apiKey);
+                LogEvents.SecretResolved(_logger, "Interactive CLI Prompt", GeminiSecretProvider.MaskKey(apiKey));
+                output.WriteLine($"  [{provider} Secret Injected] Key registered for runtime session ({GeminiSecretProvider.MaskKey(apiKey)}).");
+            }
+            else
+            {
+                apiKey = enteredKey;
+                LastResolvedApiKey = apiKey;
+                _secretRedactor?.RegisterSecret(apiKey);
+                LogEvents.SecretResolved(_logger, "Interactive CLI Prompt", "none");
+            }
         }
 
         var backlogTypeSelection = options.BacklogTypeInput;
