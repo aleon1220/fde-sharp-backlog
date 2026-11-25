@@ -734,6 +734,107 @@ public sealed class AsIsV1WorkflowTests : IDisposable
         Assert.Equal(AiProviderType.OpenAiGateway, offlineEnvWorkflow.LastOutcome?.ProviderUsed);
     }
 
+    [Fact]
+    public void Execute_WhenOpenAiGatewayInteractivePromptWithKey_MasksKeystrokesAndConfirmsWithMaskedKey()
+    {
+        var secret = "sk-testkey-8888";
+        var keyQueue = new Queue<ConsoleKeyInfo>();
+        foreach (var ch in secret)
+        {
+            keyQueue.Enqueue(new ConsoleKeyInfo(ch, ConsoleKey.NoName, false, false, false));
+        }
+        keyQueue.Enqueue(new ConsoleKeyInfo('\r', ConsoleKey.Enter, false, false, false));
+
+        var secretProvider = new GeminiSecretProvider(
+            environmentReader: _ => null,
+            environmentWriter: (_, _) => { },
+            keyReader: () => keyQueue.Dequeue(),
+            isInteractive: () => true);
+
+        var handler = new StubHttpMessageHandler(req =>
+        {
+            return JsonResponse("""
+                {
+                  "choices": [
+                    {
+                      "message": {
+                        "content": "{\"title\":\"Workflow OpenAI Masked Story\",\"description\":\"**Objective:** Live gateway generation succeeded.\",\"userStory\":\"As a user, I want masked keystroke entry.\",\"scenarios\":[{\"given\":\"TTY entry\",\"when\":\"typing secret\",\"then\":\"masked with asterisks\"}]}"
+                      }
+                    }
+                  ]
+                }
+                """);
+        });
+
+        var openAiClient = new OpenAiGatewayClient(new HttpClient(handler));
+        var providerOrchestrator = new AiProviderOrchestrator(
+            environmentReader: _ => null,
+            openAiGatewayClient: openAiClient);
+
+        var workflow = CreateWorkflow(
+            secretProvider: secretProvider,
+            providerOrchestrator: providerOrchestrator);
+
+        using var promptOut = new StringWriter();
+        var ticket = workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _inputFilePath,
+                PromptFilePath: _promptFilePath,
+                ProviderInput: "openai",
+                BacklogTypeInput: "Type02",
+                DryRun: true,
+                NonInteractive: false,
+                GeminiLive: true),
+            new StringReader(string.Empty),
+            promptOut);
+
+        Assert.Equal(secret, workflow.LastResolvedApiKey);
+        var consoleOutput = promptOut.ToString();
+        Assert.Contains("Enter OpenAI Gateway API key", consoleOutput);
+        Assert.Contains(new string('*', secret.Length), consoleOutput);
+        Assert.Contains("****8888", consoleOutput);
+        Assert.DoesNotContain(secret, consoleOutput);
+    }
+
+    [Fact]
+    public void Execute_WhenGenericProviderInteractivePromptWithKey_MasksKeystrokesAndConfirmsWithMaskedKey()
+    {
+        var secret = "azure-secret-4444";
+        var keyQueue = new Queue<ConsoleKeyInfo>();
+        foreach (var ch in secret)
+        {
+            keyQueue.Enqueue(new ConsoleKeyInfo(ch, ConsoleKey.NoName, false, false, false));
+        }
+        keyQueue.Enqueue(new ConsoleKeyInfo('\r', ConsoleKey.Enter, false, false, false));
+
+        var secretProvider = new GeminiSecretProvider(
+            environmentReader: _ => null,
+            environmentWriter: (_, _) => { },
+            keyReader: () => keyQueue.Dequeue(),
+            isInteractive: () => true);
+
+        var workflow = CreateWorkflow(secretProvider: secretProvider);
+
+        using var promptOut = new StringWriter();
+        var ticket = workflow.Execute(
+            new WorkflowOptions(
+                InputFilePath: _inputFilePath,
+                PromptFilePath: _promptFilePath,
+                ProviderInput: "azure",
+                BacklogTypeInput: "Type02",
+                DryRun: true,
+                NonInteractive: false),
+            new StringReader(string.Empty),
+            promptOut);
+
+        Assert.Equal(secret, workflow.LastResolvedApiKey);
+        var consoleOutput = promptOut.ToString();
+        Assert.Contains("Enter API key for AzureOpenAi", consoleOutput);
+        Assert.Contains(new string('*', secret.Length), consoleOutput);
+        Assert.Contains("****4444", consoleOutput);
+        Assert.DoesNotContain(secret, consoleOutput);
+    }
+
     private static AsIsV1Workflow CreateWorkflow(
         GeminiSecretProvider? secretProvider = null,
         GeminiApiClient? geminiApiClient = null,

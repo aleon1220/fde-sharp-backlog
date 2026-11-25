@@ -252,6 +252,14 @@ Diagnostic telemetry uses standard `Microsoft.Extensions.Logging` (`LogLevel`: `
 * **Formatting:** Timestamped `text` (default) or structured NDJSON (`--log-format json` / `SBA_LOG_FORMAT=json` / `settings.json`).
 * **Secret Redaction:** Gemini keys (`AIza...`), OpenAI Gateway keys (`OPENAI_API_KEY` / `sk-...`), GitHub/Copilot tokens (`ghp_`, `gho_`, `github_pat_`), NuGet feed tokens (`NUGET_AUTH_TOKEN`, `VSS_NUGET_ACCESSTOKEN`), Anthropic/Azure/BYOK keys, and auth headers/passwords are masked via `GeminiSecretProvider.MaskKey` before writing to `stderr`.
 
+### Interactive Secret Entry & Keystroke Masking
+
+When API credentials (Google Gemini, OpenAI Gateway, Azure/BYOK) are prompted interactively in the CLI:
+* **Keystroke Masking:** Typed characters are intercepted via `Console.ReadKey(intercept: true)` on interactive TTY sessions and rendered as `*`, protecting secrets against shoulder-surfing, screen-sharing, or recorded terminal sessions.
+* **Terminal Editing:** Supports `Backspace` (`\b \b`) and `Escape` (clears buffer) during secret entry, while filtering non-printable control keys.
+* **Redirected & Test Fallback:** Seamlessly falls back to `TextReader.ReadLine()` when standard input is redirected, piped, or invoked in automated tests.
+* **Zero-Leak Confirmation:** Displays only `GeminiSecretProvider.MaskKey` (`****<last4>`) confirmation upon registration; plaintext credentials never appear in console output or persisted files.
+
 ## Interactive REPL & Menu (Gemini CLI / Agy Style)
 
 Running with zero arguments displays the compact boxed workspace header and supports theme-matched highlight selection (`↑`/`↓` + `Enter`), numeric options (`[0-4]`), single-key shortcuts (`[w/g/d/p/v/s/c/?/q]`), `/slash` commands, and `@filename` mentions from `backlog > `:
@@ -266,9 +274,9 @@ Running with zero arguments displays the compact boxed workspace header and supp
 
 Preserves strict **Zero Hallucination** prompt rules and Type `01`/`02` formatting across all `--provider` targets:
 
-1. **`gemini` (Default — Google Gemini REST):** Resolves keys from `--api-key`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `AI_API_KEY`, or interactive prompt; supports `--offline` / `/live off`.
+1. **`gemini` (Default — Google Gemini REST):** Resolves keys from `--api-key`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `AI_API_KEY`, or masked interactive prompt (`*` keystrokes via `ReadKey`); supports `--offline` / `/live off`.
 2. **`copilot-sdk` (`Microsoft.Copilot.SDK` `2.0.1`):** Uses `CopilotClient` (`CopilotClientMode.CodingAgent`) and `CreateSessionOptions` with strict prompt isolation (disabled config discovery, skills, repository hooks, host git, and built-in tools). Supports in-process FFI, spawned stdio (`COPILOT_CLI_PATH` or `copilot` on `PATH`), and attached TCP (`COPILOT_CLI_URL`).
-3. **`openai` (OpenAI Gateway API — Direct HTTP):** Native HTTP client ([`OpenAiGatewayClient`](src/SmartBacklogAssistant/Services/OpenAiGatewayClient.cs)) supporting `/v1/chat/completions` (`chat`, default) and `/v1/responses` (`responses`), custom OpenAI-compatible gateway URLs (`OPENAI_BASE_URL`, `--gateway-url`, or `openAiBaseUrl`/`openAiWireApi` in `settings.json`), `/models` catalog discovery (`vendor/model` gateway slugs included), Bearer / Azure `api-key` auth, interactive key prompt (`Enter` for offline fallback), and deterministic offline fallback (`--offline` or when credentials are unset).
+3. **`openai` (OpenAI Gateway API — Direct HTTP):** Native HTTP client ([`OpenAiGatewayClient`](src/SmartBacklogAssistant/Services/OpenAiGatewayClient.cs)) supporting `/v1/chat/completions` (`chat`, default) and `/v1/responses` (`responses`), custom OpenAI-compatible gateway URLs (`OPENAI_BASE_URL`, `--gateway-url`, or `openAiBaseUrl`/`openAiWireApi` in `settings.json`), `/models` catalog discovery (`vendor/model` gateway slugs included), Bearer / Azure `api-key` auth, masked interactive key prompt (`*` keystrokes via `ReadKey`; `Enter` for offline fallback), and deterministic offline fallback (`--offline` or when credentials are unset).
 4. **`azure` / `claude` (Direct HTTP / BYOK Live or Deterministic Mock):** When `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_API_KEY` are configured without a Copilot CLI runtime, `azure` falls back to direct OpenAI Gateway HTTP deployment calls; with a Copilot runtime, `azure` / `claude` / Ollama route through `Microsoft.Copilot.SDK` `SessionInferenceOptions` (`NamedProviderConfig` with CAPI disabled), falling back deterministically otherwise.
 5. **`manual`:** Renders the Type `01`/`02` Markdown prompt alongside a deterministic baseline draft.
 

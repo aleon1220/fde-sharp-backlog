@@ -1,3 +1,4 @@
+using System.Text;
 using SmartBacklogAssistant.Domain;
 
 namespace SmartBacklogAssistant.Services;
@@ -22,13 +23,19 @@ public sealed class GeminiSecretProvider
 
     private readonly Func<string, string?> _environmentReader;
     private readonly Action<string, string> _environmentWriter;
+    private readonly Func<ConsoleKeyInfo>? _keyReader;
+    private readonly Func<bool>? _isInteractive;
 
     public GeminiSecretProvider(
         Func<string, string?>? environmentReader = null,
-        Action<string, string>? environmentWriter = null)
+        Action<string, string>? environmentWriter = null,
+        Func<ConsoleKeyInfo>? keyReader = null,
+        Func<bool>? isInteractive = null)
     {
         _environmentReader = environmentReader ?? DefaultEnvironmentReader;
         _environmentWriter = environmentWriter ?? DefaultEnvironmentWriter;
+        _keyReader = keyReader;
+        _isInteractive = isInteractive;
     }
 
     /// <summary>
@@ -109,7 +116,7 @@ public sealed class GeminiSecretProvider
         while (true)
         {
             output.Write($"Enter your Gemini API key to proceed (from {GeminiApiKeysUrl}): ");
-            var line = input.ReadLine();
+            var line = ReadMaskedInput(input, output);
 
             if (line is null)
             {
@@ -135,6 +142,90 @@ public sealed class GeminiSecretProvider
             }
 
             output.WriteLine($"  [!] Gemini API key cannot be empty. Please obtain a key from {GeminiApiKeysUrl} and enter it below.");
+        }
+    }
+
+    /// <summary>
+    /// Reads secret input from the user. When running interactively on a console (TTY),
+    /// keystrokes are intercepted with <see cref="Console.ReadKey(bool)"/> and masked with '*',
+    /// supporting Backspace and Escape editing. When redirected or non-interactive, falls back to <see cref="TextReader.ReadLine"/>.
+    /// </summary>
+    public string? ReadMaskedInput(TextReader input, TextWriter output) =>
+        ReadMaskedLine(input, output, _keyReader, _isInteractive);
+
+    /// <summary>
+    /// Reads secret input from the user with masked keystrokes ('*').
+    /// Intercepts TTY keystrokes via <see cref="Console.ReadKey(bool)"/> when interactive,
+    /// with Backspace and Escape editing. Seamlessly falls back to <see cref="TextReader.ReadLine"/>
+    /// when standard input is redirected or in test/non-TTY execution.
+    /// </summary>
+    public static string? ReadMaskedLine(
+        TextReader input,
+        TextWriter output,
+        Func<ConsoleKeyInfo>? keyReader = null,
+        Func<bool>? isInteractive = null)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(output);
+
+        var canUseKeyboard = isInteractive?.Invoke() ??
+                             (ReferenceEquals(input, Console.In) &&
+                              !Console.IsInputRedirected &&
+                              !Console.IsOutputRedirected);
+
+        if (!canUseKeyboard)
+        {
+            return input.ReadLine();
+        }
+
+        try
+        {
+            var buffer = new StringBuilder();
+            var readKeyFunc = keyReader ?? (() => Console.ReadKey(intercept: true));
+
+            while (true)
+            {
+                var keyInfo = readKeyFunc();
+                if (keyInfo.Key == ConsoleKey.Enter || keyInfo.KeyChar is '\r' or '\n')
+                {
+                    output.WriteLine();
+                    output.Flush();
+                    return buffer.ToString();
+                }
+
+                if (keyInfo.Key == ConsoleKey.Backspace || keyInfo.KeyChar == '\b')
+                {
+                    if (buffer.Length > 0)
+                    {
+                        buffer.Length--;
+                        output.Write("\b \b");
+                        output.Flush();
+                    }
+                    continue;
+                }
+
+                if (keyInfo.Key == ConsoleKey.Escape)
+                {
+                    while (buffer.Length > 0)
+                    {
+                        buffer.Length--;
+                        output.Write("\b \b");
+                    }
+                    output.Flush();
+                    continue;
+                }
+
+                if (!char.IsControl(keyInfo.KeyChar))
+                {
+                    buffer.Append(keyInfo.KeyChar);
+                    output.Write('*');
+                    output.Flush();
+                }
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException)
+        {
+            return input.ReadLine();
         }
     }
 
