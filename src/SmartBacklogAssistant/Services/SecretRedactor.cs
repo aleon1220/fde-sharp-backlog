@@ -22,7 +22,9 @@ public sealed partial class SecretRedactor
         "COPILOT_BYOK_API_KEY",
         OpenAiGatewayClient.ApiKeyEnvVar,
         "NUGET_AUTH_TOKEN",
-        "VSS_NUGET_ACCESSTOKEN"
+        "VSS_NUGET_ACCESSTOKEN",
+        "PROJECT_TOKEN",
+        "GH_PROJECT_TOKEN"
     ];
 
     private readonly object _lock = new();

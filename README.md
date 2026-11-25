@@ -9,7 +9,7 @@
 1. **Astral `uv`-Style Headless Subcommands:** Verb-driven commands (`process`, `draft`, `preview`, `status`, `config`, `models`) with step timers, progress spinners, actionable `error:` / `hint:` diagnostics, and per-command `--help`.
 2. **Gemini CLI / Agy Interactive REPL:** Zero-arg execution opens a boxed workspace bar (`In: ./in | Out: ./out | Export: .md`), theme-matched option highlights (`↑`/`↓` + `Enter` or `[0-4]`), quick shortcuts (`[w/g/d/p/v/s/c/?/q]`), `/slash` commands (`/wizard`, `/generate`, `/preview`, `/provider`, `/status`), and `@filename` mentions.
 
-* **GitHub Repository & Backlog**: [aleon1220/fde-sharp-backlog](https://github.com/aleon1220/fde-sharp-backlog) · [Releases](https://github.com/aleon1220/fde-sharp-backlog/releases) · [Issues](https://github.com/aleon1220/fde-sharp-backlog/issues) · [Milestone #1 (`release-fde-version`, due Nov 27)](https://github.com/aleon1220/fde-sharp-backlog/milestone/1) · [UAT Gate (#6)](https://github.com/aleon1220/fde-sharp-backlog/issues/6) · [UAT NuGet Restore Hardening (#57)](https://github.com/aleon1220/fde-sharp-backlog/issues/57) · [GitHub Binary Releases (#59)](https://github.com/aleon1220/fde-sharp-backlog/issues/59)
+* **GitHub Repository & Backlog**: [aleon1220/fde-sharp-backlog](https://github.com/aleon1220/fde-sharp-backlog) · [Releases](https://github.com/aleon1220/fde-sharp-backlog/releases) · [Issues](https://github.com/aleon1220/fde-sharp-backlog/issues) · [Milestone #1 (`release-fde-version`, due Nov 27)](https://github.com/aleon1220/fde-sharp-backlog/milestone/1) · [UAT Gate (#6)](https://github.com/aleon1220/fde-sharp-backlog/issues/6) · [GitHub Project V2 Sync (#50)](https://github.com/aleon1220/fde-sharp-backlog/issues/50) · [UAT NuGet Restore Hardening (#57)](https://github.com/aleon1220/fde-sharp-backlog/issues/57) · [GitHub Binary Releases (#59)](https://github.com/aleon1220/fde-sharp-backlog/issues/59)
 
 ## Install & Run from Tested GitHub Binary
 
@@ -181,6 +181,7 @@ dotnet run --project src/SmartBacklogAssistant -- status
 | `NUGET_AUTH_TOKEN` / `VSS_NUGET_ACCESSTOKEN` | Ephemeral token-scoped NuGet feed auth | Supplied by CI OIDC / workload identity (`NUGET_AUTH_USER` defaults to `x-access-token` on GitHub Packages or `azdo`); redacted in `stderr` logs |
 | `NUGET_FALLBACK_FEED_DIR` / `NUGET_FALLBACK_PACKAGES_DIR` | Local NuGet fallback feed or cache dir | Auto-detected by [`Directory.Build.props`](Directory.Build.props) and restore scripts only when directory exists on disk (also auto-uses `.nuget/fallback`) |
 | `NUGET_ENABLE_ENHANCED_HTTP_RETRY` | Transient NuGet HTTP retry toggle | Set to `true` (`NUGET_ENHANCED_MAX_NETWORK_TRY_COUNT=6`, `NUGET_RETRY_HTTP_429=true`, `NUGET_OBSERVE_RETRY_AFTER=true`) on pre-production runners |
+| `PROJECT_TOKEN` / `GH_PROJECT_TOKEN` | GitHub Project V2 GraphQL auto-sync secret | `project`-scoped token used by [`.github/workflows/project-sync.yml`](.github/workflows/project-sync.yml) & [`scripts/setup-github-project.sh`](scripts/setup-github-project.sh); redacted in `stderr` logs |
 
 > [!TIP]
 > Builds skip downloading the native Copilot runtime bundle by default (`CopilotSkipCliDownload=true`). Pass `-p:CopilotSkipCliDownload=false` when building/publishing if you want MSBuild to bundle the platform FFI native library (`runtimes/<rid>/native/`) for zero-external-CLI in-process execution.
@@ -286,6 +287,35 @@ Preserves strict **Zero Hallucination** prompt rules and Type `01`/`02` formatti
 * **WSL2 Default Root:** `/mnt/c/workspace/smart-backlog-assistant/{in,out}`
 * Overrides (`backlog config --in ... --out ...`) persist in `smart-backlog-assistant/settings.json`.
 
+## GitHub Project V2 Control Plane & Automated Sync ([Issue #50](https://github.com/aleon1220/fde-sharp-backlog/issues/50))
+
+The repository defines a declarative GitHub Project V2 schema ([`.github/project-v2-schema.json`](.github/project-v2-schema.json)), deterministic C# classification service ([`GitHubProjectSyncService`](src/SmartBacklogAssistant/Services/GitHubProjectSyncService.cs)), cross-platform bootstrap scripts ([`scripts/setup-github-project.sh`](scripts/setup-github-project.sh), [`scripts/setup-github-project.ps1`](scripts/setup-github-project.ps1)), and automated lifecycle sync workflow ([`.github/workflows/project-sync.yml`](.github/workflows/project-sync.yml)):
+
+* **Custom Single-Select & Iteration Fields:**
+  * `Status`: `Todo` (default), `In Progress`, `In Review`, `Done`
+  * `Priority`: `P0`, `P1`, `P2`, `P3`
+  * `Backlog Type`: `Type01: Complete`, `Type02: Schedule`, `Baseline/Audit`
+  * `Area`: `CLI/TUI`, `AI Providers`, `SRE/DevOps`, `Prompt Library`, `Docs/GitHub`
+  * `Target Milestone`: `M1` (`release-fde-version`), `M2` (`v1.1.0-core-capabilities-and-polish`), `M3` (`v2.0.0-managed-fde-backlog`)
+  * `Effort`: `XS`, `S`, `M`, `L` (+ `Sprint` 14-day iteration field)
+* **Saved Project Views:**
+  1. **Active Sprint Board** (`BOARD_LAYOUT`, grouped by `Status`, sorted by `Priority:asc`, filter `is:open`)
+  2. **M1 Release & UAT Gate** (`TABLE_LAYOUT`, filtered to `"Target Milestone":M1`, grouped by `Status`, sorted by `Priority:asc`)
+  3. **M2 Priority Triage** (`TABLE_LAYOUT`, filtered to `"Target Milestone":M2`, grouped by `Area`, sorted by `Priority:asc`)
+  4. **v2.0 Roadmap** (`TABLE_LAYOUT`, filtered to `"Target Milestone":M3`, grouped by `Area`, sorted by `Priority:asc`)
+* **Automated Enrollment & PR Lifecycle Transitions ([`.github/workflows/project-sync.yml`](.github/workflows/project-sync.yml)):**
+  * Enrolls newly opened/updated issues and PRs (`actions/add-to-project@v1.0.2` + GraphQL `addProjectV2ItemById`) and populates inferred `Priority`, `Backlog Type`, `Area`, `Target Milestone`, and `Effort`.
+  * Parses linked issue references (`Closes #<n>`, `Fixes #<n>`, `Resolves #<n>`, `(#<n>)`) on PR events and transitions linked issues automatically to `In Progress` (draft PR), `In Review` (open PR), or `Done` (merged PR).
+
+```bash
+# Dry-run schema validation & classification preview (no token required)
+./scripts/setup-github-project.sh --dry-run
+pwsh ./scripts/setup-github-project.ps1 -DryRun
+
+# Bootstrap Project V2 custom fields & backfill existing Milestones #1-#3 issues (requires 'project' token scope)
+GH_TOKEN="$PROJECT_TOKEN" ./scripts/setup-github-project.sh --bootstrap --backfill
+```
+
 ## Containers & Podman Kubernetes
 
 ```bash
@@ -298,4 +328,4 @@ podman kube down k8s/smart-backlog-pod.yaml
 
 ## Findings & Iteration Backlog
 
-See [BACKLOG.md](BACKLOG.md) and [PLAN.md](PLAN.md) for architecture notes, runtime findings (`SBA-101`–`SBA-110`), and CLI/TUI UX standards.
+See [BACKLOG.md](BACKLOG.md) and [PLAN.md](PLAN.md) for architecture notes, runtime findings (`SBA-101`–`SBA-111`), and CLI/TUI UX standards.
