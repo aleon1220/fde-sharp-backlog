@@ -121,6 +121,7 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "samples") | Out-Null
     Copy-Item -Path (Join-Path $RepoRoot "samples\raw-notes.txt") -Destination (Join-Path $stageDir "samples\raw-notes.txt")
     Copy-Item -Path (Join-Path $RepoRoot "README.md") -Destination (Join-Path $stageDir "README.md")
+    Copy-Item -Path (Join-Path $RepoRoot "docs") -Destination (Join-Path $stageDir "docs") -Recurse
     Copy-Item -Path (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $stageDir "LICENSE")
 
     if (Test-Path $archivePath) { Remove-Item $archivePath -Force }

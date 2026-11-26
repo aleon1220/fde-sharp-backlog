@@ -64,20 +64,23 @@ public sealed class ReleaseBinaryContractTests
     [Fact]
     public void Readme_Backlog_AndPlan_DocumentTestedGitHubBinaryInstallationAndReleaseGate()
     {
-        var readme = File.ReadAllText(Path.Combine(RepositoryRoot, "README.md"));
-        Assert.Contains("Install & Run from Tested GitHub Binary", readme);
-        Assert.Contains("gh release list", readme);
-        Assert.Contains("gh release download", readme);
-        Assert.Contains("SHA256SUMS.txt", readme);
-        Assert.Contains("gh attestation verify", readme);
-        Assert.Contains("release-binaries.yml", readme);
+        var rootReadme = File.ReadAllText(Path.Combine(RepositoryRoot, "README.md"));
+        Assert.Contains("docs/getting-started/install-binary.md", rootReadme);
 
-        var backlog = File.ReadAllText(Path.Combine(RepositoryRoot, "BACKLOG.md"));
+        var installDoc = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "getting-started", "install-binary.md"));
+        Assert.Contains("Install & Run from Tested GitHub Binary", installDoc);
+        Assert.Contains("gh release list", installDoc);
+        Assert.Contains("gh release download", installDoc);
+        Assert.Contains("SHA256SUMS.txt", installDoc);
+        Assert.Contains("gh attestation verify", installDoc);
+        Assert.Contains("release-binaries.yml", installDoc);
+
+        var backlog = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "project", "BACKLOG.md"));
         Assert.Contains("Issue #59", backlog);
         Assert.Contains("SBA-110", backlog);
         Assert.Contains("SHA256SUMS.txt", backlog);
 
-        var plan = File.ReadAllText(Path.Combine(RepositoryRoot, "PLAN.md"));
+        var plan = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "project", "PLAN.md"));
         Assert.Contains("Issue #59", plan);
         Assert.Contains("release-binaries.yml", plan);
     }

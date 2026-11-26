@@ -179,6 +179,7 @@ cp -R "$REPO_ROOT/prompts" "$STAGE_DIR/prompts"
 mkdir -p "$STAGE_DIR/samples"
 cp "$REPO_ROOT/samples/raw-notes.txt" "$STAGE_DIR/samples/raw-notes.txt"
 cp "$REPO_ROOT/README.md" "$STAGE_DIR/README.md"
+cp -R "$REPO_ROOT/docs" "$STAGE_DIR/docs"
 cp "$REPO_ROOT/LICENSE" "$STAGE_DIR/LICENSE"
 
 ARCHIVE_PATH="$OUTPUT_DIR/$ARCHIVE_NAME"
