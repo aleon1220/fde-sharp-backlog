@@ -246,7 +246,7 @@ jobs:
           gh attestation verify SmartBacklogAssistant-$TAG-linux-x64.tar.gz --repo aleon1220/fde-sharp-backlog
           \`\`\`
 
-          See [README.md](https://github.com/aleon1220/fde-sharp-backlog/blob/$TAG/README.md#install--run-from-tested-github-binary) for Windows, Linux/WSL2, and macOS installation steps.
+          See [install-binary.md](https://github.com/aleon1220/fde-sharp-backlog/blob/$TAG/docs/getting-started/install-binary.md) for Windows, Linux/WSL2, and macOS installation steps.
           EOF
 
           if gh release view "$TAG" >/dev/null 2>&1; then

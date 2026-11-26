@@ -107,14 +107,14 @@ public sealed class NuGetHardeningContractTests
         Assert.Contains("id-token: write", workflow);
         Assert.Contains("--locked-mode", workflow);
 
-        var readme = File.ReadAllText(Path.Combine(RepositoryRoot, "README.md"));
-        Assert.Contains("packages.lock.json", readme);
-        Assert.Contains("NUGET_PROXY_FEED_URL", readme);
-        Assert.Contains("NUGET_AUTH_TOKEN", readme);
-        Assert.Contains("NUGET_ENABLE_ENHANCED_HTTP_RETRY", readme);
-        Assert.Contains("scripts/restore-nuget.sh", readme);
+        var buildDoc = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "getting-started", "build-from-source.md"));
+        Assert.Contains("packages.lock.json", buildDoc);
+        Assert.Contains("NUGET_PROXY_FEED_URL", buildDoc);
+        Assert.Contains("NUGET_AUTH_TOKEN", buildDoc);
+        Assert.Contains("NUGET_ENABLE_ENHANCED_HTTP_RETRY", buildDoc);
+        Assert.Contains("scripts/restore-nuget.sh", buildDoc);
 
-        var backlog = File.ReadAllText(Path.Combine(RepositoryRoot, "BACKLOG.md"));
+        var backlog = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "project", "BACKLOG.md"));
         Assert.Contains("SBA-109", backlog);
         Assert.Contains("packages.lock.json", backlog);
         Assert.Contains("Directory.Build.props", backlog);

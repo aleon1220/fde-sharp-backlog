@@ -197,16 +197,16 @@ public sealed class GitHubProjectSyncContractTests
         Assert.Contains("Get-ItemClassification", psScript);
         Assert.Contains("area:cli", psScript);
 
-        var readme = File.ReadAllText(Path.Combine(RepositoryRoot, "README.md"));
-        Assert.Contains("project-sync.yml", readme);
-        Assert.Contains("project-v2-schema.json", readme);
-        Assert.Contains("PROJECT_TOKEN", readme);
+        var projectDoc = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "operations", "github-project.md"));
+        Assert.Contains("project-sync.yml", projectDoc);
+        Assert.Contains("project-v2-schema.json", projectDoc);
+        Assert.Contains("PROJECT_TOKEN", projectDoc);
 
-        var backlog = File.ReadAllText(Path.Combine(RepositoryRoot, "BACKLOG.md"));
+        var backlog = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "project", "BACKLOG.md"));
         Assert.Contains("Issue #50", backlog);
         Assert.Contains("SBA-111", backlog);
 
-        var plan = File.ReadAllText(Path.Combine(RepositoryRoot, "PLAN.md"));
+        var plan = File.ReadAllText(Path.Combine(RepositoryRoot, "docs", "project", "PLAN.md"));
         Assert.Contains("Issue #50", plan);
         Assert.Contains("project-sync.yml", plan);
 
