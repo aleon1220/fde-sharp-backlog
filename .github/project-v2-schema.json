@@ -1,0 +1,265 @@
+{
+  "schemaVersion": "1.0.0",
+  "project": {
+    "defaultTitle": "fde-sharp-backlog — Engineering Control Plane",
+    "shortDescription": "AI-First SDLC backlog triage, M1 release/UAT gates, M2 priority triage, and v2.0 roadmap for SmartBacklogAssistant.",
+    "repository": "aleon1220/fde-sharp-backlog"
+  },
+  "statusField": {
+    "name": "Status",
+    "dataType": "SINGLE_SELECT",
+    "defaultOption": "Todo",
+    "options": [
+      {
+        "name": "Todo",
+        "color": "GRAY",
+        "description": "Ready in backlog awaiting active development"
+      },
+      {
+        "name": "In Progress",
+        "color": "YELLOW",
+        "description": "Active implementation or draft PR in progress"
+      },
+      {
+        "name": "In Review",
+        "color": "BLUE",
+        "description": "Pull request open for review or undergoing UAT validation"
+      },
+      {
+        "name": "Done",
+        "color": "GREEN",
+        "description": "Merged to main, verified in UAT, or closed as complete"
+      }
+    ]
+  },
+  "customFields": [
+    {
+      "name": "Priority",
+      "dataType": "SINGLE_SELECT",
+      "defaultOption": "P2",
+      "options": [
+        {
+          "name": "P0",
+          "color": "RED",
+          "description": "Critical release blocker, UAT gate, or security requirement"
+        },
+        {
+          "name": "P1",
+          "color": "ORANGE",
+          "description": "High-priority sprint deliverable or core architectural capability"
+        },
+        {
+          "name": "P2",
+          "color": "YELLOW",
+          "description": "Standard enhancement, polish, or operational reliability improvement"
+        },
+        {
+          "name": "P3",
+          "color": "GRAY",
+          "description": "Exploratory roadmap idea or nice-to-have backlog item"
+        }
+      ]
+    },
+    {
+      "name": "Backlog Type",
+      "dataType": "SINGLE_SELECT",
+      "defaultOption": "Type01: Complete",
+      "options": [
+        {
+          "name": "Type01: Complete",
+          "color": "GREEN",
+          "description": "Complete Jira story with User Story and Given/When/Then acceptance criteria"
+        },
+        {
+          "name": "Type02: Schedule",
+          "color": "BLUE",
+          "description": "Scheduled engineering task with Title and concise Description"
+        },
+        {
+          "name": "Baseline/Audit",
+          "color": "PURPLE",
+          "description": "Baseline capability audit or verification inventory item (#14-#24)"
+        }
+      ]
+    },
+    {
+      "name": "Area",
+      "dataType": "SINGLE_SELECT",
+      "defaultOption": "CLI/TUI",
+      "options": [
+        {
+          "name": "CLI/TUI",
+          "color": "BLUE",
+          "description": "Headless subcommands, interactive REPL/TUI, Wizard Orchestrator, and clipboard UX"
+        },
+        {
+          "name": "AI Providers",
+          "color": "GREEN",
+          "description": "Google Gemini REST, Microsoft.Copilot.SDK, OpenAI Gateway, and BYOK orchestration"
+        },
+        {
+          "name": "SRE/DevOps",
+          "color": "ORANGE",
+          "description": "NuGet restore hardening, CI/CD release binaries, logging, containers, and secrets"
+        },
+        {
+          "name": "Prompt Library",
+          "color": "PURPLE",
+          "description": "Prompt templates, goal expansion, and fde-AI-prompts integration"
+        },
+        {
+          "name": "Docs/GitHub",
+          "color": "GRAY",
+          "description": "GitHub Project V2 control plane, issue/PR templates, README/BACKLOG/PLAN, and UAT docs"
+        }
+      ]
+    },
+    {
+      "name": "Target Milestone",
+      "dataType": "SINGLE_SELECT",
+      "defaultOption": "M2",
+      "options": [
+        {
+          "name": "M1",
+          "color": "RED",
+          "description": "Milestone #1: release-fde-version (v1.0/v1.1 release & UAT gate)"
+        },
+        {
+          "name": "M2",
+          "color": "BLUE",
+          "description": "Milestone #2: v1.1.0-core-capabilities-and-polish"
+        },
+        {
+          "name": "M3",
+          "color": "PURPLE",
+          "description": "Milestone #3: v2.0.0-managed-fde-backlog"
+        }
+      ]
+    },
+    {
+      "name": "Effort",
+      "dataType": "SINGLE_SELECT",
+      "defaultOption": "M",
+      "options": [
+        {
+          "name": "XS",
+          "color": "GRAY",
+          "description": "Extra small (< 2 hours; config, label, or doc tweak)"
+        },
+        {
+          "name": "S",
+          "color": "GREEN",
+          "description": "Small (0.5 - 1 day; focused CLI/service enhancement with unit tests)"
+        },
+        {
+          "name": "M",
+          "color": "YELLOW",
+          "description": "Medium (1 - 3 days; multi-file feature, workflow, or provider integration)"
+        },
+        {
+          "name": "L",
+          "color": "ORANGE",
+          "description": "Large (3+ days; cross-cutting architecture or multi-stage v2.0 epic)"
+        }
+      ]
+    }
+  ],
+  "iterationField": {
+    "name": "Sprint",
+    "dataType": "ITERATION",
+    "durationDays": 14
+  },
+  "views": [
+    {
+      "name": "Active Sprint Board",
+      "layout": "BOARD_LAYOUT",
+      "groupBy": "Status",
+      "sortBy": [
+        {
+          "field": "Priority",
+          "direction": "ASC"
+        }
+      ],
+      "filter": "is:open",
+      "visibleFields": [
+        "Title",
+        "Assignees",
+        "Status",
+        "Priority",
+        "Backlog Type",
+        "Area",
+        "Target Milestone",
+        "Effort"
+      ],
+      "description": "Kanban sprint control plane grouped by Status (Todo, In Progress, In Review, Done) and prioritized P0-P3."
+    },
+    {
+      "name": "M1 Release & UAT Gate",
+      "layout": "TABLE_LAYOUT",
+      "groupBy": "Status",
+      "sortBy": [
+        {
+          "field": "Priority",
+          "direction": "ASC"
+        }
+      ],
+      "filter": "\"Target Milestone\":M1",
+      "visibleFields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Backlog Type",
+        "Area",
+        "Target Milestone",
+        "Effort",
+        "Milestone",
+        "Linked pull requests"
+      ],
+      "description": "Release-readiness and UAT sign-off gate filtered to Milestone #1 (release-fde-version, including UAT #6)."
+    },
+    {
+      "name": "M2 Priority Triage",
+      "layout": "TABLE_LAYOUT",
+      "groupBy": "Area",
+      "sortBy": [
+        {
+          "field": "Priority",
+          "direction": "ASC"
+        }
+      ],
+      "filter": "\"Target Milestone\":M2",
+      "visibleFields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Area",
+        "Backlog Type",
+        "Effort",
+        "Labels"
+      ],
+      "description": "Milestone #2 (v1.1.0-core-capabilities-and-polish) backlog sorted by Priority and grouped by functional Area."
+    },
+    {
+      "name": "v2.0 Roadmap",
+      "layout": "TABLE_LAYOUT",
+      "groupBy": "Area",
+      "sortBy": [
+        {
+          "field": "Priority",
+          "direction": "ASC"
+        }
+      ],
+      "filter": "\"Target Milestone\":M3",
+      "visibleFields": [
+        "Title",
+        "Status",
+        "Priority",
+        "Area",
+        "Backlog Type",
+        "Effort",
+        "Milestone"
+      ],
+      "description": "Milestone #3 (v2.0.0-managed-fde-backlog) next-generation platform epics (#32-#38, #52, #54)."
+    }
+  ]
+}

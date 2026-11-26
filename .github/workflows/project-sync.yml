@@ -1,0 +1,127 @@
+name: GitHub Project V2 Auto-Sync & Lifecycle Control Plane
+
+on:
+  issues:
+    types:
+      - opened
+      - edited
+      - reopened
+      - closed
+      - labeled
+      - unlabeled
+      - milestoned
+      - demilestoned
+  pull_request_target:
+    types:
+      - opened
+      - edited
+      - reopened
+      - closed
+      - ready_for_review
+      - converted_to_draft
+      - labeled
+      - unlabeled
+      - milestoned
+      - demilestoned
+  workflow_dispatch:
+    inputs:
+      project_number:
+        description: "Optional GitHub Project V2 number override (defaults to vars.GITHUB_PROJECT_NUMBER or auto-discovers/creates linked board)"
+        required: false
+        default: ""
+      bootstrap_fields:
+        description: "Create/verify Project V2 custom fields (Priority, Backlog Type, Area, Target Milestone, Effort, Sprint) and Status options"
+        required: false
+        type: boolean
+        default: true
+      backfill_all:
+        description: "Backfill and classify all existing repository issues and pull requests across Milestones #1-#3"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: project-v2-sync-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  REPO_FULL_NAME: ${{ github.repository }}
+  PROJECT_NUMBER_CONFIG: ${{ github.event.inputs.project_number || vars.GITHUB_PROJECT_NUMBER }}
+  PROJECT_URL_CONFIG: ${{ vars.GITHUB_PROJECT_URL }}
+
+jobs:
+  project-v2-sync:
+    name: Synchronize GitHub Project V2 Board
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PROJECT_TOKEN secret readiness
+        id: token_check
+        env:
+          PROJECT_TOKEN_SECRET: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          if [ -z "${PROJECT_TOKEN_SECRET}" ]; then
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### GitHub Project V2 Auto-Sync Skipped (\`PROJECT_TOKEN\` Not Configured)"
+              echo ""
+              echo "GitHub's default \`GITHUB_TOKEN\` and the Antigravity GitHub App integration do not carry user/org \`project\` GraphQL scopes."
+              echo ""
+              echo "To activate automated Project V2 board synchronization:"
+              echo "1. Create a classic PAT with \`repo\` + \`project\` scopes (or fine-grained token with Projects read/write) under **Settings -> Developer settings -> Personal access tokens**."
+              echo "2. Save it as repository secret **\`PROJECT_TOKEN\`** under **Settings -> Secrets and variables -> Actions**."
+              echo "3. Optionally set repository variables **\`GITHUB_PROJECT_URL\`** (e.g. \`https://github.com/users/aleon1220/projects/1\`) and **\`GITHUB_PROJECT_NUMBER\`** (\`1\`), or run this workflow via **Actions -> Run workflow** with \`bootstrap_fields: true\` and \`backfill_all: true\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Auto-enroll issue or PR via actions/add-to-project
+        if: steps.token_check.outputs.has_token == 'true' && env.PROJECT_URL_CONFIG != '' && (github.event_name == 'issues' || github.event_name == 'pull_request_target')
+        uses: actions/add-to-project@v1.0.2
+        continue-on-error: true
+        with:
+          project-url: ${{ env.PROJECT_URL_CONFIG }}
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+
+      - name: Checkout trusted Project V2 schema and sync script from default branch
+        if: steps.token_check.outputs.has_token == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: |
+            .github/project-v2-schema.json
+            scripts/setup-github-project.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Synchronize Project V2 custom fields, metadata, and lifecycle transitions
+        if: steps.token_check.outputs.has_token == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          GITHUB_EVENT_NAME_INPUT: ${{ github.event_name }}
+          BOOTSTRAP_FIELDS_INPUT: ${{ github.event.inputs.bootstrap_fields }}
+          BACKFILL_ALL_INPUT: ${{ github.event.inputs.backfill_all }}
+        run: |
+          set -euo pipefail
+          chmod +x ./scripts/setup-github-project.sh
+
+          PROJECT_ARGS=(--repo "$REPO_FULL_NAME")
+          if [ -n "${PROJECT_NUMBER_CONFIG}" ]; then
+            PROJECT_ARGS+=(--project-number "$PROJECT_NUMBER_CONFIG")
+          fi
+
+          if [ "${GITHUB_EVENT_NAME_INPUT}" = "workflow_dispatch" ]; then
+            if [ "${BOOTSTRAP_FIELDS_INPUT}" = "true" ]; then
+              ./scripts/setup-github-project.sh "${PROJECT_ARGS[@]}" --bootstrap
+            fi
+            if [ "${BACKFILL_ALL_INPUT}" = "true" ]; then
+              ./scripts/setup-github-project.sh "${PROJECT_ARGS[@]}" --backfill
+            fi
+          else
+            ./scripts/setup-github-project.sh "${PROJECT_ARGS[@]}" --sync-event "$GITHUB_EVENT_PATH"
+          fi
