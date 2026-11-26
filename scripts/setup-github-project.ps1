@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     GitHub Project V2 Control Plane Bootstrap, Field Provisioning, and Auto-Sync (Issue #50).
 
@@ -83,12 +83,12 @@ function Get-ItemClassification {
     }
 
     $priority = "P2"
-    if ($labelsJoined -match "\bp0\b" -or $Body -match "Priority[^\r\n]*\b(P[0-3])\b" -or $Title -match "\b(P[0-3])\b") {
-        if ($Matches -and $Matches[1]) {
-            $priority = $Matches[1].ToUpperInvariant()
-        } else {
-            $priority = "P0"
-        }
+    if ($labelsJoined -match "\b(p[0-3])\b") {
+        $priority = $Matches[1].ToUpperInvariant()
+    } elseif ($Body -match "(?:Priority\s*\**:\**\s*|\[|\b)(P[0-3])\b") {
+        $priority = $Matches[1].ToUpperInvariant()
+    } elseif ($Title -match "\b(P[0-3])\b") {
+        $priority = $Matches[1].ToUpperInvariant()
     } elseif ($backlogType -eq "Baseline/Audit") {
         $priority = "P2"
     } elseif ($Title -match "UAT|Security|Mask") {
@@ -99,11 +99,21 @@ function Get-ItemClassification {
 
     $area = "Docs/GitHub"
     $combined = "$Title`n$Body"
-    if ($Title -match "\[GitHub Project|Issue Templates|README") {
+    if ($labelsJoined -match "area:cli") {
+        $area = "CLI/TUI"
+    } elseif ($labelsJoined -match "area:ai") {
+        $area = "AI Providers"
+    } elseif ($labelsJoined -match "area:sre|area:devops") {
+        $area = "SRE/DevOps"
+    } elseif ($labelsJoined -match "area:prompt") {
+        $area = "Prompt Library"
+    } elseif ($labelsJoined -match "area:docs|area:github") {
+        $area = "Docs/GitHub"
+    } elseif ($Title -match "\[GitHub Project|Issue Templates|README") {
         $area = "Docs/GitHub"
     } elseif ($Title -match "fde-AI-prompts|Prompt Scanner|Prompt Generator|Prompt Template|Goal Expansion") {
         $area = "Prompt Library"
-    } elseif ($Title -match "NuGet|Binary|Logging|Podman|Container|Kubernetes|Dependabot|Branch Protection|Secret") {
+    } elseif ($Title -match "NuGet|Binary|Logging|Podman|Container|Kubernetes|Dependabot|Branch Protection|Secret|CI/CD") {
         $area = "SRE/DevOps"
     } elseif ($Title -match "Gemini|Copilot|OpenAI|Provider|BYOK|Grounding|MCP|Evaluator") {
         $area = "AI Providers"
@@ -112,16 +122,28 @@ function Get-ItemClassification {
     }
 
     $targetMilestone = "M2"
-    if ($MilestoneNumber -eq 1 -or $MilestoneTitle -match "release-fde-version" -or $Body -match "Milestone #1") {
+    if ($MilestoneNumber -eq 1 -or $MilestoneTitle -match "release-fde-version") {
         $targetMilestone = "M1"
     } elseif ($MilestoneNumber -eq 2 -or $MilestoneTitle -match "v1\.1\.0") {
         $targetMilestone = "M2"
-    } elseif ($MilestoneNumber -eq 3 -or $MilestoneTitle -match "v2\.0\.0" -or $Title -match "v2\.0" -or $Body -match "Milestone #3") {
+    } elseif ($MilestoneNumber -eq 3 -or $MilestoneTitle -match "v2\.0\.0") {
         $targetMilestone = "M3"
+    } elseif ($Title -match "v2\.0" -or $Body -match "Milestone #3") {
+        $targetMilestone = "M3"
+    } elseif ($Body -match "Milestone #1" -or $Body -match "release-fde-version") {
+        $targetMilestone = "M1"
     }
 
     $effort = "S"
-    if ($backlogType -eq "Baseline/Audit") {
+    if ($labelsJoined -match "\beffort:xs\b") {
+        $effort = "XS"
+    } elseif ($labelsJoined -match "\beffort:s\b") {
+        $effort = "S"
+    } elseif ($labelsJoined -match "\beffort:m\b") {
+        $effort = "M"
+    } elseif ($labelsJoined -match "\beffort:l\b") {
+        $effort = "L"
+    } elseif ($backlogType -eq "Baseline/Audit") {
         $effort = "XS"
     } elseif ($targetMilestone -eq "M3" -or $Title -match "Epic|v2\.0") {
         $effort = "L"

@@ -156,6 +156,16 @@ public sealed class GitHubProjectSyncContractTests
     [Fact]
     public void ProjectSyncWorkflow_Scripts_Docs_AndSecretRedactor_MeetIssue50Contracts()
     {
+        // Milestone #2 issue mentioning Milestone #1 in body must still resolve to M2
+        var milestone2WithBodyRef = GitHubProjectSyncService.ClassifyItem(
+            title: "Add unit test coverage for workflow sync",
+            body: "Follow-up task that builds on Milestone #1 scaffolding.",
+            state: "OPEN",
+            milestoneNumber: 2,
+            milestoneTitle: "v1.1.0-core-capabilities-and-polish");
+
+        Assert.Equal("M2", milestone2WithBodyRef.TargetMilestone);
+
         var workflowPath = Path.Combine(RepositoryRoot, ".github", "workflows", "project-sync.yml");
         Assert.True(File.Exists(workflowPath), $"Expected workflow at '{workflowPath}'.");
         var workflow = File.ReadAllText(workflowPath);
@@ -172,12 +182,20 @@ public sealed class GitHubProjectSyncContractTests
         Assert.Contains("addProjectV2ItemById", bashScript);
         Assert.Contains("updateProjectV2ItemFieldValue", bashScript);
         Assert.Contains("createProjectV2Field", bashScript);
+        Assert.Contains("updateProjectV2Field", bashScript);
+        Assert.DoesNotContain("updateProjectV2SingleSelectField", bashScript);
+        Assert.Contains("singleSelectOptions", bashScript);
+        Assert.Contains("dataType: ITERATION", bashScript);
+        Assert.Contains("createProjectV2View", bashScript);
+        Assert.Contains("updateProjectV2View", bashScript);
+        Assert.Contains("gh api graphql --input -", bashScript);
         Assert.Contains("Target Milestone", bashScript);
         Assert.Contains("Backlog Type", bashScript);
 
         var psScript = File.ReadAllText(Path.Combine(RepositoryRoot, "scripts", "setup-github-project.ps1"));
         Assert.Contains("project-v2-schema.json", psScript);
         Assert.Contains("Get-ItemClassification", psScript);
+        Assert.Contains("area:cli", psScript);
 
         var readme = File.ReadAllText(Path.Combine(RepositoryRoot, "README.md"));
         Assert.Contains("project-sync.yml", readme);
