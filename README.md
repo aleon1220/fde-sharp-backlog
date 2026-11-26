@@ -174,7 +174,9 @@ dotnet run --project src/SmartBacklogAssistant -- status
 | `COPILOT_CLI_URL` | Attached remote runtime over TCP | Accepts `host:port`, `http://host:port`, or `[::1]:port` (`RuntimeConnection.ForTcp`) |
 | `COPILOT_SDK_DEFAULT_CONNECTION` | Default local transport | `inprocess` (SDK v2 default) or `stdio` |
 | `COPILOT_MODEL` / `GEMINI_MODEL` | Copilot / Gemini model ID override | Defaults: `gpt-5-mini` (`copilot-sdk`), `gemini-3.8-flash` (`gemini`) |
-| `GEMINI_API_KEY` | Google Gemini REST API key | Can also be persisted interactively or overridden via `--api-key` |
+| `GEMINI_API_KEY` | Google Gemini REST API key | Can also be managed via `keys` / `[K]` or overridden via `--api-key`; never written to `settings.json` |
+| `AZURE_OPENAI_API_KEY` / `AZURE_OPENAI_ENDPOINT` | Azure OpenAI / AI Foundry key & endpoint | Managed via `[K]` / `keys set azure` or env vars; supports direct HTTP & BYOK Copilot SDK modes |
+| `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` | Anthropic Claude API key & optional base URL | Managed via `[K]` / `keys set claude` or env vars; supports live verification & model listing |
 | `SBA_LOG_LEVEL` | Diagnostic `stderr` log severity | `Trace`, `Debug`, `Information`, `Warning` (default), `Error`, `Critical`, `None` (`Quiet`) |
 | `SBA_LOG_FORMAT` | Diagnostic `stderr` log format | `text` (default timestamped) or `json` (structured NDJSON); always routed to `stderr` |
 | `NUGET_PROXY_FEED_URL` | Upstream NuGet caching proxy URL | HTTPS feed URL (GitHub Packages, Azure Artifacts, Artifactory); set `NUGET_PROXY_ONLY=true` to disable direct `nuget.org` fallback |
@@ -239,11 +241,21 @@ dotnet run --project src/SmartBacklogAssistant -- preview latest --copy simple
 dotnet run --project src/SmartBacklogAssistant -- preview latest --copy clean
 dotnet run --project src/SmartBacklogAssistant -- preview latest --copy title
 
+# Manage AI provider API keys interactively (masked '*'), validate format, verify live, or clear
+dotnet run --project src/SmartBacklogAssistant -- keys status
+dotnet run --project src/SmartBacklogAssistant -- keys status --json
+dotnet run --project src/SmartBacklogAssistant -- keys set gemini
+dotnet run --project src/SmartBacklogAssistant -- keys set openai --verify --scope user
+dotnet run --project src/SmartBacklogAssistant -- keys set azure --gateway-url https://<resource>.openai.azure.com --verify
+dotnet run --project src/SmartBacklogAssistant -- keys validate claude
+dotnet run --project src/SmartBacklogAssistant -- keys verify all
+dotnet run --project src/SmartBacklogAssistant -- keys clear openai --scope all
+
 # Workspace paths, active provider readiness, and diagnostics
 dotnet run --project src/SmartBacklogAssistant -- status
 ```
 
-Aliases preserved: `run` (`process`), `add` (`draft`), `doctor` (`status`), `view` (`preview`), `menu`/`tui`. Pass `<command> --help` (e.g. `draft --help`, `status --help`) for command-specific options.
+Aliases preserved: `run` (`process`), `add` (`draft`), `doctor` (`status`), `view` (`preview`), `key` (`keys`), `menu`/`tui`. Pass `<command> --help` (e.g. `draft --help`, `keys --help`, `status --help`) for command-specific options.
 
 ### Configurable Logging (`stderr` & Secret Redaction)
 
@@ -253,13 +265,14 @@ Diagnostic telemetry uses standard `Microsoft.Extensions.Logging` (`LogLevel`: `
 * **Formatting:** Timestamped `text` (default) or structured NDJSON (`--log-format json` / `SBA_LOG_FORMAT=json` / `settings.json`).
 * **Secret Redaction:** Gemini keys (`AIza...`), OpenAI Gateway keys (`OPENAI_API_KEY` / `sk-...`), GitHub/Copilot tokens (`ghp_`, `gho_`, `github_pat_`), NuGet feed tokens (`NUGET_AUTH_TOKEN`, `VSS_NUGET_ACCESSTOKEN`), Anthropic/Azure/BYOK keys, and auth headers/passwords are masked via `GeminiSecretProvider.MaskKey` before writing to `stderr`.
 
-### Interactive Secret Entry & Keystroke Masking
+### Interactive Secret Entry, Validation & Keystroke Masking ([Issue #64](https://github.com/aleon1220/fde-sharp-backlog/issues/64))
 
-When API credentials (Google Gemini, OpenAI Gateway, Azure/BYOK) are prompted interactively in the CLI:
+When API credentials (`gemini`, `openai`, `azure`, `claude`, `copilot-sdk`) are entered interactively via `[K] Manage AI Provider API Keys`, `/keys`, or `backlog keys`:
 * **Keystroke Masking:** Typed characters are intercepted via `Console.ReadKey(intercept: true)` on interactive TTY sessions and rendered as `*`, protecting secrets against shoulder-surfing, screen-sharing, or recorded terminal sessions.
-* **Terminal Editing:** Supports `Backspace` (`\b \b`) and `Escape` (clears buffer) during secret entry, while filtering non-printable control keys.
-* **Redirected & Test Fallback:** Seamlessly falls back to `TextReader.ReadLine()` when standard input is redirected, piped, or invoked in automated tests.
-* **Zero-Leak Confirmation:** Displays only `GeminiSecretProvider.MaskKey` (`****<last4>`) confirmation upon registration; plaintext credentials never appear in console output or persisted files.
+* **Terminal Editing & Test Fallback:** Supports `Backspace` (`\b \b`) and `Escape` (clears buffer) during secret entry, while seamlessly falling back to `TextReader.ReadLine()` when standard input is redirected or invoked in automated tests.
+* **Offline Syntax & Cross-Provider Validation:** Validates non-empty keys before saving and rejects placeholders (`YOUR_API_KEY`, `****...`), `Bearer `/`ENV_VAR=` prefixes, URLs/quotes, and cross-provider key mismatches (e.g., `AIza...` pasted into `openai` or `sk-ant-...` pasted into `gemini`) with actionable portal/prefix hints.
+* **Optional Live Endpoint Verification (`--verify`):** Verifies keys live against Google Gemini, OpenAI Gateway (`/models`), Azure OpenAI / Foundry (`/models`), Anthropic Claude (`/v1/models`), or GitHub Copilot SDK / `api.github.com/user` with `SecretRedactor`-protected error reporting.
+* **Session-First Storage & Zero-Leak Confirmation:** Stores keys in `SessionEnvironmentStore` (`session` runtime overlay by default, or optional OS User environment persistence `--scope user` on Windows with POSIX `export` guidance on Linux/macOS), displays only `****<last4>` confirmations, immediately reflects changes in `/status`, `models`, `draft`, and `process`, and NEVER writes plaintext secrets to `settings.json` or `stderr`.
 
 ## Interactive REPL & Menu (Gemini CLI / Agy Style)
 
@@ -268,8 +281,8 @@ Running with zero arguments displays the compact boxed workspace header and supp
 * **`[1]` / `w` Backlog Assisted Orchestrator:** Unified end-to-end hub (`orchestrator > `, `/wizard`, `/orchestrator`, `/bao`) for drafting from Goals/Titles, processing `./in` files, previewing workspace artifacts, copying formats (`simple`, `clean`, `raw`, `md`, `title`, `story`, `desc`, `ac`, `alt1..alt3`), settings, and diagnostics.
 * **`[2]` / `g` Create / Generate Backlog:** Combines creation entry points into a single source selector (`/generate`): `[1]` Draft from Goal / Title (`Type01`, `Type02`, `Both`; `Minimalistic <=25w`, `Balanced <=57w`, `Detailed <=95w`, or `[d]` direct), `[2]` Process Input Files (`./in` batch, single review, or dry run, or `[p]` direct), and `[3]` Dry Run / Scan Workspace.
 * **`[3]` / `v` Preview:** General workspace previewer across active in-memory session drafts (`[session]`), saved Markdown outcomes (`./out/*.md`), JSON exports (`./out/*.json`), and raw input notes (`./in/*.txt`, `./in/*.md`) with fuzzy filtering, native/ANSI **OSC 52** clipboard copy, and `[E]` Orchestrator refinement/processing actions.
-* **`[4]` / `s` Workspace & Settings:** Colourfully highlights the active/selected option (`↑`/`↓` + `Enter` or `[0-9]`, matched to `agy` Cyan, `uv` Green, or `kubectl` DarkCyan themes) and setting badges (`provider • model`, `ON`/`OFF`, verbosity, theme, log level): `[1]` **Select AI Provider** (`gemini`, `copilot-sdk`, `openai`, `azure`, `claude`, `manual`, `[M]` **AI Model Selection**, and `[G]` interactive OpenAI Gateway URL & `chat`/`responses` configuration), `[2]` Toggle Live AI API, `[3]` Default Outcome Verbosity, `[4]` Toggle JSON Export, `[5]` Select CLI Theme (`agy`, `uv`, `kubectl`), `[6]` Inspect Directories, `[7]` Runtime & AI Diagnostics, `[8]` View `settings.json`, `[9]` Select Log Level (`Trace`–`None` + `text`/`json` `stderr` format), `[0]` Back.
-* **`/slash` Commands & `@filename` Mentions:** `/wizard` (`/orchestrator`, `/bao`), `/generate`, `/process`, `/draft`, `/preview`, `/copy`, `/verbosity`, `/log-level`, `/log-format`, `/verbose`, `/settings`, `/status`, `/config` (including `--gateway-url` & `--wire-api`), `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`, plus `@raw-notes.txt ...`.
+* **`[4]` / `s` Workspace & Settings:** Colourfully highlights the active/selected option (`↑`/`↓` + `Enter` or `[0-9, K]`, matched to `agy` Cyan, `uv` Green, or `kubectl` DarkCyan themes) and setting badges (`provider • model`, `ON`/`OFF`, verbosity, theme, log level, configured key count): `[1]` **Select AI Provider** (`gemini`, `copilot-sdk`, `openai`, `azure`, `claude`, `manual`, `[M]` **AI Model Selection**, and `[G]` interactive OpenAI Gateway URL & `chat`/`responses` configuration), `[2]` Toggle Live AI API, `[3]` Default Outcome Verbosity, `[4]` Toggle JSON Export, `[5]` Select CLI Theme (`agy`, `uv`, `kubectl`), `[6]` Inspect Directories, `[7]` Runtime & AI Diagnostics, `[8]` View `settings.json`, `[9]` Select Log Level (`Trace`–`None` + `text`/`json` `stderr` format), `[K]` **Manage AI Provider API Keys** (masked key entry, format/mismatch validation, optional live verification, Azure endpoint setup, session vs OS User scope, and key clearing across all 5 API-key providers), `[0]` Back.
+* **`/slash` Commands & `@filename` Mentions:** `/wizard` (`/orchestrator`, `/bao`), `/generate`, `/process`, `/draft`, `/preview`, `/copy`, `/verbosity`, `/log-level`, `/log-format`, `/verbose`, `/settings`, `/keys` (`status|set|validate|verify|clear|endpoint`), `/status`, `/config` (including `--gateway-url` & `--wire-api`), `/provider`, `/models`, `/theme`, `/json`, `/live`, `/help`, `/clear`, `/exit`, plus `@raw-notes.txt ...`.
 
 ## Multi-Provider AI Orchestration (`Gemini` & `Microsoft.Copilot.SDK`)
 
@@ -278,7 +291,7 @@ Preserves strict **Zero Hallucination** prompt rules and Type `01`/`02` formatti
 1. **`gemini` (Default — Google Gemini REST):** Resolves keys from `--api-key`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `AI_API_KEY`, or masked interactive prompt (`*` keystrokes via `ReadKey`); supports `--offline` / `/live off`.
 2. **`copilot-sdk` (`Microsoft.Copilot.SDK` `2.0.1`):** Uses `CopilotClient` (`CopilotClientMode.CodingAgent`) and `CreateSessionOptions` with strict prompt isolation (disabled config discovery, skills, repository hooks, host git, and built-in tools). Supports in-process FFI, spawned stdio (`COPILOT_CLI_PATH` or `copilot` on `PATH`), and attached TCP (`COPILOT_CLI_URL`).
 3. **`openai` (OpenAI Gateway API — Direct HTTP):** Native HTTP client ([`OpenAiGatewayClient`](src/SmartBacklogAssistant/Services/OpenAiGatewayClient.cs)) supporting `/v1/chat/completions` (`chat`, default) and `/v1/responses` (`responses`), custom OpenAI-compatible gateway URLs (`OPENAI_BASE_URL`, `--gateway-url`, or `openAiBaseUrl`/`openAiWireApi` in `settings.json`), `/models` catalog discovery (`vendor/model` gateway slugs included), Bearer / Azure `api-key` auth, masked interactive key prompt (`*` keystrokes via `ReadKey`; `Enter` for offline fallback), and deterministic offline fallback (`--offline` or when credentials are unset).
-4. **`azure` / `claude` (Direct HTTP / BYOK Live or Deterministic Mock):** When `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_API_KEY` are configured without a Copilot CLI runtime, `azure` falls back to direct OpenAI Gateway HTTP deployment calls; with a Copilot runtime, `azure` / `claude` / Ollama route through `Microsoft.Copilot.SDK` `SessionInferenceOptions` (`NamedProviderConfig` with CAPI disabled), falling back deterministically otherwise.
+4. **`azure` / `claude` (Direct HTTP / BYOK Live or Deterministic Mock):** When `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_API_KEY` are configured without a Copilot CLI runtime, `azure` falls back to direct OpenAI Gateway HTTP deployment calls; with a Copilot runtime, `azure` / `claude` / Ollama route through `Microsoft.Copilot.SDK` `SessionInferenceOptions` (`NamedProviderConfig` with CAPI disabled), falling back deterministically otherwise. Both providers support live key verification and model discovery when configured.
 5. **`manual`:** Renders the Type `01`/`02` Markdown prompt alongside a deterministic baseline draft.
 
 ## Workspace Directory Mapping (Windows & WSL2)

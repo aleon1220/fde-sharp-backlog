@@ -49,6 +49,27 @@ public enum SecretSource
 }
 
 /// <summary>
+/// Controls the persistence scope when configuring or clearing provider API keys.
+/// </summary>
+public enum ApiKeyStorageScope
+{
+    /// <summary>
+    /// Injects or clears keys in the active runtime process session only.
+    /// </summary>
+    Session = 0,
+
+    /// <summary>
+    /// Injects or clears keys in the active runtime session and OS User environment (Windows Registry; guidance on POSIX).
+    /// </summary>
+    User = 1,
+
+    /// <summary>
+    /// Clears keys across active runtime session and OS User environment scopes.
+    /// </summary>
+    All = 2
+}
+
+/// <summary>
 /// Represents the resolved secret API key state at runtime.
 /// </summary>
 public sealed record GeminiSecretResolution(

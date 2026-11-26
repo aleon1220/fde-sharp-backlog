@@ -952,6 +952,275 @@ public sealed class CliSubcommandTests : IDisposable
         }
     }
 
+    [Fact]
+    public void Execute_KeysHelp_DisplaysUsageAllProvidersScopesAndSecurityNotice()
+    {
+        using var output = new StringWriter();
+        using var error = new StringWriter();
+
+        var exitCode = Program.Execute(
+            ["keys", "--help"],
+            new StringReader(string.Empty),
+            output,
+            error);
+
+        Assert.Equal(0, exitCode);
+        var stdout = output.ToString();
+        Assert.Contains("backlog keys", stdout);
+        Assert.Contains("gemini", stdout);
+        Assert.Contains("openai", stdout);
+        Assert.Contains("azure", stdout);
+        Assert.Contains("claude", stdout);
+        Assert.Contains("copilot-sdk", stdout);
+        Assert.Contains("--scope", stdout);
+        Assert.Contains("--verify", stdout);
+        Assert.Contains("settings.json", stdout);
+    }
+
+    [Fact]
+    public void Execute_KeysLifecycle_ValidatesRejectsMismatchesVerifiesRedactsAndReflectsImmediatelyInStatusModelsAndDraft()
+    {
+        var workspaceService = new WorkspacePathService();
+        var dirs = workspaceService.Resolve(_tempRoot);
+        Directory.CreateDirectory(dirs.WorkspaceRoot);
+        Directory.CreateDirectory(dirs.InputDirectory);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        var processEnv = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var userEnv = new Dictionary<string, string?>(StringComparer.Ordinal);
+
+        string? ReadScoped(string name, EnvironmentVariableTarget target)
+        {
+            var dict = target == EnvironmentVariableTarget.User ? userEnv : processEnv;
+            return dict.TryGetValue(name, out var val) ? val : null;
+        }
+
+        void WriteScoped(string name, string? value, EnvironmentVariableTarget target)
+        {
+            var dict = target == EnvironmentVariableTarget.User ? userEnv : processEnv;
+            if (value is null)
+            {
+                dict.Remove(name);
+            }
+            else
+            {
+                dict[name] = value;
+            }
+        }
+
+        const string openAiSecret = "sk-proj-CliKeysOpenAiSecret8877";
+        const string rejectedClaudeSecret = "sk-ant-CliKeysRejectedClaude9900";
+        const string geminiSecret = "AIzaSyCliKeysInteractiveGemini4433";
+
+        var openAiHandler = new StubHttpMessageHandler((request, _) =>
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/models", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonResponse("""
+                    {
+                      "data": [
+                        { "id": "gpt-4.1-mini", "owned_by": "openai" },
+                        { "id": "gpt-4o", "owned_by": "openai" }
+                      ]
+                    }
+                    """);
+            }
+
+            return JsonResponse("""
+                {
+                  "id": "resp_keys_test",
+                  "choices": [
+                    {
+                      "message": {
+                        "content": "{\"title\":\"Verify API Keys Live\",\"description\":\"* Immediate provider readiness after keys set.\",\"userStory\":\"As a user I manage API keys\",\"scenarios\":[{\"given\":\"Given a valid key\",\"when\":\"When set via keys CLI\",\"then\":\"Then live generation works immediately\"}]}"
+                      }
+                    }
+                  ]
+                }
+                """);
+        });
+        using var openAiHttp = new HttpClient(openAiHandler);
+        var openAiClient = new OpenAiGatewayClient(openAiHttp);
+
+        var verificationHandler = new StubHttpMessageHandler((_, _) => new HttpResponseMessage(System.Net.HttpStatusCode.Unauthorized)
+        {
+            Content = new StringContent(
+                $$"""{ "error": { "message": "invalid x-api-key {{rejectedClaudeSecret}}" } }""",
+                System.Text.Encoding.UTF8,
+                "application/json")
+        });
+        using var verifyHttp = new HttpClient(verificationHandler);
+
+        // 1. Cross-provider mismatch rejected before saving
+        using (var mismatchOut = new StringWriter())
+        using (var mismatchErr = new StringWriter())
+        {
+            var exit = Program.Execute(
+                ["-w", _tempRoot, "keys", "set", "openai", "--api-key", geminiSecret],
+                new StringReader(string.Empty),
+                mismatchOut,
+                mismatchErr,
+                clipboardService: null,
+                openAiGatewayClient: openAiClient,
+                environmentWriter: WriteScoped,
+                scopedEnvironmentReader: ReadScoped,
+                verificationHttpClient: verifyHttp);
+
+            Assert.NotEqual(0, exit);
+            var combined = mismatchOut.ToString() + mismatchErr.ToString();
+            Assert.Contains("Mismatched provider key", combined);
+            Assert.Contains("gemini", combined);
+            Assert.DoesNotContain(geminiSecret, combined);
+            Assert.False(processEnv.ContainsKey(OpenAiGatewayClient.ApiKeyEnvVar));
+        }
+
+        // 2. Placeholder key rejected before saving
+        using (var placeholderOut = new StringWriter())
+        using (var placeholderErr = new StringWriter())
+        {
+            var exit = Program.Execute(
+                ["-w", _tempRoot, "keys", "set", "claude", "--api-key", "YOUR_API_KEY"],
+                new StringReader(string.Empty),
+                placeholderOut,
+                placeholderErr,
+                clipboardService: null,
+                environmentWriter: WriteScoped,
+                scopedEnvironmentReader: ReadScoped);
+
+            Assert.NotEqual(0, exit);
+            Assert.False(processEnv.ContainsKey("ANTHROPIC_API_KEY"));
+        }
+
+        // 3. Live verify 401 failure echoes redacted error only (never exposes raw secret)
+        using (var failVerifyOut = new StringWriter())
+        using (var failVerifyErr = new StringWriter())
+        {
+            var exit = Program.Execute(
+                ["-w", _tempRoot, "keys", "set", "claude", "--api-key", rejectedClaudeSecret, "--verify", "--log-level", "info"],
+                new StringReader(string.Empty),
+                failVerifyOut,
+                failVerifyErr,
+                clipboardService: null,
+                environmentWriter: WriteScoped,
+                scopedEnvironmentReader: ReadScoped,
+                verificationHttpClient: verifyHttp);
+
+            Assert.NotEqual(0, exit);
+            Assert.DoesNotContain(rejectedClaudeSecret, failVerifyOut.ToString());
+            Assert.DoesNotContain(rejectedClaudeSecret, failVerifyErr.ToString());
+            Assert.Contains("****9900", failVerifyOut.ToString() + failVerifyErr.ToString());
+            Assert.False(processEnv.ContainsKey("ANTHROPIC_API_KEY"));
+        }
+
+        // 4. Live verify + --scope user for OpenAI sets both Process + User env
+        using (var setOpenAiOut = new StringWriter())
+        using (var setOpenAiErr = new StringWriter())
+        {
+            var exit = Program.Execute(
+                ["-w", _tempRoot, "keys", "set", "openai", "--api-key", openAiSecret, "--scope", "user", "--verify", "--log-level", "info"],
+                new StringReader(string.Empty),
+                setOpenAiOut,
+                setOpenAiErr,
+                clipboardService: null,
+                openAiGatewayClient: openAiClient,
+                environmentWriter: WriteScoped,
+                scopedEnvironmentReader: ReadScoped);
+
+            Assert.Equal(0, exit);
+            Assert.Contains("****8877", setOpenAiOut.ToString());
+            Assert.DoesNotContain(openAiSecret, setOpenAiOut.ToString());
+            Assert.DoesNotContain(openAiSecret, setOpenAiErr.ToString());
+            Assert.Equal(openAiSecret, processEnv[OpenAiGatewayClient.ApiKeyEnvVar]);
+            Assert.Equal(openAiSecret, userEnv[OpenAiGatewayClient.ApiKeyEnvVar]);
+        }
+
+        // 5. Immediate status --json, models, and draft reflect configured OpenAI key
+        using (var jsonOut = new StringWriter())
+        using (var jsonErr = new StringWriter())
+        {
+            var statusExit = Program.Execute(
+                ["-w", _tempRoot, "keys", "status", "--json"],
+                new StringReader(string.Empty),
+                jsonOut,
+                jsonErr,
+                clipboardService: null,
+                openAiGatewayClient: openAiClient,
+                environmentWriter: WriteScoped,
+                scopedEnvironmentReader: ReadScoped);
+
+            Assert.Equal(0, statusExit);
+            var json = jsonOut.ToString();
+            Assert.Contains("****8877", json);
+            Assert.DoesNotContain(openAiSecret, json);
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var openAiItem = doc.RootElement.EnumerateArray().First(e => e.GetProperty("provider").GetString() == "openai");
+            Assert.True(openAiItem.GetProperty("isConfigured").GetBoolean());
+        }
+
+        using (var modelsOut = new StringWriter())
+        using (var modelsErr = new StringWriter())
+        {
+            var modelsExit = Program.Execute(
+                ["-w", _tempRoot, "models", "--provider", "openai"],
+                new StringReader(string.Empty),
+                modelsOut,
+                modelsErr,
+                clipboardService: null,
+                openAiGatewayClient: openAiClient,
+                environmentWriter: WriteScoped,
+                scopedEnvironmentReader: ReadScoped);
+
+            Assert.Equal(0, modelsExit);
+            Assert.Contains("gpt-4.1-mini", modelsOut.ToString());
+        }
+
+        using (var draftOut = new StringWriter())
+        using (var draftErr = new StringWriter())
+        {
+            var draftExit = Program.Execute(
+                ["-w", _tempRoot, "-p", _promptFile, "draft", "Test Key Lifecycle", "--provider", "openai", "--preview"],
+                new StringReader(string.Empty),
+                draftOut,
+                draftErr,
+                clipboardService: null,
+                openAiGatewayClient: openAiClient,
+                environmentWriter: WriteScoped,
+                scopedEnvironmentReader: ReadScoped);
+
+            Assert.Equal(0, draftExit);
+            Assert.Contains("Verify API Keys Live", draftOut.ToString());
+            Assert.DoesNotContain(openAiSecret, draftOut.ToString());
+        }
+
+        // 6. Clear --scope all removes from both Process + User env
+        using (var clearOut = new StringWriter())
+        using (var clearErr = new StringWriter())
+        {
+            var clearExit = Program.Execute(
+                ["-w", _tempRoot, "keys", "clear", "openai", "--scope", "all"],
+                new StringReader(string.Empty),
+                clearOut,
+                clearErr,
+                clipboardService: null,
+                openAiGatewayClient: openAiClient,
+                environmentWriter: WriteScoped,
+                scopedEnvironmentReader: ReadScoped);
+
+            Assert.Equal(0, clearExit);
+            Assert.Contains("****8877", clearOut.ToString());
+            Assert.False(processEnv.ContainsKey(OpenAiGatewayClient.ApiKeyEnvVar));
+            Assert.False(userEnv.ContainsKey(OpenAiGatewayClient.ApiKeyEnvVar));
+        }
+
+        // Verify settings.json never persisted any API secret
+        var settingsPath = Path.Combine(dirs.WorkspaceRoot, ".smart-backlog", "settings.json");
+        if (File.Exists(settingsPath))
+        {
+            var rawSettings = File.ReadAllText(settingsPath);
+            Assert.DoesNotContain(openAiSecret, rawSettings);
+            Assert.DoesNotContain("apiKey", rawSettings, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_tempRoot))

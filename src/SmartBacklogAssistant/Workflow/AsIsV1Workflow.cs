@@ -294,7 +294,7 @@ public sealed class AsIsV1Workflow
         LogEvents.WorkflowStarted(_logger, RuntimeEnvironmentService.FormatProviderCode(provider), modeLabel, sourceType, options.DryRun);
 
         // Inspect OS, Build Info, Enabled AI Model, and initial secret status
-        var initialSecret = _secretProvider.Resolve(options.ApiKey);
+        var initialSecret = _secretProvider.Resolve(provider == AiProviderType.GoogleGemini ? options.ApiKey : null);
         _secretRedactor?.RegisterSecret(initialSecret.ApiKey);
         _secretRedactor?.RegisterSecret(options.ApiKey);
         var runtimeInfo = _runtimeEnvService.Inspect(provider, options.ModelName);
@@ -340,7 +340,7 @@ public sealed class AsIsV1Workflow
         TerminalUx.WriteStepDone(colorWriter, "Collected", collectDetail, collectSw.Elapsed);
 
         // 2. Local: Process & Inject Secret API Key at Runtime
-        var apiKey = initialSecret.ApiKey;
+        var apiKey = provider == AiProviderType.GoogleGemini ? initialSecret.ApiKey : null;
 
         if (provider == AiProviderType.GoogleGemini && options.GeminiLive == true)
         {
@@ -361,9 +361,19 @@ public sealed class AsIsV1Workflow
         }
         else if (provider == AiProviderType.GitHubCopilot)
         {
-            apiKey = options.ApiKey;
+            apiKey = !string.IsNullOrWhiteSpace(options.ApiKey)
+                ? options.ApiKey.Trim()
+                : _providerOrchestrator.EnvironmentReader(GitHubCopilotSdkGateway.CopilotTokenEnvVar)?.Trim()
+                  ?? _providerOrchestrator.EnvironmentReader(GitHubCopilotSdkGateway.GitHubTokenEnvVar)?.Trim()
+                  ?? _providerOrchestrator.EnvironmentReader(GitHubCopilotSdkGateway.GhTokenEnvVar)?.Trim();
+            LastResolvedApiKey = apiKey;
             _secretRedactor?.RegisterSecret(apiKey);
-            LogEvents.SecretResolved(_logger, string.IsNullOrWhiteSpace(apiKey) ? "Copilot runtime / env" : "CLI Argument (--api-key)", GeminiSecretProvider.MaskKey(apiKey));
+            var copilotSource = !string.IsNullOrWhiteSpace(options.ApiKey)
+                ? "CLI Argument (--api-key)"
+                : string.IsNullOrWhiteSpace(apiKey)
+                    ? "Copilot runtime / env"
+                    : "Environment Variable (Copilot/GitHub Token)";
+            LogEvents.SecretResolved(_logger, copilotSource, GeminiSecretProvider.MaskKey(apiKey));
         }
         else if (provider == AiProviderType.OpenAiGateway)
         {
@@ -392,7 +402,42 @@ public sealed class AsIsV1Workflow
                 }
             }
         }
-        else if (provider != AiProviderType.ManualPrompt && string.IsNullOrWhiteSpace(apiKey) && !options.NonInteractive)
+        else if (provider == AiProviderType.AzureOpenAi)
+        {
+            var azureConfig = _providerOrchestrator.ResolveOpenAiGatewayConfig(
+                explicitApiKey: options.ApiKey,
+                explicitBaseUrl: options.OpenAiBaseUrl,
+                persistedBaseUrl: options.PersistedOpenAiBaseUrl,
+                explicitWireApi: options.OpenAiWireApi,
+                persistedWireApi: options.PersistedOpenAiWireApi,
+                preferAzureEnvironment: true);
+            apiKey = azureConfig.ApiKey;
+            LastResolvedApiKey = apiKey;
+            _secretRedactor?.RegisterSecret(apiKey);
+            LogEvents.SecretResolved(_logger, azureConfig.ApiKeySourceDetail, azureConfig.MaskedApiKey);
+        }
+        else if (provider == AiProviderType.AnthropicClaude)
+        {
+            var envClaudeKey = _providerOrchestrator.EnvironmentReader("ANTHROPIC_API_KEY")?.Trim();
+            apiKey = !string.IsNullOrWhiteSpace(options.ApiKey)
+                ? options.ApiKey.Trim()
+                : envClaudeKey;
+            LastResolvedApiKey = apiKey;
+            _secretRedactor?.RegisterSecret(apiKey);
+            var claudeSource = !string.IsNullOrWhiteSpace(options.ApiKey)
+                ? "CLI Argument (--api-key)"
+                : string.IsNullOrWhiteSpace(apiKey)
+                    ? "None"
+                    : "Environment Variable (ANTHROPIC_API_KEY)";
+            LogEvents.SecretResolved(_logger, claudeSource, GeminiSecretProvider.MaskKey(apiKey));
+        }
+
+        if (provider != AiProviderType.ManualPrompt &&
+            provider != AiProviderType.GoogleGemini &&
+            provider != AiProviderType.GitHubCopilot &&
+            provider != AiProviderType.OpenAiGateway &&
+            string.IsNullOrWhiteSpace(apiKey) &&
+            !options.NonInteractive)
         {
             colorWriter.WriteColored($"Enter API key for {provider} (or press Enter for mock key): ", ConsoleColor.Yellow);
             var enteredKey = _secretProvider.ReadMaskedInput(input, output);
