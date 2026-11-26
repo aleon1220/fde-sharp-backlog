@@ -58,6 +58,8 @@ public sealed class AiProviderOrchestrator
 
     public OpenAiGatewayClient OpenAiGateway => _openAiGatewayClient;
 
+    internal Func<string, string?> EnvironmentReader => _environmentReader;
+
     public OpenAiGatewayConfiguration ResolveOpenAiGatewayConfig(
         string? explicitApiKey = null,
         string? explicitBaseUrl = null,
@@ -450,9 +452,17 @@ public sealed class AiProviderOrchestrator
             explicitWireApi: explicitOpenAiWireApi,
             persistedWireApi: persistedOpenAiWireApi);
 
-        var azureEndpointConfigured = !string.IsNullOrWhiteSpace(_environmentReader("AZURE_OPENAI_ENDPOINT"));
-        var azureKeyConfigured = !string.IsNullOrWhiteSpace(_environmentReader("AZURE_OPENAI_API_KEY"));
-        var anthropicKeyConfigured = !string.IsNullOrWhiteSpace(_environmentReader("ANTHROPIC_API_KEY"));
+        var azureEndpoint = _environmentReader(OpenAiGatewayClient.AzureEndpointEnvVar)?.Trim();
+        var azureKey = _environmentReader(OpenAiGatewayClient.AzureApiKeyEnvVar)?.Trim();
+        var anthropicKey = _environmentReader("ANTHROPIC_API_KEY")?.Trim();
+        var azureEndpointConfigured = !string.IsNullOrWhiteSpace(azureEndpoint);
+        var azureKeyConfigured = !string.IsNullOrWhiteSpace(azureKey);
+        var anthropicKeyConfigured = !string.IsNullOrWhiteSpace(anthropicKey);
+
+        var (copilotTokenVar, copilotTokenVal) = ResolveCopilotTokenEnv();
+        var copilotDetail = copilotTokenVar is not null
+            ? $"{copilotDiag.Summary} | {copilotTokenVar} [{GeminiSecretProvider.MaskKey(copilotTokenVal)}]"
+            : copilotDiag.Summary;
 
         var openAiIsReady = !liveEnabled || openAiDiag.IsConfiguredForLive;
         var openAiMode = !liveEnabled
@@ -478,13 +488,23 @@ public sealed class AiProviderOrchestrator
             : azureLiveDirect
                 ? (liveEnabled ? "Direct HTTP" : "Offline")
                 : "Mock Fallback";
+        var maskedAzureKey = GeminiSecretProvider.MaskKey(azureKey);
         var azureDetail = azureLiveByok
-            ? "AZURE_OPENAI_ENDPOINT configured (Copilot SDK BYOK)"
+            ? $"AZURE_OPENAI_ENDPOINT configured [{maskedAzureKey}] (Copilot SDK BYOK)"
             : azureLiveDirect
-                ? $"Direct OpenAI Gateway HTTP -> {_environmentReader("AZURE_OPENAI_ENDPOINT")?.Trim()}"
+                ? $"Direct OpenAI Gateway HTTP [{maskedAzureKey}] -> {azureEndpoint}"
                 : azureEndpointConfigured
                     ? "AZURE_OPENAI_ENDPOINT set (needs AZURE_OPENAI_API_KEY)"
-                    : "Mocked unless AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY set";
+                    : azureKeyConfigured
+                        ? $"AZURE_OPENAI_API_KEY [{maskedAzureKey}] configured (set AZURE_OPENAI_ENDPOINT for live HTTP)"
+                        : "Mocked unless AZURE_OPENAI_ENDPOINT + AZURE_OPENAI_API_KEY set";
+
+        var maskedAnthropicKey = GeminiSecretProvider.MaskKey(anthropicKey);
+        var anthropicDetail = anthropicKeyConfigured
+            ? copilotDiag.RuntimeAvailable
+                ? $"ANTHROPIC_API_KEY [{maskedAnthropicKey}] configured (Copilot SDK BYOK)"
+                : $"ANTHROPIC_API_KEY [{maskedAnthropicKey}] configured (needs Copilot CLI for BYOK live)"
+            : "Mocked unless ANTHROPIC_API_KEY + Copilot CLI set";
 
         return
         [
@@ -506,7 +526,7 @@ public sealed class AiProviderOrchestrator
                 Mode: copilotDiag.RuntimeAvailable
                     ? (copilotDiag.ByokConfigured ? "SDK + BYOK" : "SDK Ready")
                     : "CLI Missing",
-                Detail: copilotDiag.Summary),
+                Detail: copilotDetail),
 
             new ProviderAvailability(
                 Provider: AiProviderType.OpenAiGateway,
@@ -530,9 +550,7 @@ public sealed class AiProviderOrchestrator
                 DisplayName: "Anthropic Claude",
                 IsReady: anthropicKeyConfigured && copilotDiag.RuntimeAvailable,
                 Mode: anthropicKeyConfigured && copilotDiag.RuntimeAvailable ? "BYOK Live" : "Mock Fallback",
-                Detail: anthropicKeyConfigured
-                    ? "ANTHROPIC_API_KEY configured"
-                    : "Mocked unless ANTHROPIC_API_KEY + Copilot CLI set"),
+                Detail: anthropicDetail),
 
             new ProviderAvailability(
                 Provider: AiProviderType.ManualPrompt,
@@ -542,6 +560,25 @@ public sealed class AiProviderOrchestrator
                 Mode: activeProvider == AiProviderType.ManualPrompt ? "Active" : "Always Ready",
                 Detail: "Renders prompt Markdown + deterministic baseline draft")
         ];
+    }
+
+    private (string? VarName, string? Value) ResolveCopilotTokenEnv()
+    {
+        foreach (var varName in new[]
+        {
+            GitHubCopilotSdkGateway.CopilotTokenEnvVar,
+            GitHubCopilotSdkGateway.GitHubTokenEnvVar,
+            GitHubCopilotSdkGateway.GhTokenEnvVar
+        })
+        {
+            var val = _environmentReader(varName);
+            if (!string.IsNullOrWhiteSpace(val))
+            {
+                return (varName, val.Trim());
+            }
+        }
+
+        return (null, null);
     }
 
     private string ResolveOpenAiModelId(string? requestModelName, OpenAiGatewayConfiguration gatewayConfig)

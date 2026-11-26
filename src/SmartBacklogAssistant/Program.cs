@@ -29,7 +29,8 @@ public static class Program
         "--log-level",
         "--log-format",
         "--gateway-url", "--base-url", "--openai-base-url",
-        "--wire-api", "--gateway-api"
+        "--wire-api", "--gateway-api",
+        "--scope"
     };
 
     private static readonly HashSet<string> OptionalBoolValueFlags = new(StringComparer.OrdinalIgnoreCase)
@@ -57,15 +58,26 @@ public static class Program
         TextWriter error,
         IClipboardService? clipboardService,
         Func<string, string?>? environmentReader = null,
-        OpenAiGatewayClient? openAiGatewayClient = null)
+        OpenAiGatewayClient? openAiGatewayClient = null,
+        GeminiApiClient? geminiApiClient = null,
+        ICopilotSdkGateway? copilotGateway = null,
+        Action<string, string?, EnvironmentVariableTarget>? environmentWriter = null,
+        Func<string, EnvironmentVariableTarget, string?>? scopedEnvironmentReader = null,
+        HttpClient? verificationHttpClient = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(error);
 
+        var environmentStore = new SessionEnvironmentStore(
+            externalReader: environmentReader,
+            externalScopedWriter: environmentWriter,
+            externalScopedReader: scopedEnvironmentReader);
+        Func<string, string?> effectiveEnvReader = environmentStore.Read;
+
         var secretRedactor = new SecretRedactor();
-        secretRedactor.RegisterEnvironmentSecrets(environmentReader);
+        secretRedactor.RegisterEnvironmentSecrets(effectiveEnvReader);
         StderrLoggerFactory? loggerFactory = null;
         ILogger? programLogger = null;
 
@@ -83,7 +95,7 @@ public static class Program
                 return 0;
             }
 
-            var workspaceService = new WorkspacePathService(environmentReader: environmentReader);
+            var workspaceService = new WorkspacePathService(environmentReader: effectiveEnvReader);
             var settingsService = new CliSettingsService();
             var initialWorkspace = workspaceService.Resolve(options.WorkspaceRoot);
             var initialSettings = settingsService.Load(initialWorkspace);
@@ -100,7 +112,7 @@ public static class Program
             var resolvedLogging = CliLogLevelResolver.ResolveEffectiveLogging(
                 runtimeLoggingOptions,
                 initialSettings,
-                environmentReader);
+                effectiveEnvReader);
 
             loggerFactory = new StderrLoggerFactory(
                 error,
@@ -120,15 +132,26 @@ public static class Program
                 options.DryRun);
 
             var runtimeEnvService = new RuntimeEnvironmentService();
-            var secretProvider = new GeminiSecretProvider(environmentReader: environmentReader);
-            var geminiApiClient = new GeminiApiClient(logger: loggerFactory.CreateLogger<GeminiApiClient>());
+            var secretProvider = new GeminiSecretProvider(
+                environmentReader: effectiveEnvReader,
+                environmentWriter: environmentStore.WriteProcess);
+            var effectiveGeminiClient = geminiApiClient ?? new GeminiApiClient(logger: loggerFactory.CreateLogger<GeminiApiClient>());
             var effectiveOpenAiGateway = openAiGatewayClient ?? new OpenAiGatewayClient(logger: loggerFactory.CreateLogger<OpenAiGatewayClient>());
             var modelOrchestrator = new AiModelOrchestrator(loggerFactory.CreateLogger<AiModelOrchestrator>());
             var providerOrchestrator = new AiProviderOrchestrator(
-                geminiApiClient,
-                environmentReader: environmentReader,
+                effectiveGeminiClient,
+                copilotGateway: copilotGateway,
+                environmentReader: effectiveEnvReader,
                 loggerFactory: loggerFactory,
                 openAiGatewayClient: effectiveOpenAiGateway);
+            var apiKeyService = new ApiKeyManagementService(
+                environmentStore: environmentStore,
+                geminiApiClient: effectiveGeminiClient,
+                openAiGatewayClient: effectiveOpenAiGateway,
+                copilotGateway: providerOrchestrator.CopilotGateway,
+                verificationHttpClient: verificationHttpClient,
+                secretRedactor: secretRedactor,
+                loggerFactory: loggerFactory);
             var diagnosticService = new WorkspaceDiagnosticService(
                 workspaceService,
                 runtimeEnvService,
@@ -136,7 +159,7 @@ public static class Program
                 settingsService,
                 modelOrchestrator,
                 providerOrchestrator,
-                environmentReader);
+                effectiveEnvReader);
 
             if (options.ShowVersion)
             {
@@ -158,6 +181,22 @@ public static class Program
                     modelOrchestrator,
                     output,
                     programLogger);
+            }
+
+            if (options.Subcommand == "keys")
+            {
+                LogEvents.DispatchingCommand(programLogger, "keys", initialWorkspace.ProjectRoot);
+                return RunKeysCommand(
+                    args,
+                    options,
+                    workspaceService,
+                    settingsService,
+                    diagnosticService,
+                    secretProvider,
+                    apiKeyService,
+                    secretRedactor,
+                    input,
+                    output);
             }
 
             if (options.Subcommand == "preview")
@@ -187,7 +226,7 @@ public static class Program
                     modelOrchestrator,
                     output,
                     providerOrchestrator,
-                    environmentReader);
+                    effectiveEnvReader);
             }
 
             if (options.ListGeminiModels)
@@ -200,8 +239,10 @@ public static class Program
                     modelOrchestrator,
                     providerOrchestrator,
                     secretProvider,
-                    geminiApiClient,
+                    effectiveGeminiClient,
+                    apiKeyService,
                     diagnosticService,
+                    environmentStore,
                     input,
                     output);
             }
@@ -217,7 +258,7 @@ public static class Program
                 formatter,
                 runtimeEnvService,
                 secretProvider,
-                geminiApiClient,
+                effectiveGeminiClient,
                 providerOrchestrator,
                 loggerFactory,
                 effectiveOpenAiGateway);
@@ -235,7 +276,9 @@ public static class Program
                     diagnosticService,
                     clipboardService,
                     loggerFactory,
-                    environmentReader);
+                    effectiveEnvReader,
+                    apiKeyService,
+                    secretRedactor);
 
                 return menuRunner.Run(options, input, output);
             }
@@ -404,7 +447,7 @@ public static class Program
             options.ShowDoctorStatus ||
             options.ShowVersion ||
             options.ListGeminiModels ||
-            options.Subcommand is "config" or "help" or "preview")
+            options.Subcommand is "config" or "help" or "preview" or "keys")
         {
             return false;
         }
@@ -871,6 +914,580 @@ public static class Program
         return 0;
     }
 
+    private static int RunKeysCommand(
+        string[] args,
+        WorkflowOptions options,
+        WorkspacePathService workspaceService,
+        CliSettingsService settingsService,
+        WorkspaceDiagnosticService diagnosticService,
+        GeminiSecretProvider secretProvider,
+        ApiKeyManagementService apiKeyService,
+        SecretRedactor secretRedactor,
+        TextReader input,
+        TextWriter output)
+    {
+        var workspace = workspaceService.Resolve(options.WorkspaceRoot);
+        var settings = settingsService.Load(workspace);
+        var color = new ConsoleColorWriter(output, theme: ConsoleColorWriter.ResolveTheme(options.CliTheme, settings.Theme));
+        var positionals = ExtractSubcommandPositionals(args);
+
+        // Register any positional secret argument immediately so stderr logs or errors never expose plaintext.
+        if (positionals.Count >= 3 && positionals[0].Equals("set", StringComparison.OrdinalIgnoreCase))
+        {
+            secretRedactor.RegisterSecret(positionals[2]);
+        }
+        else if (positionals.Count >= 3 &&
+                 (positionals[0].Equals("validate", StringComparison.OrdinalIgnoreCase) ||
+                  positionals[0].Equals("verify", StringComparison.OrdinalIgnoreCase) ||
+                  positionals[0].Equals("check", StringComparison.OrdinalIgnoreCase) ||
+                  positionals[0].Equals("test", StringComparison.OrdinalIgnoreCase)))
+        {
+            secretRedactor.RegisterSecret(positionals[2]);
+        }
+
+        if (positionals.Count == 0 ||
+            positionals[0].Equals("status", StringComparison.OrdinalIgnoreCase) ||
+            positionals[0].Equals("list", StringComparison.OrdinalIgnoreCase))
+        {
+            return RenderKeysStatusTable(
+                apiKeyService,
+                options,
+                settings,
+                color,
+                output,
+                singleProvider: null);
+        }
+
+        var action = positionals[0].ToLowerInvariant();
+        if (ApiKeyManagementService.TryResolveKeyProvider(action, out var singleStatusProvider) && positionals.Count == 1)
+        {
+            return RenderKeysStatusTable(
+                apiKeyService,
+                options,
+                settings,
+                color,
+                output,
+                singleProvider: singleStatusProvider);
+        }
+
+        switch (action)
+        {
+            case "set" or "add" or "register":
+                return RunKeysSetCommand(
+                    args,
+                    positionals,
+                    options,
+                    settings,
+                    secretProvider,
+                    apiKeyService,
+                    secretRedactor,
+                    color,
+                    input,
+                    output);
+
+            case "validate" or "check":
+                return RunKeysValidateCommand(
+                    args,
+                    positionals,
+                    options,
+                    settings,
+                    diagnosticService,
+                    apiKeyService,
+                    color,
+                    defaultLiveVerify: false);
+
+            case "verify" or "test":
+                return RunKeysValidateCommand(
+                    args,
+                    positionals,
+                    options,
+                    settings,
+                    diagnosticService,
+                    apiKeyService,
+                    color,
+                    defaultLiveVerify: true);
+
+            case "clear" or "remove" or "unset" or "rm" or "delete":
+                return RunKeysClearCommand(
+                    args,
+                    positionals,
+                    apiKeyService,
+                    color);
+
+            default:
+                throw new ApiKeyValidationException(
+                    $"Unknown 'keys' subcommand '{positionals[0]}'. Expected status, set, validate, verify, or clear.",
+                    "Run 'backlog keys --help' for usage and examples.");
+        }
+    }
+
+    private static int RenderKeysStatusTable(
+        ApiKeyManagementService apiKeyService,
+        WorkflowOptions options,
+        CliSettings settings,
+        ConsoleColorWriter color,
+        TextWriter output,
+        AiProviderType? singleProvider)
+    {
+        var statuses = singleProvider is { } target
+            ? [apiKeyService.GetProviderStatus(target, options.OpenAiBaseUrl, settings.OpenAiBaseUrl, options.OpenAiWireApi, settings.OpenAiWireApi)]
+            : apiKeyService.GetAllProviderStatuses(options.OpenAiBaseUrl, settings.OpenAiBaseUrl, options.OpenAiWireApi, settings.OpenAiWireApi);
+
+        if (options.JsonFileOut == true)
+        {
+            var payload = statuses.Select(static s => new
+            {
+                provider = s.Metadata.Code,
+                displayName = s.Metadata.DisplayName,
+                primaryEnvVar = s.Metadata.PrimaryEnvVar,
+                activeEnvVar = s.ActiveEnvVar,
+                isConfigured = s.IsConfigured,
+                maskedKey = s.MaskedKey,
+                scope = s.ScopeSummary,
+                detail = s.Detail,
+                companionWarning = s.HasCompanionConfigWarning ? s.CompanionConfigNote : null
+            });
+            output.WriteLine(System.Text.Json.JsonSerializer.Serialize(
+                payload,
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+            return 0;
+        }
+
+        var rows = new List<(string Section, string Setting, string Value, ConsoleColor ValueColor)>(statuses.Count);
+        foreach (var status in statuses)
+        {
+            var valueText = status.IsConfigured
+                ? $"{status.MaskedKey} ({status.ScopeSummary}) — {status.Detail}"
+                : status.Detail;
+            var valueColor = status.IsConfigured
+                ? (status.HasCompanionConfigWarning ? ConsoleColor.Yellow : ConsoleColor.Green)
+                : ConsoleColor.Yellow;
+            rows.Add((status.Metadata.Code, status.Metadata.PrimaryEnvVar, valueText, valueColor));
+        }
+
+        TerminalUx.WriteDiagnosticTable(
+            color,
+            "Smart Backlog Assistant — AI Provider API Keys",
+            rows);
+        color.WriteMuted("  Secrets stay in memory/OS environment only and are NEVER written to settings.json.");
+        return 0;
+    }
+
+    private static int RunKeysSetCommand(
+        string[] args,
+        IReadOnlyList<string> positionals,
+        WorkflowOptions options,
+        CliSettings settings,
+        GeminiSecretProvider secretProvider,
+        ApiKeyManagementService apiKeyService,
+        SecretRedactor secretRedactor,
+        ConsoleColorWriter color,
+        TextReader input,
+        TextWriter output)
+    {
+        if (positionals.Count < 2)
+        {
+            throw new ApiKeyValidationException(
+                "Missing AI provider for 'backlog keys set'. Usage: backlog keys set <provider> [--api-key <key>] [--scope session|user] [--verify]",
+                "Supported providers: gemini, openai, azure, claude, copilot-sdk.");
+        }
+
+        if (!ApiKeyManagementService.TryResolveKeyProvider(positionals[1], out var provider))
+        {
+            throw new ApiKeyValidationException(
+                $"Unsupported provider '{positionals[1]}' for API key management.",
+                "Supported providers: gemini, openai, azure, claude, copilot-sdk.");
+        }
+
+        var scope = ParseKeyScopeFlag(args, allowAll: false);
+        var metadata = ApiKeyManagementService.GetMetadata(provider);
+
+        if (provider == AiProviderType.AzureOpenAi && !string.IsNullOrWhiteSpace(options.OpenAiBaseUrl))
+        {
+            var endpointResult = apiKeyService.SetAzureEndpoint(options.OpenAiBaseUrl, scope);
+            if (!endpointResult.Succeeded)
+            {
+                throw new ApiKeyValidationException(endpointResult.Message, endpointResult.ScopeGuidanceNote);
+            }
+
+            color.WriteMuted($"  ✓ {endpointResult.Message}");
+        }
+
+        var useStdin = HasFlag(args, "--stdin");
+        var positionalKey = positionals.Count >= 3 ? positionals[2] : null;
+        string? rawKey = !string.IsNullOrWhiteSpace(options.ApiKey)
+            ? options.ApiKey
+            : !string.IsNullOrWhiteSpace(positionalKey)
+                ? positionalKey
+                : null;
+
+        if (rawKey is null)
+        {
+            if (useStdin)
+            {
+                rawKey = input.ReadLine();
+                if (string.IsNullOrWhiteSpace(rawKey))
+                {
+                    throw new ApiKeyValidationException(
+                        $"No API key received on stdin for '{metadata.Code}'.",
+                        $"Pipe a non-empty {metadata.PrimaryEnvVar} value or pass '--api-key <key>'.");
+                }
+            }
+            else if (options.NonInteractive)
+            {
+                throw new ApiKeyValidationException(
+                    $"Missing API key for '{metadata.Code}' in --non-interactive mode.",
+                    $"Pass '--api-key <key>' or '--stdin' (obtain key from {metadata.KeyPortalUrl}).");
+            }
+            else
+            {
+                color.WriteLine();
+                color.WriteHeader($"=== Configure {metadata.DisplayName} API Key ===");
+                color.WriteMuted($"  Variable : {metadata.PrimaryEnvVar} | Portal: {metadata.KeyPortalUrl}");
+                color.WriteMuted($"  Format   : {metadata.ExpectedFormatHint}");
+                color.WriteColored($"Enter {metadata.DisplayName} API key (masked with *): ", ConsoleColor.Yellow);
+                rawKey = secretProvider.ReadMaskedInput(input, output);
+                if (string.IsNullOrWhiteSpace(rawKey))
+                {
+                    throw new ApiKeyValidationException(
+                        $"API key entry cancelled or empty for '{metadata.Code}'.",
+                        $"Obtain a key from {metadata.KeyPortalUrl} and rerun 'backlog keys set {metadata.Code}'.");
+                }
+            }
+        }
+
+        secretRedactor.RegisterSecret(rawKey);
+        var verifyLive = (HasFlag(args, "--verify") || options.GeminiLive == true) && options.GeminiLive != false;
+
+        var sw = Stopwatch.StartNew();
+        var result = verifyLive
+            ? TerminalUx.RunWithSpinner(
+                $"Validating & verifying {metadata.DisplayName} API key...",
+                () => apiKeyService.SetKey(provider, rawKey, scope, verifyLive: true, options.OpenAiBaseUrl, settings.OpenAiBaseUrl),
+                color)
+            : apiKeyService.SetKey(provider, rawKey, scope, verifyLive: false, options.OpenAiBaseUrl, settings.OpenAiBaseUrl);
+        sw.Stop();
+
+        if (!result.Succeeded)
+        {
+            throw new ApiKeyValidationException(result.Message, result.ScopeGuidanceNote);
+        }
+
+        if (result.LiveVerification is { Succeeded: true } live)
+        {
+            color.WriteSuccess($"  ✓ {live.Summary}");
+        }
+
+        TerminalUx.WriteStepDone(color, "Saved", result.Message, sw.Elapsed);
+        if (!string.IsNullOrWhiteSpace(result.ScopeGuidanceNote))
+        {
+            color.WriteMuted($"  [i] {result.ScopeGuidanceNote}");
+        }
+
+        return 0;
+    }
+
+    private static int RunKeysValidateCommand(
+        string[] args,
+        IReadOnlyList<string> positionals,
+        WorkflowOptions options,
+        CliSettings settings,
+        WorkspaceDiagnosticService diagnosticService,
+        ApiKeyManagementService apiKeyService,
+        ConsoleColorWriter color,
+        bool defaultLiveVerify)
+    {
+        var runLive = (defaultLiveVerify || HasFlag(args, "--verify") || options.GeminiLive == true) &&
+                      options.GeminiLive != false;
+        var targetToken = positionals.Count >= 2 ? positionals[1] : null;
+        var positionalKey = positionals.Count >= 3 ? positionals[2] : null;
+        var candidateExplicitKey = !string.IsNullOrWhiteSpace(options.ApiKey)
+            ? options.ApiKey
+            : positionalKey;
+
+        if (!string.IsNullOrWhiteSpace(targetToken) &&
+            !targetToken.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!ApiKeyManagementService.TryResolveKeyProvider(targetToken, out var singleProvider))
+            {
+                throw new ApiKeyValidationException(
+                    $"Unsupported provider '{targetToken}' for API key validation.",
+                    "Supported providers: gemini, openai, azure, claude, copilot-sdk, or 'all'.");
+            }
+
+            return ValidateSingleProviderKeyCli(
+                singleProvider,
+                candidateExplicitKey,
+                runLive,
+                options,
+                settings,
+                apiKeyService,
+                color);
+        }
+
+        if (!string.IsNullOrWhiteSpace(candidateExplicitKey) && string.IsNullOrWhiteSpace(targetToken))
+        {
+            var effectiveProvider = diagnosticService.ResolveEffectiveProvider(options, settings);
+            if (effectiveProvider == AiProviderType.ManualPrompt)
+            {
+                effectiveProvider = AiProviderType.GoogleGemini;
+            }
+
+            return ValidateSingleProviderKeyCli(
+                effectiveProvider,
+                candidateExplicitKey,
+                runLive,
+                options,
+                settings,
+                apiKeyService,
+                color);
+        }
+
+        // Validate all configured providers
+        var configuredCount = 0;
+        var failureCount = 0;
+        color.WriteHeader(runLive
+            ? "=== Validating & Live-Verifying Configured AI Provider Keys ==="
+            : "=== Validating Configured AI Provider Key Formats ===");
+
+        foreach (var provider in ApiKeyManagementService.SupportedProviders)
+        {
+            var status = apiKeyService.GetProviderStatus(provider, options.OpenAiBaseUrl, settings.OpenAiBaseUrl);
+            if (!status.IsConfigured)
+            {
+                color.WriteMuted($"  [ ] {status.Metadata.Code,-12} not configured ({status.Metadata.PrimaryEnvVar})");
+                continue;
+            }
+
+            configuredCount++;
+            var formatResult = apiKeyService.ValidateKeyFormat(
+                provider,
+                apiKeyService.EnvironmentStore.Read(status.ActiveEnvVar!),
+                options.OpenAiBaseUrl,
+                settings.OpenAiBaseUrl);
+
+            if (!formatResult.IsValid)
+            {
+                failureCount++;
+                color.WriteError($"  [!] {status.Metadata.Code,-12} {formatResult.ErrorMessage}");
+                if (!string.IsNullOrWhiteSpace(formatResult.ActionableHint))
+                {
+                    color.WriteMuted($"      hint: {formatResult.ActionableHint}");
+                }
+
+                continue;
+            }
+
+            if (!runLive)
+            {
+                color.WriteSuccess($"  [✓] {status.Metadata.Code,-12} format valid [{formatResult.MaskedKey}] ({status.ScopeSummary})");
+                continue;
+            }
+
+            var liveResult = TerminalUx.RunWithSpinner(
+                $"Verifying {status.Metadata.DisplayName} [{formatResult.MaskedKey}]...",
+                () => apiKeyService.VerifyKeyLive(provider, null, options.OpenAiBaseUrl, settings.OpenAiBaseUrl),
+                color);
+            if (liveResult.Succeeded)
+            {
+                color.WriteSuccess($"  [✓] {status.Metadata.Code,-12} {liveResult.Summary}");
+            }
+            else
+            {
+                failureCount++;
+                color.WriteError($"  [!] {status.Metadata.Code,-12} {liveResult.ErrorMessage}");
+                if (!string.IsNullOrWhiteSpace(liveResult.ActionableHint))
+                {
+                    color.WriteMuted($"      hint: {liveResult.ActionableHint}");
+                }
+            }
+        }
+
+        if (configuredCount == 0)
+        {
+            throw new ApiKeyValidationException(
+                "No AI provider API keys are currently configured.",
+                "Run 'backlog keys set <provider>' or open Workspace & Settings -> [K] Manage AI Provider API Keys.");
+        }
+
+        if (failureCount > 0)
+        {
+            throw new ApiKeyValidationException(
+                $"{failureCount} configured API key(s) failed validation.",
+                "Update invalid keys via 'backlog keys set <provider>' or clear them with 'backlog keys clear <provider>'.");
+        }
+
+        return 0;
+    }
+
+    private static int ValidateSingleProviderKeyCli(
+        AiProviderType provider,
+        string? explicitKey,
+        bool runLive,
+        WorkflowOptions options,
+        CliSettings settings,
+        ApiKeyManagementService apiKeyService,
+        ConsoleColorWriter color)
+    {
+        var metadata = ApiKeyManagementService.GetMetadata(provider);
+        string? keyToCheck = explicitKey;
+        if (string.IsNullOrWhiteSpace(keyToCheck))
+        {
+            var status = apiKeyService.GetProviderStatus(provider, options.OpenAiBaseUrl, settings.OpenAiBaseUrl);
+            if (!status.IsConfigured)
+            {
+                throw new ApiKeyValidationException(
+                    $"No API key is currently configured for '{metadata.Code}' ({metadata.PrimaryEnvVar}).",
+                    $"Run 'backlog keys set {metadata.Code}' or pass '--api-key <key>' to validate a candidate key.");
+            }
+
+            keyToCheck = apiKeyService.EnvironmentStore.Read(status.ActiveEnvVar!);
+        }
+
+        var formatResult = apiKeyService.ValidateKeyFormat(
+            provider,
+            keyToCheck,
+            options.OpenAiBaseUrl,
+            settings.OpenAiBaseUrl);
+        if (!formatResult.IsValid)
+        {
+            throw new ApiKeyValidationException(
+                formatResult.ErrorMessage ?? "API key format validation failed.",
+                formatResult.ActionableHint);
+        }
+
+        if (!runLive)
+        {
+            color.WriteSuccess($"  [✓] {metadata.DisplayName} key [{formatResult.MaskedKey}] format is valid.");
+            color.WriteMuted($"      Pass '--verify' or run 'backlog keys verify {metadata.Code}' to test live authentication.");
+            return 0;
+        }
+
+        var sw = Stopwatch.StartNew();
+        var liveResult = TerminalUx.RunWithSpinner(
+            $"Verifying {metadata.DisplayName} [{formatResult.MaskedKey}]...",
+            () => apiKeyService.VerifyKeyLive(provider, keyToCheck, options.OpenAiBaseUrl, settings.OpenAiBaseUrl),
+            color);
+        sw.Stop();
+
+        if (!liveResult.Succeeded)
+        {
+            throw new ApiKeyValidationException(
+                liveResult.ErrorMessage ?? liveResult.Summary,
+                liveResult.ActionableHint);
+        }
+
+        TerminalUx.WriteStepDone(color, "Verified", liveResult.Summary, sw.Elapsed);
+        return 0;
+    }
+
+    private static int RunKeysClearCommand(
+        string[] args,
+        IReadOnlyList<string> positionals,
+        ApiKeyManagementService apiKeyService,
+        ConsoleColorWriter color)
+    {
+        if (positionals.Count < 2)
+        {
+            throw new ApiKeyValidationException(
+                "Missing provider for 'backlog keys clear'. Usage: backlog keys clear <provider|all> [--scope session|user|all]",
+                "Supported providers: gemini, openai, azure, claude, copilot-sdk, or 'all'.");
+        }
+
+        var scope = ParseKeyScopeFlag(args, allowAll: true);
+        var targetToken = positionals[1];
+
+        if (targetToken.Equals("all", StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var provider in ApiKeyManagementService.SupportedProviders)
+            {
+                var clearResult = apiKeyService.ClearKey(provider, scope);
+                color.WriteSuccess($"  ✓ {clearResult.Message}");
+                if (!string.IsNullOrWhiteSpace(clearResult.ScopeGuidanceNote))
+                {
+                    color.WriteMuted($"    [i] {clearResult.ScopeGuidanceNote}");
+                }
+            }
+
+            return 0;
+        }
+
+        if (!ApiKeyManagementService.TryResolveKeyProvider(targetToken, out var singleProvider))
+        {
+            throw new ApiKeyValidationException(
+                $"Unsupported provider '{targetToken}' for 'backlog keys clear'.",
+                "Supported providers: gemini, openai, azure, claude, copilot-sdk, or 'all'.");
+        }
+
+        var result = apiKeyService.ClearKey(singleProvider, scope);
+        color.WriteSuccess($"  ✓ {result.Message}");
+        if (!string.IsNullOrWhiteSpace(result.ScopeGuidanceNote))
+        {
+            color.WriteMuted($"    [i] {result.ScopeGuidanceNote}");
+        }
+
+        return 0;
+    }
+
+    private static ApiKeyStorageScope ParseKeyScopeFlag(string[] args, bool allowAll)
+    {
+        if (!TryGetRequiredFlagValue(args, out var rawScope, "--scope"))
+        {
+            return ApiKeyStorageScope.Session;
+        }
+
+        return rawScope.Trim().ToLowerInvariant() switch
+        {
+            "session" or "process" or "runtime" => ApiKeyStorageScope.Session,
+            "user" or "os" or "persist" => ApiKeyStorageScope.User,
+            "all" when allowAll => ApiKeyStorageScope.All,
+            _ => throw new ApiKeyValidationException(
+                $"Invalid --scope '{rawScope}'. Valid values: {(allowAll ? "session, user, all" : "session, user")}.",
+                "Use '--scope session' for active runtime only or '--scope user' for OS User persistence.")
+        };
+    }
+
+    private static List<string> ExtractSubcommandPositionals(string[] args)
+    {
+        var list = new List<string>();
+        var skippedSubcommand = false;
+
+        for (var i = 0; i < args.Length; i++)
+        {
+            var token = args[i];
+            if (ValueFlags.Contains(token))
+            {
+                i++;
+                continue;
+            }
+
+            if (OptionalBoolValueFlags.Contains(token))
+            {
+                if (i + 1 < args.Length && IsBooleanToken(args[i + 1]))
+                {
+                    i++;
+                }
+
+                continue;
+            }
+
+            if (token.StartsWith('-'))
+            {
+                continue;
+            }
+
+            if (!skippedSubcommand)
+            {
+                skippedSubcommand = true;
+                continue;
+            }
+
+            list.Add(token);
+        }
+
+        return list;
+    }
+
     private static int RunModelsCommand(
         WorkflowOptions options,
         WorkspacePathService workspaceService,
@@ -879,7 +1496,9 @@ public static class Program
         AiProviderOrchestrator providerOrchestrator,
         GeminiSecretProvider secretProvider,
         GeminiApiClient geminiApiClient,
+        ApiKeyManagementService apiKeyService,
         WorkspaceDiagnosticService diagnosticService,
+        SessionEnvironmentStore environmentStore,
         TextReader input,
         TextWriter output)
     {
@@ -938,6 +1557,90 @@ public static class Program
                 output.WriteLine(string.IsNullOrWhiteSpace(model.OwnedBy)
                     ? model.ModelId
                     : $"{model.ModelId}\t{model.OwnedBy}");
+            }
+
+            return 0;
+        }
+
+        if (activeProvider == AiProviderType.AzureOpenAi)
+        {
+            var azureConfig = providerOrchestrator.ResolveOpenAiGatewayConfig(
+                explicitApiKey: options.ApiKey,
+                explicitBaseUrl: options.OpenAiBaseUrl,
+                persistedBaseUrl: settings.OpenAiBaseUrl,
+                explicitWireApi: options.OpenAiWireApi,
+                persistedWireApi: settings.OpenAiWireApi,
+                preferAzureEnvironment: true);
+
+            if (options.GeminiLive != false && azureConfig.IsConfiguredForLive && azureConfig.IsCustomBaseUrl)
+            {
+                var azSw = Stopwatch.StartNew();
+                var azureModels = TerminalUx.RunWithSpinner(
+                    $"Discovering Azure OpenAI models ({azureConfig.BaseUrl})...",
+                    () => providerOrchestrator.OpenAiGateway.ListModels(azureConfig),
+                    color);
+                azSw.Stop();
+                TerminalUx.WriteStepDone(color, "Listed", $"{azureModels.Count} Azure OpenAI model(s)", azSw.Elapsed);
+                foreach (var model in azureModels)
+                {
+                    output.WriteLine(string.IsNullOrWhiteSpace(model.OwnedBy)
+                        ? model.ModelId
+                        : $"{model.ModelId}\t{model.OwnedBy}");
+                }
+
+                return 0;
+            }
+
+            var azureRecs = ModelCatalogService.GetRecommendations(AiProviderType.AzureOpenAi);
+            color.WriteHeader("Recommended Azure OpenAI Models:");
+            foreach (var rec in azureRecs)
+            {
+                output.WriteLine($"{rec.ModelId}\t{rec.DisplayName}\t{rec.Reason}");
+            }
+
+            return 0;
+        }
+
+        if (activeProvider == AiProviderType.AnthropicClaude)
+        {
+            var anthropicKey = !string.IsNullOrWhiteSpace(options.ApiKey)
+                ? options.ApiKey.Trim()
+                : environmentStore.Read("ANTHROPIC_API_KEY")?.Trim();
+
+            if (options.GeminiLive != false && !string.IsNullOrWhiteSpace(anthropicKey))
+            {
+                var claudeSw = Stopwatch.StartNew();
+                var claudeModels = TerminalUx.RunWithSpinner(
+                    "Discovering Anthropic Claude models...",
+                    () => apiKeyService.ListAnthropicModels(anthropicKey, options.OpenAiBaseUrl),
+                    color);
+                claudeSw.Stop();
+                TerminalUx.WriteStepDone(color, "Listed", $"{claudeModels.Count} Anthropic Claude model(s)", claudeSw.Elapsed);
+                foreach (var model in claudeModels)
+                {
+                    output.WriteLine($"{model.ModelId}\t{model.DisplayName}");
+                }
+
+                return 0;
+            }
+
+            var claudeRecs = ModelCatalogService.GetRecommendations(AiProviderType.AnthropicClaude);
+            color.WriteHeader("Recommended Anthropic Claude Models:");
+            foreach (var rec in claudeRecs)
+            {
+                output.WriteLine($"{rec.ModelId}\t{rec.DisplayName}\t{rec.Reason}");
+            }
+
+            return 0;
+        }
+
+        if (activeProvider == AiProviderType.ManualPrompt)
+        {
+            color.WriteHeader("Manual Prompt Mode:");
+            color.WriteMuted("  Manual Prompt mode renders Markdown prompts locally without calling a remote model API.");
+            foreach (var rec in ModelCatalogService.GetRecommendations(AiProviderType.GoogleGemini))
+            {
+                output.WriteLine($"{rec.ModelId}\t{rec.DisplayName}\t{rec.Reason}");
             }
 
             return 0;
@@ -1049,6 +1752,38 @@ public static class Program
                 output.WriteLine("  backlog config --provider copilot-sdk --theme uv --log-level debug --log-format json");
                 return;
 
+            case "keys":
+                color.WriteHeader("Manage AI Provider API Keys");
+                color.WriteMuted("USAGE: backlog keys [status | set | validate | verify | clear] [ARGS] [OPTIONS]");
+                output.WriteLine();
+                output.WriteLine("ACTIONS:");
+                output.WriteLine("  status | list            Display masked (****last4) readiness across all 5 AI providers");
+                output.WriteLine("  set <provider>           Securely prompt (* masked) or inject key into runtime/OS env");
+                output.WriteLine("  validate [<provider>|all] Check key syntax, placeholders, & cross-provider mismatch (offline)");
+                output.WriteLine("  verify [<provider>|all]  Run format check + live authentication verification against provider");
+                output.WriteLine("  clear <provider|all>     Remove provider API key from active session (and optional OS User env)");
+                output.WriteLine();
+                output.WriteLine("PROVIDERS:");
+                output.WriteLine("  gemini | openai | azure | claude | copilot-sdk");
+                output.WriteLine();
+                output.WriteLine("OPTIONS:");
+                output.WriteLine("  --api-key <key>          Supply key non-interactively (never written to settings.json)");
+                output.WriteLine("  --stdin                  Read API key securely from standard input");
+                output.WriteLine("  --scope <session|user|all> Storage scope (default: session; 'user' persists on Windows; 'all' for clear)");
+                output.WriteLine("  --verify                 Execute live API authentication check before saving/confirming");
+                output.WriteLine("  --offline                Skip live API verification (format validation only)");
+                output.WriteLine("  --gateway-url <url>      Custom OpenAI Gateway or Azure OpenAI endpoint URL");
+                output.WriteLine("  --json                   Emit masked key readiness as JSON (never includes plaintext)");
+                output.WriteLine();
+                output.WriteLine("EXAMPLES:");
+                output.WriteLine("  backlog keys status");
+                output.WriteLine("  backlog keys set gemini --verify");
+                output.WriteLine("  backlog keys set openai --api-key sk-proj-... --scope user");
+                output.WriteLine("  backlog keys validate all");
+                output.WriteLine("  backlog keys verify claude");
+                output.WriteLine("  backlog keys clear openai --scope all");
+                return;
+
             case "doctor":
                 color.WriteHeader("Workspace & AI Diagnostics");
                 color.WriteMuted("USAGE: backlog status [OPTIONS]");
@@ -1067,9 +1802,9 @@ public static class Program
 
             case "models":
                 color.WriteHeader("List Supported AI Models");
-                color.WriteMuted("USAGE: backlog models [--provider <gemini|copilot-sdk|openai>]");
+                color.WriteMuted("USAGE: backlog models [--provider <gemini|copilot-sdk|openai|azure|claude>]");
                 output.WriteLine();
-                output.WriteLine("Lists models available to your active provider (Google Gemini, GitHub Copilot SDK, or OpenAI Gateway).");
+                output.WriteLine("Lists models available to your active provider (Google Gemini, GitHub Copilot SDK, OpenAI Gateway, Azure OpenAI, or Anthropic Claude).");
                 return;
 
             case "preview":
@@ -1101,6 +1836,7 @@ public static class Program
         output.WriteLine("  draft \"<Goal or Title>\"  Draft a Type01 User Story and/or Type02 Schedule Item (alias: add)");
         output.WriteLine("  preview [<file>|latest]  Preview a saved ./out/*.md file in one colored table (alias: view)");
         output.WriteLine("  status                   Show WSL2/Windows paths, queued files, & AI readiness table (alias: doctor)");
+        output.WriteLine("  keys [status|set|verify|clear] Manage & validate AI provider API keys securely (masked, never in settings.json)");
         output.WriteLine("  config                   Configure persisted settings (--json, --in, --out, --provider, --gateway-url, --log-level, --theme)");
         output.WriteLine("  models                   List available models for the active AI provider");
         output.WriteLine("  menu | tui               Launch interactive Gemini Agy REPL/TUI (default when no args given)");
@@ -1109,7 +1845,7 @@ public static class Program
         output.WriteLine("INTERACTIVE REPL (run with zero arguments):");
         output.WriteLine("  Starts from [1] Backlog Assisted Orchestrator (all-in-one: Draft, Process, Preview/Refine, Copy, Settings, & Status),");
         output.WriteLine("  supporting [0-4], quick shortcuts [w/g/d/p/v/s/c/?/q], /slash commands (/wizard, /generate, /draft, /process,");
-        output.WriteLine("  /preview, /copy, /verbosity, /log-level, /log-format, /settings, /status, /config, /provider, /models, /theme, /json, /live, /help, /exit),");
+        output.WriteLine("  /preview, /copy, /verbosity, /log-level, /log-format, /settings, /keys, /status, /config, /provider, /models, /theme, /json, /live, /help, /exit),");
         output.WriteLine("  universal submenu [b]ack/[q]uit navigation, theme-matched option highlights, and @filename context mentions.");
         output.WriteLine();
         output.WriteLine("AI PROVIDERS (--provider):");
@@ -1137,6 +1873,7 @@ public static class Program
         output.WriteLine();
         output.WriteLine("EXAMPLES:");
         output.WriteLine("  backlog                                              # Launch Gemini/Agy interactive REPL");
+        output.WriteLine("  backlog keys set gemini --verify                     # Securely enter & verify Gemini API key");
         output.WriteLine("  backlog process all --dry-run --log-level debug      # Preview all ./in files with stderr diagnostics");
         output.WriteLine("  backlog draft \"OAuth2 PKCE Login\" -t 01 --preview    # Quick-draft without disk write");
         output.WriteLine("  backlog draft \"OAuth2 PKCE\" --provider openai --gateway-url https://api.openai.com/v1");
@@ -1200,6 +1937,7 @@ public static class Program
         "draft" or "add" => "draft",
         "preview" or "view" or "show" => "preview",
         "config" => "config",
+        "keys" or "key" => "keys",
         "models" => "models",
         "doctor" or "status" => "doctor",
         "menu" or "tui" => "menu",

@@ -324,4 +324,38 @@ public sealed class CliArgumentParserTests
         Assert.Equal("http://localhost:11434/v1", aliases.OpenAiBaseUrl);
         Assert.Equal("chat", aliases.OpenAiWireApi);
     }
+
+    [Theory]
+    [InlineData(new object[] { new string[] { "keys" } })]
+    [InlineData(new object[] { new string[] { "keys", "status" } })]
+    [InlineData(new object[] { new string[] { "keys", "status", "--json" } })]
+    [InlineData(new object[] { new string[] { "keys", "set", "gemini", "--scope", "session" } })]
+    [InlineData(new object[] { new string[] { "keys", "set", "openai", "--scope", "user", "--verify", "--api-key", "sk-proj-Test1234567890" } })]
+    [InlineData(new object[] { new string[] { "keys", "validate", "claude", "--api-key", "sk-ant-Test1234567890" } })]
+    [InlineData(new object[] { new string[] { "keys", "verify", "azure", "--gateway-url", "https://contoso.openai.azure.com" } })]
+    [InlineData(new object[] { new string[] { "keys", "clear", "all", "--scope", "all" } })]
+    public void ParseArgs_WithKeysSubcommand_NeverLaunchesInteractiveMenu(string[] args)
+    {
+        var parsed = Program.ParseArgs(args);
+
+        Assert.Equal("keys", parsed.Subcommand);
+        Assert.False(Program.ShouldLaunchMenu(args, parsed));
+    }
+
+    [Fact]
+    public void ParseArgs_KeysSetWithScopeVerifyAndGatewayUrl_PreservesApiKeyAndGatewayUrl()
+    {
+        var parsed = Program.ParseArgs([
+            "keys", "set", "openai",
+            "--api-key", "gw-token-1234567890",
+            "--gateway-url", "https://proxy.corp.local/v1",
+            "--scope", "user",
+            "--verify"
+        ]);
+
+        Assert.Equal("keys", parsed.Subcommand);
+        Assert.Equal("gw-token-1234567890", parsed.ApiKey);
+        Assert.Equal("https://proxy.corp.local/v1", parsed.OpenAiBaseUrl);
+        Assert.False(Program.ShouldLaunchMenu(["keys", "set", "openai", "--verify"], parsed));
+    }
 }

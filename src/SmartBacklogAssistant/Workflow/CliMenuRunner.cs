@@ -27,6 +27,7 @@ public sealed class CliMenuRunner
         ProviderSelector,
         ModelSelector,
         LogLevelSelector,
+        ApiKeyManager,
         PreviewOutcome,
         Exit
     }
@@ -42,12 +43,15 @@ public sealed class CliMenuRunner
     private readonly StderrLoggerFactory? _loggerFactory;
     private readonly ILogger<CliMenuRunner> _logger;
     private readonly Func<string, string?> _environmentReader;
+    private readonly ApiKeyManagementService _apiKeyService;
+    private readonly SecretRedactor _secretRedactor;
     private readonly RawDataCollector _collector;
     private IReadOnlyList<string> _lastMarkdownDocuments = [];
     private string? _lastSupplementalUserStory;
     private string? _lastSupplementalDescription;
     private MenuState _subMenuReturnState = MenuState.Main;
     private MenuState _createBacklogReturnState = MenuState.Main;
+    private MenuState _apiKeyManagerReturnState = MenuState.Settings;
     private bool _previewReturnToOrchestrator;
     private string _lastSelectedMainKey = "1";
     private string _lastSelectedOrchestratorKey = "1";
@@ -65,7 +69,9 @@ public sealed class CliMenuRunner
         WorkspaceDiagnosticService? diagnosticService = null,
         IClipboardService? clipboardService = null,
         StderrLoggerFactory? loggerFactory = null,
-        Func<string, string?>? environmentReader = null)
+        Func<string, string?>? environmentReader = null,
+        ApiKeyManagementService? apiKeyService = null,
+        SecretRedactor? secretRedactor = null)
     {
         _workflow = workflow ?? throw new ArgumentNullException(nameof(workflow));
         _workspaceService = workspaceService ?? new WorkspacePathService();
@@ -76,7 +82,28 @@ public sealed class CliMenuRunner
         _clipboardService = clipboardService ?? new OsClipboardService();
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<CliMenuRunner>() ?? NullLogger<CliMenuRunner>.Instance;
-        _environmentReader = environmentReader ?? Environment.GetEnvironmentVariable;
+        _secretRedactor = secretRedactor ?? new SecretRedactor();
+        if (apiKeyService is not null)
+        {
+            _apiKeyService = apiKeyService;
+            _environmentReader = environmentReader ?? apiKeyService.EnvironmentStore.Read;
+        }
+        else
+        {
+            var effectiveExternalReader = environmentReader == Environment.GetEnvironmentVariable
+                ? null
+                : environmentReader;
+            var fallbackStore = new SessionEnvironmentStore(externalReader: effectiveExternalReader);
+            _apiKeyService = new ApiKeyManagementService(
+                fallbackStore,
+                geminiApiClient: null,
+                openAiGatewayClient: _workflow.ProviderOrchestrator.OpenAiGateway,
+                copilotGateway: _workflow.ProviderOrchestrator.CopilotGateway,
+                secretRedactor: _secretRedactor,
+                loggerFactory: _loggerFactory);
+            _environmentReader = fallbackStore.Read;
+        }
+
         _collector = new RawDataCollector(loggerFactory?.CreateLogger<RawDataCollector>());
         _diagnosticService = diagnosticService ?? new WorkspaceDiagnosticService(
             _workspaceService,
@@ -171,6 +198,7 @@ public sealed class CliMenuRunner
                 MenuState.ProviderSelector => ShowProviderMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.ModelSelector => ShowModelMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
                 MenuState.LogLevelSelector => ShowLogLevelMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, color),
+                MenuState.ApiKeyManager => ShowApiKeyManagerMenu(baseWorkspace, ref sessionOptions, ref currentSettings, input, output, color, _apiKeyManagerReturnState),
                 MenuState.PreviewOutcome => ShowPreviewOutcomeMenu(workspace, ref sessionOptions, ref currentSettings, baseWorkspace, input, output, color, _subMenuReturnState, _previewReturnToOrchestrator),
                 _ => MenuState.Exit
             };
@@ -610,6 +638,7 @@ public sealed class CliMenuRunner
     {
         MenuState.BacklogOrchestrator => "Back to Backlog Assisted Orchestrator",
         MenuState.CreateBacklog => "Back to Create / Generate Backlog",
+        MenuState.Settings => "Back to Workspace & Settings",
         _ => "Back to Main Menu"
     };
 
@@ -725,15 +754,17 @@ public sealed class CliMenuRunner
 
                     var previousProvider = currentSettings.PreferredProvider ?? AiProviderType.GoogleGemini;
                     var resolved = _orchestrator.ResolveProvider(args[0]);
+                    var switchedProvider = resolved != previousProvider;
                     currentSettings = currentSettings with
                     {
                         PreferredProvider = resolved,
-                        ModelName = resolved != previousProvider ? null : currentSettings.ModelName
+                        ModelName = switchedProvider ? null : currentSettings.ModelName
                     };
                     sessionOptions = sessionOptions with
                     {
                         ProviderInput = RuntimeEnvironmentService.FormatProviderCode(resolved),
-                        ModelName = currentSettings.ModelName
+                        ModelName = currentSettings.ModelName,
+                        ApiKey = switchedProvider ? null : sessionOptions.ApiKey
                     };
                     var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
                     color.WriteSuccess($"Active AI Provider set to '{RuntimeEnvironmentService.FormatProviderCode(resolved)}'. Saved settings to '{savedPath}'.");
@@ -918,6 +949,17 @@ public sealed class CliMenuRunner
 
                 case "/copy":
                     return ExecuteInlineCopyCommand(args, input, color, returnState: returnState);
+
+                case "/keys" or "/key" or "/api-keys" or "/apikeys":
+                {
+                    if (args.Length == 0)
+                    {
+                        _apiKeyManagerReturnState = returnState;
+                        return MenuState.ApiKeyManager;
+                    }
+
+                    return ExecuteInlineKeysCommand(args, ref sessionOptions, currentSettings, input, color, returnState);
+                }
 
                 default:
                     color.WriteWarning($"  [!] Unknown slash command '{command}'. Type /help for available commands.");
@@ -2137,6 +2179,14 @@ public sealed class CliMenuRunner
 
         var activeLogging = ResolveActiveLogging(sessionOptions, currentSettings);
         var logLevelBadge = $"{CliLogLevelResolver.FormatLogLevelDisplay(activeLogging.Level)} • {CliLogLevelResolver.FormatLogFormatCode(activeLogging.Format)}";
+        var keyStatuses = _apiKeyService.GetAllProviderStatuses(
+            sessionOptions.OpenAiBaseUrl,
+            currentSettings.OpenAiBaseUrl,
+            sessionOptions.OpenAiWireApi,
+            currentSettings.OpenAiWireApi);
+        var configuredKeyCount = keyStatuses.Count(s => s.IsConfigured);
+        var (keyBadgeFg, keyBadgeBg) = ConsoleColorWriter.GetToggleBadgeColors(configuredKeyCount > 0);
+        var keyBadgeText = $"{configuredKeyCount}/{keyStatuses.Count} set";
 
         var options = new List<HighlightedMenuOption>
         {
@@ -2149,6 +2199,7 @@ public sealed class CliMenuRunner
             new("7", "Runtime & AI Diagnostics", null, null, null, "Windows/WSL paths, env vars, & status table"),
             new("8", "View settings.json", null, null, null, "Show persisted JSON configuration"),
             new("9", "Select Log Level", logLevelBadge, valueBadgeFg, valueBadgeBg, "Trace..None (Quiet) & stderr text/json (/log-level)", IsSelectedValue: true),
+            new("K", "Manage AI Provider API Keys", keyBadgeText, keyBadgeFg, keyBadgeBg, "Masked input, format/live check, & clear (/keys)", IsSelectedValue: configuredKeyCount > 0),
             new("0", BackToLabel(returnState))
         };
 
@@ -2157,7 +2208,7 @@ public sealed class CliMenuRunner
         var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
             options,
             initialIndex,
-            "Select option (0-9, ↑/↓, b=back, q=quit): ",
+            "Select option (0-9, K=keys, ↑/↓, b=back, q=quit): ",
             input,
             color);
         if (choice is null)
@@ -2186,6 +2237,13 @@ public sealed class CliMenuRunner
         {
             _lastSelectedSettingsKey = "9";
             return MenuState.LogLevelSelector;
+        }
+
+        if (normalized is "k" or "key" or "keys" or "api-key" or "api-keys" or "apikey" or "apikeys")
+        {
+            _lastSelectedSettingsKey = "K";
+            _apiKeyManagerReturnState = MenuState.Settings;
+            return MenuState.ApiKeyManager;
         }
 
         if (normalized is "1" or "2" or "3" or "4" or "5" or "6" or "7" or "8" or "9")
@@ -2248,7 +2306,1166 @@ public sealed class CliMenuRunner
             case "9":
                 return MenuState.LogLevelSelector;
             default:
-                return WarnAndStay(color, choice, "0-9, b=back, or q=quit", MenuState.Settings);
+                return WarnAndStay(color, choice, "0-9, K=keys, b=back, or q=quit", MenuState.Settings);
+        }
+    }
+
+    private MenuState ShowApiKeyManagerMenu(
+        WorkspaceDirectories baseWorkspace,
+        ref WorkflowOptions sessionOptions,
+        ref CliSettings currentSettings,
+        TextReader input,
+        TextWriter output,
+        ConsoleColorWriter color,
+        MenuState returnState = MenuState.Settings)
+    {
+        color.WriteLine();
+        color.WriteHeader("=== AI Provider API Key Manager ===");
+        color.WriteMuted("  Secrets stay in runtime session or optional OS User env (NEVER written to settings.json or stderr logs).");
+        color.WriteMuted(_apiKeyService.EnvironmentStore.IsWindowsHost
+            ? "  Scopes: Active Runtime Session (default) or Active Session + OS User Environment."
+            : "  Scopes: Active Runtime Session (default); OS User registry persistence is Windows-only (POSIX shows export guidance).");
+        color.WriteLine();
+
+        var statuses = _apiKeyService.GetAllProviderStatuses(
+            sessionOptions.OpenAiBaseUrl,
+            currentSettings.OpenAiBaseUrl,
+            sessionOptions.OpenAiWireApi,
+            currentSettings.OpenAiWireApi);
+        var activeProvider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
+        var configuredCount = statuses.Count(s => s.IsConfigured);
+
+        var options = new List<HighlightedMenuOption>(statuses.Count + 4);
+        for (var i = 0; i < statuses.Count; i++)
+        {
+            var status = statuses[i];
+            var keyNum = $"{i + 1}";
+            var (badgeFg, badgeBg) = ConsoleColorWriter.GetToggleBadgeColors(status.IsConfigured);
+            var badgeText = status.IsConfigured
+                ? $"{status.MaskedKey} • {status.ScopeSummary}"
+                : "not set";
+            var label = status.Metadata.Provider == activeProvider
+                ? $"{status.Metadata.DisplayName} [ACTIVE]"
+                : status.Metadata.DisplayName;
+            options.Add(new HighlightedMenuOption(
+                keyNum,
+                label,
+                badgeText,
+                badgeFg,
+                badgeBg,
+                status.Detail,
+                IsSelectedValue: status.IsConfigured));
+        }
+
+        var (verifyFg, verifyBg) = ConsoleColorWriter.GetToggleBadgeColors(configuredCount > 0);
+        options.Add(new HighlightedMenuOption(
+            "V",
+            "Verify All Configured Keys (Live)",
+            configuredCount > 0 ? $"{configuredCount} ready" : "none set",
+            verifyFg,
+            verifyBg,
+            "Run live endpoint authentication check on all configured providers",
+            IsSelectedValue: configuredCount > 0));
+
+        var azureEndpoint = _apiKeyService.EnvironmentStore.Read(OpenAiGatewayClient.AzureEndpointEnvVar);
+        var hasAzureEndpoint = !string.IsNullOrWhiteSpace(azureEndpoint);
+        var (azureFg, azureBg) = ConsoleColorWriter.GetToggleBadgeColors(hasAzureEndpoint);
+        options.Add(new HighlightedMenuOption(
+            "E",
+            "Configure Azure OpenAI Endpoint",
+            hasAzureEndpoint ? "configured" : "not set",
+            azureFg,
+            azureBg,
+            hasAzureEndpoint
+                ? $"{OpenAiGatewayClient.AzureEndpointEnvVar} = {azureEndpoint!.Trim()}"
+                : $"Set {OpenAiGatewayClient.AzureEndpointEnvVar} for Azure OpenAI / Foundry",
+            IsSelectedValue: hasAzureEndpoint));
+
+        options.Add(new HighlightedMenuOption(
+            "C",
+            "Clear an API Key",
+            configuredCount > 0 ? $"{configuredCount} configured" : null,
+            configuredCount > 0 ? ConsoleColor.Yellow : null,
+            null,
+            "Remove a provider key from active session (and optional OS User env)"));
+
+        options.Add(new HighlightedMenuOption("0", BackToLabel(returnState)));
+
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            0,
+            "Select provider/action (1-5, V=verify, E=azure-endpoint, C=clear, 0/b=back, q=quit): ",
+            input,
+            color);
+        if (choice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var normalized = choice.Trim().ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back")
+        {
+            return returnState;
+        }
+
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
+        }
+
+        if (normalized is "v" or "verify")
+        {
+            VerifyAllConfiguredKeysInteractive(sessionOptions, currentSettings, color);
+            return MenuState.ApiKeyManager;
+        }
+
+        if (normalized is "e" or "endpoint" or "azure-endpoint")
+        {
+            return PromptScopedAzureEndpointInteractive(input, color);
+        }
+
+        if (normalized is "c" or "clear" or "delete" or "remove")
+        {
+            return ClearProviderKeyInteractive(ref sessionOptions, currentSettings, input, color);
+        }
+
+        if (ApiKeyManagementService.TryResolveKeyProvider(normalized, out var selectedProvider))
+        {
+            return ManageSingleProviderApiKeyInteractive(
+                selectedProvider,
+                ref sessionOptions,
+                currentSettings,
+                input,
+                output,
+                color);
+        }
+
+        return WarnAndStay(
+            color,
+            choice,
+            "1-5, V=verify, E=azure-endpoint, C=clear, 0/b=back, or q=quit",
+            MenuState.ApiKeyManager);
+    }
+
+    private MenuState ManageSingleProviderApiKeyInteractive(
+        AiProviderType provider,
+        ref WorkflowOptions sessionOptions,
+        CliSettings currentSettings,
+        TextReader input,
+        TextWriter output,
+        ConsoleColorWriter color)
+    {
+        var status = _apiKeyService.GetProviderStatus(
+            provider,
+            sessionOptions.OpenAiBaseUrl,
+            currentSettings.OpenAiBaseUrl,
+            sessionOptions.OpenAiWireApi,
+            currentSettings.OpenAiWireApi);
+
+        if (!status.IsConfigured)
+        {
+            return PromptAndSaveProviderKeyInteractive(
+                provider,
+                ref sessionOptions,
+                currentSettings,
+                input,
+                output,
+                color);
+        }
+
+        color.WriteLine();
+        color.WriteHeader($"=== {status.Metadata.DisplayName} ({status.Metadata.Code}) API Key ===");
+        color.WriteMuted($"  Status : Configured ({status.ActiveEnvVar} [{status.MaskedKey}] • {status.ScopeSummary})");
+        color.WriteMuted($"  Detail : {status.Detail}");
+        if (!string.IsNullOrWhiteSpace(status.CompanionConfigNote))
+        {
+            color.WriteWarning($"  Note   : {status.CompanionConfigNote}");
+        }
+
+        color.WriteLine();
+        var subOptions = new List<HighlightedMenuOption>
+        {
+            new("1", "Update / Replace API Key", status.MaskedKey, ConsoleColor.Black, ConsoleColor.Cyan, "Enter a new masked API key with offline format validation", IsSelectedValue: true),
+            new("2", "Verify API Key Live", null, null, null, $"Test configured {status.Metadata.PrimaryEnvVar} against provider API endpoint"),
+            new("3", "Clear API Key", null, null, null, $"Remove {status.Metadata.PrimaryEnvVar} from active session (and optional OS User env)")
+        };
+
+        if (provider == AiProviderType.AzureOpenAi)
+        {
+            subOptions.Add(new HighlightedMenuOption(
+                "4",
+                "Configure AZURE_OPENAI_ENDPOINT",
+                null,
+                null,
+                null,
+                "Set or clear Azure OpenAI / Foundry endpoint URL"));
+        }
+
+        subOptions.Add(new HighlightedMenuOption("0", "Back to AI Provider API Key Manager"));
+
+        var maxOption = provider == AiProviderType.AzureOpenAi ? "0-4" : "0-3";
+        var subChoice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            subOptions,
+            0,
+            $"Select action ({maxOption}, b=back, q=quit): ",
+            input,
+            color);
+        if (subChoice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var normalized = subChoice.Trim().ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back")
+        {
+            return MenuState.ApiKeyManager;
+        }
+
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
+        }
+
+        switch (normalized)
+        {
+            case "1" or "set" or "update" or "replace":
+                return PromptAndSaveProviderKeyInteractive(
+                    provider,
+                    ref sessionOptions,
+                    currentSettings,
+                    input,
+                    output,
+                    color);
+            case "2" or "v" or "verify":
+            {
+                var verifyBaseUrl = sessionOptions.OpenAiBaseUrl;
+                var verifyResult = TerminalUx.RunWithSpinner(
+                    $"Verifying {status.Metadata.DisplayName} key [{status.MaskedKey}]...",
+                    () => _apiKeyService.VerifyKeyLive(
+                        provider,
+                        rawKey: null,
+                        explicitOpenAiBaseUrl: verifyBaseUrl,
+                        persistedOpenAiBaseUrl: currentSettings.OpenAiBaseUrl),
+                    color);
+                if (verifyResult.Succeeded)
+                {
+                    color.WriteSuccess($"  ✓ {verifyResult.Summary}");
+                }
+                else
+                {
+                    color.WriteWarning($"  [!] {verifyResult.Summary}");
+                    if (!string.IsNullOrWhiteSpace(verifyResult.ErrorMessage))
+                    {
+                        color.WriteMuted($"      {verifyResult.ErrorMessage}");
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(verifyResult.ActionableHint))
+                    {
+                        color.WriteMuted($"  Hint: {verifyResult.ActionableHint}");
+                    }
+                }
+
+                return MenuState.ApiKeyManager;
+            }
+            case "3" or "c" or "clear" or "delete":
+            {
+                var scope = PromptClearScopeInteractive(status.Metadata.DisplayName, input, color, out var shouldExit);
+                if (shouldExit)
+                {
+                    return MenuState.Exit;
+                }
+
+                if (scope is null)
+                {
+                    color.WriteMuted("  Clear cancelled.");
+                    return MenuState.ApiKeyManager;
+                }
+
+                var clearResult = _apiKeyService.ClearKey(provider, scope.Value);
+                sessionOptions = sessionOptions with { ApiKey = null };
+                color.WriteSuccess($"  ✓ {clearResult.Message}");
+                if (!string.IsNullOrWhiteSpace(clearResult.ScopeGuidanceNote))
+                {
+                    color.WriteMuted($"  Note: {clearResult.ScopeGuidanceNote}");
+                }
+
+                return MenuState.ApiKeyManager;
+            }
+            case "4" or "e" or "endpoint" when provider == AiProviderType.AzureOpenAi:
+                return PromptScopedAzureEndpointInteractive(input, color);
+            default:
+                return WarnAndStay(color, subChoice, $"{maxOption}, b=back, or q=quit", MenuState.ApiKeyManager);
+        }
+    }
+
+    private MenuState PromptAndSaveProviderKeyInteractive(
+        AiProviderType provider,
+        ref WorkflowOptions sessionOptions,
+        CliSettings currentSettings,
+        TextReader input,
+        TextWriter output,
+        ConsoleColorWriter color,
+        bool? forcedVerify = null,
+        ApiKeyStorageScope? explicitScope = null)
+    {
+        var metadata = ApiKeyManagementService.GetMetadata(provider);
+        color.WriteLine();
+        color.WriteHeader($"--- Configure {metadata.DisplayName} ({metadata.Code}) API Key ---");
+        color.WriteMuted($"  Primary Env Var : {metadata.PrimaryEnvVar}");
+        if (metadata.AliasEnvVars.Count > 0)
+        {
+            color.WriteMuted($"  Alias Env Vars  : {string.Join(", ", metadata.AliasEnvVars)}");
+        }
+
+        color.WriteMuted($"  Expected Format : {metadata.ExpectedFormatHint}");
+        color.WriteMuted($"  Key Portal      : {metadata.KeyPortalUrl}");
+        if (provider == AiProviderType.AzureOpenAi)
+        {
+            var azureEndpoint = _apiKeyService.EnvironmentStore.Read(OpenAiGatewayClient.AzureEndpointEnvVar);
+            color.WriteMuted($"  Azure Endpoint  : {(string.IsNullOrWhiteSpace(azureEndpoint) ? $"not set ({OpenAiGatewayClient.AzureEndpointEnvVar})" : azureEndpoint.Trim())}");
+        }
+
+        while (true)
+        {
+            color.WriteColored($"Enter {metadata.PrimaryEnvVar} (input masked, Enter/b=cancel): ", ConsoleColor.Yellow);
+            var rawKey = _secretProvider.ReadMaskedInput(input, output);
+            if (rawKey is null)
+            {
+                return MenuState.Exit;
+            }
+
+            var trimmed = rawKey.Trim();
+            if (string.IsNullOrEmpty(trimmed) ||
+                trimmed.ToLowerInvariant() is "0" or "b" or "back" or "/back" or "cancel")
+            {
+                color.WriteMuted("  API key entry cancelled.");
+                return MenuState.ApiKeyManager;
+            }
+
+            if (trimmed.ToLowerInvariant() is "q" or "quit" or "/exit" or "/quit")
+            {
+                return MenuState.Exit;
+            }
+
+            var formatResult = _apiKeyService.ValidateKeyFormat(
+                provider,
+                rawKey,
+                sessionOptions.OpenAiBaseUrl,
+                currentSettings.OpenAiBaseUrl);
+
+            if (!formatResult.IsValid)
+            {
+                color.WriteWarning($"  [!] {formatResult.ErrorMessage}");
+                if (!string.IsNullOrWhiteSpace(formatResult.ActionableHint))
+                {
+                    color.WriteMuted($"  Hint: {formatResult.ActionableHint}");
+                }
+
+                continue;
+            }
+
+            color.WriteSuccess($"  ✓ Format accepted [{formatResult.MaskedKey}] (never saved to settings.json or logs).");
+
+            var shouldVerify = forcedVerify;
+            if (!shouldVerify.HasValue)
+            {
+                color.WriteColored("Verify key live against provider endpoint now? [y/N]: ", ConsoleColor.Yellow);
+                var verifyAnswer = input.ReadLine();
+                if (verifyAnswer is null)
+                {
+                    return MenuState.Exit;
+                }
+
+                var normalizedVerify = verifyAnswer.Trim().ToLowerInvariant();
+                if (normalizedVerify is "q" or "quit" or "/exit" or "/quit")
+                {
+                    return MenuState.Exit;
+                }
+
+                shouldVerify = normalizedVerify is "y" or "yes";
+            }
+
+            if (shouldVerify == true)
+            {
+                if (provider == AiProviderType.AzureOpenAi &&
+                    string.IsNullOrWhiteSpace(_apiKeyService.EnvironmentStore.Read(OpenAiGatewayClient.AzureEndpointEnvVar)))
+                {
+                    color.WriteWarning($"  [i] {OpenAiGatewayClient.AzureEndpointEnvVar} is not configured yet.");
+                    color.WriteColored("Enter Azure OpenAI / Foundry endpoint URL now (https://..., Enter to skip): ", ConsoleColor.Yellow);
+                    var endpointAnswer = input.ReadLine();
+                    if (endpointAnswer is null)
+                    {
+                        return MenuState.Exit;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(endpointAnswer))
+                    {
+                        var endpointResult = _apiKeyService.SetAzureEndpoint(
+                            endpointAnswer,
+                            explicitScope ?? ApiKeyStorageScope.Session);
+                        if (endpointResult.Succeeded)
+                        {
+                            color.WriteSuccess($"  ✓ {endpointResult.Message}");
+                        }
+                        else
+                        {
+                            color.WriteWarning($"  [!] {endpointResult.Message}");
+                        }
+                    }
+                }
+
+                var verifyBaseUrl = sessionOptions.OpenAiBaseUrl;
+                var verifyResult = TerminalUx.RunWithSpinner(
+                    $"Verifying {metadata.DisplayName} key [{formatResult.MaskedKey}]...",
+                    () => _apiKeyService.VerifyKeyLive(
+                        provider,
+                        formatResult.NormalizedKey,
+                        verifyBaseUrl,
+                        currentSettings.OpenAiBaseUrl),
+                    color);
+
+                if (verifyResult.Succeeded)
+                {
+                    color.WriteSuccess($"  ✓ {verifyResult.Summary}");
+                }
+                else
+                {
+                    color.WriteWarning($"  [!] {verifyResult.Summary}");
+                    if (!string.IsNullOrWhiteSpace(verifyResult.ErrorMessage))
+                    {
+                        color.WriteMuted($"      {verifyResult.ErrorMessage}");
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(verifyResult.ActionableHint))
+                    {
+                        color.WriteMuted($"  Hint: {verifyResult.ActionableHint}");
+                    }
+
+                    color.WriteColored("Save this key anyway for offline/later use, or re-enter? ([s] Save / [r] Re-enter [default] / [c] Cancel): ", ConsoleColor.Yellow);
+                    var failAction = input.ReadLine();
+                    if (failAction is null)
+                    {
+                        return MenuState.Exit;
+                    }
+
+                    var normalizedFailAction = failAction.Trim().ToLowerInvariant();
+                    if (normalizedFailAction is "q" or "quit" or "/exit" or "/quit")
+                    {
+                        return MenuState.Exit;
+                    }
+
+                    if (normalizedFailAction is "c" or "cancel" or "0" or "b" or "back")
+                    {
+                        color.WriteMuted("  API key entry cancelled.");
+                        return MenuState.ApiKeyManager;
+                    }
+
+                    if (normalizedFailAction is not ("s" or "save"))
+                    {
+                        continue;
+                    }
+                }
+            }
+
+            var chosenScope = explicitScope;
+            if (!chosenScope.HasValue)
+            {
+                var scopeChoice = PromptSetScopeInteractive(metadata.PrimaryEnvVar, input, color, out var shouldExit);
+                if (shouldExit)
+                {
+                    return MenuState.Exit;
+                }
+
+                if (scopeChoice is null)
+                {
+                    color.WriteMuted("  API key entry cancelled.");
+                    return MenuState.ApiKeyManager;
+                }
+
+                chosenScope = scopeChoice.Value;
+            }
+
+            var saveResult = _apiKeyService.SetKey(
+                provider,
+                formatResult.NormalizedKey,
+                chosenScope.Value,
+                verifyLive: false,
+                explicitOpenAiBaseUrl: sessionOptions.OpenAiBaseUrl,
+                persistedOpenAiBaseUrl: currentSettings.OpenAiBaseUrl);
+
+            if (!saveResult.Succeeded)
+            {
+                color.WriteWarning($"  [!] {saveResult.Message}");
+                if (!string.IsNullOrWhiteSpace(saveResult.ScopeGuidanceNote))
+                {
+                    color.WriteMuted($"  Hint: {saveResult.ScopeGuidanceNote}");
+                }
+
+                continue;
+            }
+
+            sessionOptions = sessionOptions with { ApiKey = null };
+            color.WriteSuccess($"  ✓ {saveResult.Message}");
+            if (!string.IsNullOrWhiteSpace(saveResult.ScopeGuidanceNote))
+            {
+                color.WriteMuted($"  Note: {saveResult.ScopeGuidanceNote}");
+            }
+
+            return MenuState.ApiKeyManager;
+        }
+    }
+
+    private ApiKeyStorageScope? PromptSetScopeInteractive(
+        string envVarName,
+        TextReader input,
+        ConsoleColorWriter color,
+        out bool shouldExit)
+    {
+        shouldExit = false;
+        color.WriteLine();
+        color.WriteSubHeader("Select API Key Storage Scope:");
+        color.WriteLine("  [1] Active Runtime Session only (default, in-memory process environment)");
+        color.WriteLine(_apiKeyService.EnvironmentStore.IsWindowsHost
+            ? $"  [2] Active Session + OS User Env ({envVarName} stored in Windows User environment; NEVER in settings.json)"
+            : $"  [2] Active Session + POSIX export instruction (OS User registry persistence is Windows-only)");
+        color.WriteColored("Storage scope ([1] Session [default], [2] User, b=cancel): ", ConsoleColor.Yellow);
+
+        var answer = input.ReadLine();
+        if (answer is null)
+        {
+            shouldExit = true;
+            return null;
+        }
+
+        var normalized = answer.Trim().ToLowerInvariant();
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            shouldExit = true;
+            return null;
+        }
+
+        if (normalized is "0" or "b" or "back" or "cancel")
+        {
+            return null;
+        }
+
+        return normalized is "2" or "user" or "os" or "persist" or "persistent" or "all"
+            ? ApiKeyStorageScope.User
+            : ApiKeyStorageScope.Session;
+    }
+
+    private static ApiKeyStorageScope? PromptClearScopeInteractive(
+        string displayName,
+        TextReader input,
+        ConsoleColorWriter color,
+        out bool shouldExit)
+    {
+        shouldExit = false;
+        color.WriteLine();
+        color.WriteSubHeader($"Select Clear Scope for {displayName}:");
+        color.WriteLine("  [1] Active Runtime Session only (default)");
+        color.WriteLine("  [2] Active Session + OS User Env (clear persisted Windows User env if present)");
+        color.WriteColored("Clear scope ([1] Session [default], [2] Session + User, 0/b=cancel): ", ConsoleColor.Yellow);
+
+        var answer = input.ReadLine();
+        if (answer is null)
+        {
+            shouldExit = true;
+            return null;
+        }
+
+        var normalized = answer.Trim().ToLowerInvariant();
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            shouldExit = true;
+            return null;
+        }
+
+        if (normalized is "0" or "b" or "back" or "cancel")
+        {
+            return null;
+        }
+
+        return normalized is "2" or "user" or "all" or "both"
+            ? ApiKeyStorageScope.All
+            : ApiKeyStorageScope.Session;
+    }
+
+    private void VerifyAllConfiguredKeysInteractive(
+        WorkflowOptions sessionOptions,
+        CliSettings currentSettings,
+        ConsoleColorWriter color)
+    {
+        var configured = _apiKeyService.GetAllProviderStatuses(
+                sessionOptions.OpenAiBaseUrl,
+                currentSettings.OpenAiBaseUrl,
+                sessionOptions.OpenAiWireApi,
+                currentSettings.OpenAiWireApi)
+            .Where(s => s.IsConfigured)
+            .ToArray();
+
+        if (configured.Length == 0)
+        {
+            color.WriteWarning("  [i] No AI provider API keys are currently configured to verify.");
+            return;
+        }
+
+        color.WriteLine();
+        color.WriteSubHeader($"--- Verifying {configured.Length} Configured Provider Key(s) ---");
+        foreach (var status in configured)
+        {
+            var verifyResult = TerminalUx.RunWithSpinner(
+                $"Verifying {status.Metadata.DisplayName} [{status.MaskedKey}]...",
+                () => _apiKeyService.VerifyKeyLive(
+                    status.Metadata.Provider,
+                    rawKey: null,
+                    explicitOpenAiBaseUrl: sessionOptions.OpenAiBaseUrl,
+                    persistedOpenAiBaseUrl: currentSettings.OpenAiBaseUrl),
+                color);
+
+            if (verifyResult.Succeeded)
+            {
+                color.WriteSuccess($"  ✓ {verifyResult.Summary}");
+            }
+            else
+            {
+                color.WriteWarning($"  [!] {verifyResult.Summary}");
+                if (!string.IsNullOrWhiteSpace(verifyResult.ErrorMessage))
+                {
+                    color.WriteMuted($"      {verifyResult.ErrorMessage}");
+                }
+
+                if (!string.IsNullOrWhiteSpace(verifyResult.ActionableHint))
+                {
+                    color.WriteMuted($"  Hint: {verifyResult.ActionableHint}");
+                }
+            }
+        }
+    }
+
+    private MenuState ClearProviderKeyInteractive(
+        ref WorkflowOptions sessionOptions,
+        CliSettings currentSettings,
+        TextReader input,
+        ConsoleColorWriter color)
+    {
+        var statuses = _apiKeyService.GetAllProviderStatuses(
+            sessionOptions.OpenAiBaseUrl,
+            currentSettings.OpenAiBaseUrl,
+            sessionOptions.OpenAiWireApi,
+            currentSettings.OpenAiWireApi);
+
+        color.WriteLine();
+        color.WriteSubHeader("--- Clear AI Provider API Key ---");
+        var options = new List<HighlightedMenuOption>(statuses.Count + 2);
+        for (var i = 0; i < statuses.Count; i++)
+        {
+            var status = statuses[i];
+            var (fg, bg) = ConsoleColorWriter.GetToggleBadgeColors(status.IsConfigured);
+            options.Add(new HighlightedMenuOption(
+                $"{i + 1}",
+                status.Metadata.DisplayName,
+                status.IsConfigured ? status.MaskedKey : "not set",
+                fg,
+                bg,
+                status.Metadata.PrimaryEnvVar,
+                IsSelectedValue: status.IsConfigured));
+        }
+
+        options.Add(new HighlightedMenuOption("A", "Clear ALL Configured Keys", null, null, null, "Remove keys across all AI providers"));
+        options.Add(new HighlightedMenuOption("0", "Cancel"));
+
+        var choice = InteractiveSelector.SelectMenuOptionWithHighlight(
+            options,
+            0,
+            "Select key to clear (1-5, A=all, 0/b=cancel): ",
+            input,
+            color);
+        if (choice is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var normalized = choice.Trim().ToLowerInvariant();
+        if (normalized is "0" or "b" or "back" or "/back" or "cancel")
+        {
+            color.WriteMuted("  Clear cancelled.");
+            return MenuState.ApiKeyManager;
+        }
+
+        if (normalized is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
+        }
+
+        if (normalized is "a" or "all")
+        {
+            var scope = PromptClearScopeInteractive("ALL AI Providers", input, color, out var shouldExitAll);
+            if (shouldExitAll)
+            {
+                return MenuState.Exit;
+            }
+
+            if (scope is null)
+            {
+                color.WriteMuted("  Clear cancelled.");
+                return MenuState.ApiKeyManager;
+            }
+
+            foreach (var provider in ApiKeyManagementService.SupportedProviders)
+            {
+                var cleared = _apiKeyService.ClearKey(provider, scope.Value);
+                color.WriteSuccess($"  ✓ {cleared.Message}");
+                if (!string.IsNullOrWhiteSpace(cleared.ScopeGuidanceNote))
+                {
+                    color.WriteMuted($"    {cleared.ScopeGuidanceNote}");
+                }
+            }
+
+            sessionOptions = sessionOptions with { ApiKey = null };
+            return MenuState.ApiKeyManager;
+        }
+
+        if (ApiKeyManagementService.TryResolveKeyProvider(normalized, out var selectedProvider))
+        {
+            var meta = ApiKeyManagementService.GetMetadata(selectedProvider);
+            var scope = PromptClearScopeInteractive(meta.DisplayName, input, color, out var shouldExit);
+            if (shouldExit)
+            {
+                return MenuState.Exit;
+            }
+
+            if (scope is null)
+            {
+                color.WriteMuted("  Clear cancelled.");
+                return MenuState.ApiKeyManager;
+            }
+
+            var cleared = _apiKeyService.ClearKey(selectedProvider, scope.Value);
+            sessionOptions = sessionOptions with { ApiKey = null };
+            color.WriteSuccess($"  ✓ {cleared.Message}");
+            if (!string.IsNullOrWhiteSpace(cleared.ScopeGuidanceNote))
+            {
+                color.WriteMuted($"  Note: {cleared.ScopeGuidanceNote}");
+            }
+
+            return MenuState.ApiKeyManager;
+        }
+
+        return WarnAndStay(color, choice, "1-5, A=all, or 0/b=cancel", MenuState.ApiKeyManager);
+    }
+
+    private MenuState PromptScopedAzureEndpointInteractive(TextReader input, ConsoleColorWriter color)
+    {
+        var currentEndpoint = _apiKeyService.EnvironmentStore.Read(OpenAiGatewayClient.AzureEndpointEnvVar);
+        color.WriteLine();
+        color.WriteSubHeader("--- Configure Azure OpenAI / Foundry Endpoint ---");
+        color.WriteMuted($"  Current {OpenAiGatewayClient.AzureEndpointEnvVar}: {(string.IsNullOrWhiteSpace(currentEndpoint) ? "not set" : currentEndpoint.Trim())}");
+        color.WriteColored("Enter endpoint URL (https://..., 'clear' to unset, Enter/b=cancel): ", ConsoleColor.Yellow);
+
+        var raw = input.ReadLine();
+        if (raw is null)
+        {
+            return MenuState.Exit;
+        }
+
+        var trimmed = raw.Trim();
+        if (string.IsNullOrEmpty(trimmed) ||
+            trimmed.ToLowerInvariant() is "0" or "b" or "back" or "/back" or "cancel")
+        {
+            color.WriteMuted("  Azure endpoint unchanged.");
+            return MenuState.ApiKeyManager;
+        }
+
+        if (trimmed.ToLowerInvariant() is "q" or "quit" or "/exit" or "/quit")
+        {
+            return MenuState.Exit;
+        }
+
+        if (trimmed.ToLowerInvariant() is "clear" or "unset" or "none" or "reset")
+        {
+            _apiKeyService.EnvironmentStore.Clear(OpenAiGatewayClient.AzureEndpointEnvVar, ApiKeyStorageScope.All, clearUserTarget: true);
+            color.WriteSuccess($"  ✓ Cleared {OpenAiGatewayClient.AzureEndpointEnvVar}.");
+            return MenuState.ApiKeyManager;
+        }
+
+        var scope = PromptSetScopeInteractive(OpenAiGatewayClient.AzureEndpointEnvVar, input, color, out var shouldExit);
+        if (shouldExit)
+        {
+            return MenuState.Exit;
+        }
+
+        if (scope is null)
+        {
+            color.WriteMuted("  Azure endpoint unchanged.");
+            return MenuState.ApiKeyManager;
+        }
+
+        var result = _apiKeyService.SetAzureEndpoint(trimmed, scope.Value);
+        if (result.Succeeded)
+        {
+            color.WriteSuccess($"  ✓ {result.Message}");
+        }
+        else
+        {
+            color.WriteWarning($"  [!] {result.Message}");
+            if (!string.IsNullOrWhiteSpace(result.ScopeGuidanceNote))
+            {
+                color.WriteMuted($"  Hint: {result.ScopeGuidanceNote}");
+            }
+        }
+
+        return MenuState.ApiKeyManager;
+    }
+
+    private MenuState ExecuteInlineKeysCommand(
+        string[] args,
+        ref WorkflowOptions sessionOptions,
+        CliSettings currentSettings,
+        TextReader input,
+        ConsoleColorWriter color,
+        MenuState returnState)
+    {
+        var action = args[0].Trim().ToLowerInvariant();
+        var scopeToken = GetInlineFlagValue(args, "--scope");
+        var verifyFlag = args.Any(a => a.Equals("--verify", StringComparison.OrdinalIgnoreCase) || a.Equals("--live", StringComparison.OrdinalIgnoreCase));
+        var inlineApiKey = GetInlineFlagValue(args, "--api-key", "-k");
+        var endpointFlag = GetInlineFlagValue(args, "--endpoint", "--gateway-url");
+        var positional = ExtractPositionalTokens(args, "--scope", "--api-key", "-k", "--endpoint", "--gateway-url");
+
+        if (action is "help" or "--help" or "-h")
+        {
+            PrintInlineKeysHelp(color);
+            return returnState;
+        }
+
+        if (action is "status" or "list" or "ls")
+        {
+            WriteProviderKeyStatusTable(sessionOptions, currentSettings, color);
+            return returnState;
+        }
+
+        if (action is "endpoint" or "azure-endpoint")
+        {
+            var rawEndpoint = endpointFlag ?? (positional.Count > 1 ? positional[1] : null);
+            if (string.IsNullOrWhiteSpace(rawEndpoint))
+            {
+                return PromptScopedAzureEndpointInteractive(input, color) == MenuState.Exit
+                    ? MenuState.Exit
+                    : returnState;
+            }
+
+            if (!TryParseInlineKeyScope(scopeToken, ApiKeyStorageScope.Session, out var epScope))
+            {
+                color.WriteWarning($"  [!] Invalid --scope '{scopeToken}'. Use 'session' or 'user'.");
+                return returnState;
+            }
+
+            var epResult = _apiKeyService.SetAzureEndpoint(rawEndpoint, epScope);
+            if (epResult.Succeeded)
+            {
+                color.WriteSuccess($"  ✓ {epResult.Message}");
+            }
+            else
+            {
+                color.WriteWarning($"  [!] {epResult.Message}");
+                if (!string.IsNullOrWhiteSpace(epResult.ScopeGuidanceNote))
+                {
+                    color.WriteMuted($"  Hint: {epResult.ScopeGuidanceNote}");
+                }
+            }
+
+            return returnState;
+        }
+
+        if (action is "set" or "add" or "update")
+        {
+            var providerToken = positional.Count > 1 ? positional[1] : null;
+            if (string.IsNullOrWhiteSpace(providerToken))
+            {
+                color.WriteWarning("  [!] Missing provider. Usage: /keys set <gemini|openai|azure|claude|copilot-sdk> [--verify] [--scope session|user]");
+                return returnState;
+            }
+
+            if (!ApiKeyManagementService.TryResolveKeyProvider(providerToken, out var provider))
+            {
+                color.WriteWarning($"  [!] Unsupported key provider '{providerToken}'. Supported: gemini, openai, azure, claude, copilot-sdk.");
+                return returnState;
+            }
+
+            if (!TryParseInlineKeyScope(scopeToken, ApiKeyStorageScope.Session, out var setScope))
+            {
+                color.WriteWarning($"  [!] Invalid --scope '{scopeToken}'. Use 'session' or 'user'.");
+                return returnState;
+            }
+
+            if (!string.IsNullOrWhiteSpace(endpointFlag) && provider == AiProviderType.AzureOpenAi)
+            {
+                var epResult = _apiKeyService.SetAzureEndpoint(endpointFlag, setScope);
+                if (!epResult.Succeeded)
+                {
+                    color.WriteWarning($"  [!] {epResult.Message}");
+                    return returnState;
+                }
+
+                color.WriteSuccess($"  ✓ {epResult.Message}");
+            }
+
+            var rawKey = inlineApiKey ?? (positional.Count > 2 ? positional[2] : null);
+            if (string.IsNullOrWhiteSpace(rawKey))
+            {
+                var nextState = PromptAndSaveProviderKeyInteractive(
+                    provider,
+                    ref sessionOptions,
+                    currentSettings,
+                    input,
+                    color.InnerWriter,
+                    color,
+                    forcedVerify: verifyFlag ? true : null,
+                    explicitScope: scopeToken is not null ? setScope : null);
+                return nextState == MenuState.Exit ? MenuState.Exit : returnState;
+            }
+
+            var mutation = _apiKeyService.SetKey(
+                provider,
+                rawKey,
+                setScope,
+                verifyLive: verifyFlag,
+                explicitOpenAiBaseUrl: sessionOptions.OpenAiBaseUrl,
+                persistedOpenAiBaseUrl: currentSettings.OpenAiBaseUrl);
+
+            if (!mutation.Succeeded)
+            {
+                color.WriteWarning($"  [!] {mutation.Message}");
+                if (!string.IsNullOrWhiteSpace(mutation.ScopeGuidanceNote))
+                {
+                    color.WriteMuted($"  Hint: {mutation.ScopeGuidanceNote}");
+                }
+
+                return returnState;
+            }
+
+            sessionOptions = sessionOptions with { ApiKey = null };
+            color.WriteSuccess($"  ✓ {mutation.Message}");
+            if (!string.IsNullOrWhiteSpace(mutation.ScopeGuidanceNote))
+            {
+                color.WriteMuted($"  Note: {mutation.ScopeGuidanceNote}");
+            }
+
+            return returnState;
+        }
+
+        if (action is "validate" or "check")
+        {
+            var providerToken = positional.Count > 1 ? positional[1] : null;
+            if (string.IsNullOrWhiteSpace(providerToken))
+            {
+                color.WriteWarning("  [!] Missing provider. Usage: /keys validate <gemini|openai|azure|claude|copilot-sdk> [<key>|--api-key <key>]");
+                return returnState;
+            }
+
+            if (!ApiKeyManagementService.TryResolveKeyProvider(providerToken, out var provider))
+            {
+                color.WriteWarning($"  [!] Unsupported key provider '{providerToken}'. Supported: gemini, openai, azure, claude, copilot-sdk.");
+                return returnState;
+            }
+
+            var keyToCheck = inlineApiKey ?? (positional.Count > 2 ? positional[2] : null);
+            if (string.IsNullOrWhiteSpace(keyToCheck))
+            {
+                var status = _apiKeyService.GetProviderStatus(
+                    provider,
+                    sessionOptions.OpenAiBaseUrl,
+                    currentSettings.OpenAiBaseUrl);
+                keyToCheck = status.ActiveEnvVar is not null ? _apiKeyService.EnvironmentStore.Read(status.ActiveEnvVar) : null;
+            }
+
+            var validation = _apiKeyService.ValidateKeyFormat(
+                provider,
+                keyToCheck,
+                sessionOptions.OpenAiBaseUrl,
+                currentSettings.OpenAiBaseUrl);
+
+            if (validation.IsValid)
+            {
+                color.WriteSuccess($"  ✓ Format valid for {ApiKeyManagementService.GetMetadata(provider).DisplayName} [{validation.MaskedKey}].");
+            }
+            else
+            {
+                color.WriteWarning($"  [!] {validation.ErrorMessage}");
+                if (!string.IsNullOrWhiteSpace(validation.ActionableHint))
+                {
+                    color.WriteMuted($"  Hint: {validation.ActionableHint}");
+                }
+            }
+
+            return returnState;
+        }
+
+        if (action is "verify" or "test")
+        {
+            var providerToken = positional.Count > 1 ? positional[1] : null;
+            if (string.IsNullOrWhiteSpace(providerToken) ||
+                providerToken.Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                VerifyAllConfiguredKeysInteractive(sessionOptions, currentSettings, color);
+                return returnState;
+            }
+
+            if (!ApiKeyManagementService.TryResolveKeyProvider(providerToken, out var provider))
+            {
+                color.WriteWarning($"  [!] Unsupported key provider '{providerToken}'. Supported: gemini, openai, azure, claude, copilot-sdk, or all.");
+                return returnState;
+            }
+
+            var meta = ApiKeyManagementService.GetMetadata(provider);
+            var keyOverride = inlineApiKey ?? (positional.Count > 2 ? positional[2] : null);
+            var verifyBaseUrl = sessionOptions.OpenAiBaseUrl;
+            var verifyResult = TerminalUx.RunWithSpinner(
+                $"Verifying {meta.DisplayName} key...",
+                () => _apiKeyService.VerifyKeyLive(
+                    provider,
+                    rawKey: keyOverride,
+                    explicitOpenAiBaseUrl: verifyBaseUrl,
+                    persistedOpenAiBaseUrl: currentSettings.OpenAiBaseUrl),
+                color);
+            if (verifyResult.Succeeded)
+            {
+                color.WriteSuccess($"  ✓ {verifyResult.Summary}");
+            }
+            else
+            {
+                color.WriteWarning($"  [!] {verifyResult.Summary}");
+                if (!string.IsNullOrWhiteSpace(verifyResult.ErrorMessage))
+                {
+                    color.WriteMuted($"      {verifyResult.ErrorMessage}");
+                }
+
+                if (!string.IsNullOrWhiteSpace(verifyResult.ActionableHint))
+                {
+                    color.WriteMuted($"  Hint: {verifyResult.ActionableHint}");
+                }
+            }
+
+            return returnState;
+        }
+
+        if (action is "clear" or "unset" or "remove" or "delete")
+        {
+            if (!TryParseInlineKeyScope(scopeToken, ApiKeyStorageScope.Session, out var clearScope))
+            {
+                color.WriteWarning($"  [!] Invalid --scope '{scopeToken}'. Use 'session', 'user', or 'all'.");
+                return returnState;
+            }
+
+            var targetToken = positional.Count > 1 ? positional[1] : "all";
+            if (targetToken.Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var provider in ApiKeyManagementService.SupportedProviders)
+                {
+                    var result = _apiKeyService.ClearKey(provider, clearScope);
+                    color.WriteSuccess($"  ✓ {result.Message}");
+                    if (!string.IsNullOrWhiteSpace(result.ScopeGuidanceNote))
+                    {
+                        color.WriteMuted($"    {result.ScopeGuidanceNote}");
+                    }
+                }
+
+                sessionOptions = sessionOptions with { ApiKey = null };
+                return returnState;
+            }
+
+            if (!ApiKeyManagementService.TryResolveKeyProvider(targetToken, out var singleProvider))
+            {
+                color.WriteWarning($"  [!] Unsupported key provider '{targetToken}'. Supported: gemini, openai, azure, claude, copilot-sdk, or all.");
+                return returnState;
+            }
+
+            var cleared = _apiKeyService.ClearKey(singleProvider, clearScope);
+            sessionOptions = sessionOptions with { ApiKey = null };
+            color.WriteSuccess($"  ✓ {cleared.Message}");
+            if (!string.IsNullOrWhiteSpace(cleared.ScopeGuidanceNote))
+            {
+                color.WriteMuted($"  Note: {cleared.ScopeGuidanceNote}");
+            }
+
+            return returnState;
+        }
+
+        if (ApiKeyManagementService.TryResolveKeyProvider(action, out var directProvider))
+        {
+            return ManageSingleProviderApiKeyInteractive(
+                directProvider,
+                ref sessionOptions,
+                currentSettings,
+                input,
+                color.InnerWriter,
+                color) == MenuState.Exit
+                ? MenuState.Exit
+                : returnState;
+        }
+
+        PrintInlineKeysHelp(color);
+        return returnState;
+    }
+
+    private void WriteProviderKeyStatusTable(
+        WorkflowOptions sessionOptions,
+        CliSettings currentSettings,
+        ConsoleColorWriter color)
+    {
+        color.WriteLine();
+        color.WriteHeader("AI Provider API Key Status (masked):");
+        var statuses = _apiKeyService.GetAllProviderStatuses(
+            sessionOptions.OpenAiBaseUrl,
+            currentSettings.OpenAiBaseUrl,
+            sessionOptions.OpenAiWireApi,
+            currentSettings.OpenAiWireApi);
+        foreach (var status in statuses)
+        {
+            var badge = status.IsConfigured ? $"SET [{status.MaskedKey}]" : "not set";
+            color.WriteLine($"  • {status.Metadata.Code,-12} {status.Metadata.PrimaryEnvVar,-22} {badge,-16} ({status.ScopeSummary})");
+            if (!string.IsNullOrWhiteSpace(status.CompanionConfigNote))
+            {
+                color.WriteMuted($"      Note: {status.CompanionConfigNote}");
+            }
+        }
+    }
+
+    private static void PrintInlineKeysHelp(ConsoleColorWriter color)
+    {
+        color.WriteLine();
+        color.WriteSubHeader("/keys Commands:");
+        color.WriteLine("  /keys                                Open interactive AI Provider API Key Manager");
+        color.WriteLine("  /keys status                         List masked key status & scope across all providers");
+        color.WriteLine("  /keys set <provider> [--verify] [--scope session|user] [--endpoint <url>]");
+        color.WriteLine("  /keys validate <provider>            Validate format/prefix of a key or configured env var");
+        color.WriteLine("  /keys verify [<provider>|all]        Verify configured key(s) live against provider endpoints");
+        color.WriteLine("  /keys clear [<provider>|all] [--scope session|user|all]");
+        color.WriteLine("  /keys endpoint <https://...>         Set AZURE_OPENAI_ENDPOINT");
+    }
+
+    private static bool TryParseInlineKeyScope(string? token, ApiKeyStorageScope defaultScope, out ApiKeyStorageScope scope)
+    {
+        scope = defaultScope;
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return true;
+        }
+
+        switch (token.Trim().ToLowerInvariant())
+        {
+            case "session" or "process" or "runtime":
+                scope = ApiKeyStorageScope.Session;
+                return true;
+            case "user" or "os" or "os-user" or "persistent":
+                scope = ApiKeyStorageScope.User;
+                return true;
+            case "all" or "both":
+                scope = ApiKeyStorageScope.All;
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -2578,7 +3795,8 @@ public sealed class CliMenuRunner
         sessionOptions = sessionOptions with
         {
             ProviderInput = providerCode,
-            ModelName = currentSettings.ModelName
+            ModelName = currentSettings.ModelName,
+            ApiKey = clearPinnedModel ? null : sessionOptions.ApiKey
         };
         var savedPath = _settingsService.Save(baseWorkspace, currentSettings);
         color.WriteSuccess($"Active AI Provider set to '{providerCode}'. Saved settings to '{savedPath}'.");
@@ -3219,6 +4437,30 @@ public sealed class CliMenuRunner
             color.WriteLine($"  {variableName}: {status}");
         }
 
+        color.WriteLine();
+        color.WriteSubHeader("--- Azure, Anthropic & Copilot Credentials ---");
+        foreach (var variableName in new[]
+        {
+            OpenAiGatewayClient.AzureApiKeyEnvVar,
+            OpenAiGatewayClient.AzureEndpointEnvVar,
+            "ANTHROPIC_API_KEY",
+            ApiKeyManagementService.AnthropicBaseUrlEnvVar,
+            GitHubCopilotSdkGateway.CopilotTokenEnvVar,
+            GitHubCopilotSdkGateway.GitHubTokenEnvVar,
+            GitHubCopilotSdkGateway.GhTokenEnvVar
+        })
+        {
+            var rawValue = _environmentReader(variableName);
+            var isEndpoint = variableName.Contains("ENDPOINT", StringComparison.Ordinal) ||
+                             variableName.Contains("URL", StringComparison.Ordinal);
+            var status = string.IsNullOrWhiteSpace(rawValue)
+                ? "not set"
+                : isEndpoint
+                    ? rawValue.Trim()
+                    : $"configured [{GeminiSecretProvider.MaskKey(rawValue)}]";
+            color.WriteLine($"  {variableName}: {status}");
+        }
+
         var provider = _diagnosticService.ResolveEffectiveProvider(sessionOptions, currentSettings);
         var runtimeInfo = _runtimeEnvService.Inspect(provider, sessionOptions.ModelName);
         var secret = _secretProvider.Resolve(sessionOptions.ApiKey);
@@ -3321,7 +4563,112 @@ public sealed class CliMenuRunner
             return;
         }
 
-        if (provider is AiProviderType.AzureOpenAi or AiProviderType.AnthropicClaude or AiProviderType.ManualPrompt)
+        if (provider == AiProviderType.AzureOpenAi)
+        {
+            var azureConfig = OpenAiGatewayClient.ResolveConfiguration(
+                environmentReader: _environmentReader,
+                explicitApiKey: sessionOptions.ApiKey,
+                explicitBaseUrl: sessionOptions.OpenAiBaseUrl,
+                persistedBaseUrl: currentSettings.OpenAiBaseUrl,
+                explicitWireApi: sessionOptions.OpenAiWireApi,
+                persistedWireApi: currentSettings.OpenAiWireApi,
+                preferAzureEnvironment: true);
+
+            if (!azureConfig.IsValidBaseUrl)
+            {
+                color.WriteWarning($"  [!] {azureConfig.ValidationError}");
+            }
+            else if (azureConfig.HasApiKey && sessionOptions.GeminiLive != false)
+            {
+                try
+                {
+                    var catalog = TerminalUx.RunWithSpinner(
+                        $"Discovering Azure OpenAI / Foundry models ({azureConfig.BaseUrl})...",
+                        () => _workflow.ProviderOrchestrator.OpenAiGateway.ListModelCatalog(azureConfig),
+                        color);
+                    if (catalog.SupportedModels.Count > 0)
+                    {
+                        color.WriteHeader($"Available Azure OpenAI Models ({azureConfig.BaseUrl}):");
+                        foreach (var model in catalog.SupportedModels)
+                        {
+                            var ownerSuffix = string.IsNullOrWhiteSpace(model.OwnedBy) ? string.Empty : $" ({model.OwnedBy})";
+                            color.WriteLine($"  • {model.ModelId,-28} {model.ModelId}{ownerSuffix}");
+                        }
+
+                        return;
+                    }
+
+                    color.WriteWarning("  [i] Azure endpoint returned no models; showing curated recommendations.");
+                }
+                catch (Exception ex)
+                {
+                    var safeMsg = _secretRedactor.Redact(SecretRedactor.RedactPatterns(ex.Message));
+                    color.WriteWarning($"  [!] Could not query live Azure OpenAI models ({safeMsg}); showing curated recommendations.");
+                }
+            }
+            else if (sessionOptions.GeminiLive == false)
+            {
+                color.WriteMuted("  Offline mode (--offline) active; showing curated Azure OpenAI recommendations.");
+            }
+            else
+            {
+                color.WriteWarning($"  [i] {OpenAiGatewayClient.AzureApiKeyEnvVar} / {OpenAiGatewayClient.AzureEndpointEnvVar} not fully configured; showing curated Azure OpenAI recommendations.");
+            }
+
+            color.WriteHeader("Recommended Models (azure):");
+            WriteModelRecommendations(color, ModelCatalogService.GetRecommendations(provider));
+            color.WriteMuted($"  Official Docs: {ModelCatalogService.GetOfficialDocsUrl(provider)}");
+            return;
+        }
+
+        if (provider == AiProviderType.AnthropicClaude)
+        {
+            var anthropicKey = !string.IsNullOrWhiteSpace(sessionOptions.ApiKey)
+                ? sessionOptions.ApiKey
+                : _apiKeyService.EnvironmentStore.Read("ANTHROPIC_API_KEY");
+            if (!string.IsNullOrWhiteSpace(anthropicKey) && sessionOptions.GeminiLive != false)
+            {
+                try
+                {
+                    var anthropicModels = TerminalUx.RunWithSpinner(
+                        "Discovering Anthropic Claude models...",
+                        () => _apiKeyService.ListAnthropicModels(anthropicKey, sessionOptions.OpenAiBaseUrl),
+                        color);
+                    if (anthropicModels.Count > 0)
+                    {
+                        color.WriteHeader("Available Anthropic Claude Models:");
+                        foreach (var model in anthropicModels)
+                        {
+                            color.WriteLine($"  • {model.ModelId,-32} {model.DisplayName}");
+                        }
+
+                        return;
+                    }
+
+                    color.WriteWarning("  [i] Anthropic API returned no models; showing curated recommendations.");
+                }
+                catch (Exception ex)
+                {
+                    var safeMsg = _secretRedactor.Redact(SecretRedactor.RedactPatterns(ex.Message));
+                    color.WriteWarning($"  [!] Could not query live Anthropic Claude models ({safeMsg}); showing curated recommendations.");
+                }
+            }
+            else if (sessionOptions.GeminiLive == false)
+            {
+                color.WriteMuted("  Offline mode (--offline) active; showing curated Anthropic Claude recommendations.");
+            }
+            else
+            {
+                color.WriteWarning("  [i] ANTHROPIC_API_KEY not configured; showing curated Anthropic Claude recommendations.");
+            }
+
+            color.WriteHeader("Recommended Models (claude):");
+            WriteModelRecommendations(color, ModelCatalogService.GetRecommendations(provider));
+            color.WriteMuted($"  Official Docs: {ModelCatalogService.GetOfficialDocsUrl(provider)}");
+            return;
+        }
+
+        if (provider == AiProviderType.ManualPrompt)
         {
             var providerCode = RuntimeEnvironmentService.FormatProviderCode(provider);
             color.WriteHeader($"Recommended Models ({providerCode}):");
@@ -4207,6 +5554,7 @@ public sealed class CliMenuRunner
         color.WriteLine("  /status        Show crisp WSL2/Windows paths, queued files, & AI provider readiness table");
         color.WriteLine("  /config        Show or update settings: /config [--json on|off] [--in <dir>] [--out <dir>] [--verbosity min|bal|det] [--log-level <lvl>] [--log-format text|json] [--gateway-url <url>] [--wire-api chat|responses]");
         color.WriteLine("  /provider      Switch AI orchestrator provider (gemini, copilot-sdk, openai, azure, claude, manual)");
+        color.WriteLine("  /keys          Manage AI provider API keys interactively or inline: /keys [status|set|validate|verify|clear] <provider>");
         color.WriteLine("  /models        List available models for the active provider");
         color.WriteLine("  /theme         Switch CLI theme (agy, uv, kubectl)");
         color.WriteLine("  /json [on|off] Toggle dual .md + .json artifact export");

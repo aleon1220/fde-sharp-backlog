@@ -168,6 +168,11 @@ public static class TerminalUx
 
     public static string? ResolveActionableHint(Exception ex)
     {
+        if (ex is ApiKeyValidationException keyEx && !string.IsNullOrWhiteSpace(keyEx.ActionableHint))
+        {
+            return keyEx.ActionableHint;
+        }
+
         var msg = ex.Message;
 
         if (msg.Contains("log level", StringComparison.OrdinalIgnoreCase) ||
@@ -214,19 +219,45 @@ public static class TerminalUx
             return $"Pass a valid http:// or https:// base URL via '--gateway-url <url>' or {OpenAiGatewayClient.BaseUrlEnvVar} (e.g. https://api.openai.com/v1).";
         }
 
+        if (msg.Contains("backlog keys", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("--scope", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Run 'backlog keys --help' or 'backlog keys status' to inspect provider API keys (providers: gemini, openai, azure, claude, copilot-sdk).";
+        }
+
         if (msg.Contains("API key", StringComparison.OrdinalIgnoreCase) ||
+            msg.Contains("token", StringComparison.OrdinalIgnoreCase) ||
             msg.Contains("401", StringComparison.OrdinalIgnoreCase) ||
             msg.Contains("403", StringComparison.OrdinalIgnoreCase) ||
             msg.Contains("API_KEY_INVALID", StringComparison.OrdinalIgnoreCase))
         {
-            if (msg.Contains("OpenAI", StringComparison.OrdinalIgnoreCase) ||
-                msg.Contains("gateway", StringComparison.OrdinalIgnoreCase) ||
-                msg.Contains("AZURE_OPENAI", StringComparison.OrdinalIgnoreCase))
+            if (msg.Contains("Anthropic", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("Claude", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("ANTHROPIC_API_KEY", StringComparison.OrdinalIgnoreCase))
             {
-                return $"Set {OpenAiGatewayClient.ApiKeyEnvVar} (+ optional {OpenAiGatewayClient.BaseUrlEnvVar}), pass '--api-key <key>', or rerun with '--offline'.";
+                return $"Set ANTHROPIC_API_KEY (from {ApiKeyManagementService.AnthropicApiKeysUrl}) via 'backlog keys set claude' or pass '--offline'.";
             }
 
-            return $"Set GEMINI_API_KEY (from {GeminiSecretProvider.GeminiApiKeysUrl}), pass '--api-key <key>', or use '--offline' / '--provider copilot-sdk'.";
+            if (msg.Contains("Azure", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("AZURE_OPENAI", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"Set {OpenAiGatewayClient.AzureApiKeyEnvVar} (+ {OpenAiGatewayClient.AzureEndpointEnvVar}) via 'backlog keys set azure', or rerun with '--offline'.";
+            }
+
+            if (msg.Contains("GitHub", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("Copilot", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("COPILOT_GITHUB_TOKEN", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"Set COPILOT_GITHUB_TOKEN / GITHUB_TOKEN (from {ApiKeyManagementService.GitHubTokensUrl}) via 'backlog keys set copilot-sdk' or run 'copilot login'.";
+            }
+
+            if (msg.Contains("OpenAI", StringComparison.OrdinalIgnoreCase) ||
+                msg.Contains("gateway", StringComparison.OrdinalIgnoreCase))
+            {
+                return $"Set {OpenAiGatewayClient.ApiKeyEnvVar} (+ optional {OpenAiGatewayClient.BaseUrlEnvVar}) via 'backlog keys set openai', pass '--api-key <key>', or rerun with '--offline'.";
+            }
+
+            return $"Set GEMINI_API_KEY (from {GeminiSecretProvider.GeminiApiKeysUrl}) via 'backlog keys set gemini', pass '--api-key <key>', or use '--offline' / '--provider copilot-sdk'.";
         }
 
         if (msg.Contains("429", StringComparison.OrdinalIgnoreCase) ||

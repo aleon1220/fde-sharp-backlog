@@ -1462,10 +1462,13 @@ public sealed class CliMenuRunnerTests : IDisposable
         ICopilotSdkGateway? copilotGateway = null,
         StderrLoggerFactory? loggerFactory = null,
         Func<string, string?>? environmentReader = null,
-        OpenAiGatewayClient? openAiGatewayClient = null)
+        OpenAiGatewayClient? openAiGatewayClient = null,
+        GeminiSecretProvider? secretProvider = null,
+        ApiKeyManagementService? apiKeyService = null,
+        SecretRedactor? secretRedactor = null)
     {
         var effectiveEnvReader = environmentReader ?? (_ => null);
-        var secretProvider = new GeminiSecretProvider(
+        var effectiveSecretProvider = secretProvider ?? new GeminiSecretProvider(
             environmentReader: _ => null,
             environmentWriter: (_, _) => { });
         var runtimeService = new RuntimeEnvironmentService();
@@ -1485,7 +1488,7 @@ public sealed class CliMenuRunnerTests : IDisposable
             orchestrator,
             new JiraBacklogFormatter(),
             runtimeService,
-            secretProvider,
+            effectiveSecretProvider,
             effectiveGemini,
             providerOrchestrator,
             loggerFactory);
@@ -1494,12 +1497,260 @@ public sealed class CliMenuRunnerTests : IDisposable
             workflow,
             workspaceService,
             runtimeService,
-            secretProvider,
+            effectiveSecretProvider,
             orchestrator,
             settingsService ?? new CliSettingsService(),
             clipboardService: clipboardService,
             loggerFactory: loggerFactory,
-            environmentReader: effectiveEnvReader);
+            environmentReader: effectiveEnvReader,
+            apiKeyService: apiKeyService,
+            secretRedactor: secretRedactor);
+    }
+
+    [Fact]
+    public void Run_SettingsKeyManager_ValidatesRejectsMismatchesVerifiesSavesAndClearsWithSettingsSafety()
+    {
+        var workspaceService = new WorkspacePathService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        Directory.CreateDirectory(dirs.InputDirectory);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        var settingsService = new CliSettingsService();
+
+        var processEnv = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var userEnv = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var envStore = new SessionEnvironmentStore(
+            externalScopedWriter: (name, value, target) =>
+            {
+                var dict = target == EnvironmentVariableTarget.User ? userEnv : processEnv;
+                if (value is null)
+                {
+                    dict.Remove(name);
+                }
+                else
+                {
+                    dict[name] = value;
+                }
+            },
+            externalScopedReader: (name, target) =>
+            {
+                var dict = target == EnvironmentVariableTarget.User ? userEnv : processEnv;
+                return dict.TryGetValue(name, out var val) ? val : null;
+            },
+            isWindowsOverride: true);
+
+        const string geminiSecret = "AIzaSyMenuGeminiSecret11223344";
+        const string wrongProviderKey = "sk-ant-WrongProviderKeyForOpenAi5566";
+        const string openAiSecret = "sk-proj-MenuOpenAiVerified7788";
+
+        var openAiHandler = new StubHttpMessageHandler(req =>
+        {
+            if (req.RequestUri!.AbsolutePath.EndsWith("/models", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonResponse("""{"data":[{"id":"gpt-4.1-mini","owned_by":"openai"}]}""");
+            }
+
+            return JsonResponse("""{"choices":[{"message":{"content":"{\"title\":\"Menu Key Test\",\"description\":\"Ok\",\"userStory\":\"As a user...\",\"scenarios\":[{\"given\":\"g\",\"when\":\"w\",\"then\":\"t\"}]}"}}]}""");
+        });
+        using var openAiHttpClient = new HttpClient(openAiHandler);
+        var openAiClient = new OpenAiGatewayClient(openAiHttpClient);
+        var secretRedactor = new SecretRedactor();
+        using var logErr = new StringWriter();
+        using var loggerFactory = new StderrLoggerFactory(
+            logErr,
+            minimumLevel: LogLevel.Information,
+            outputFormat: LogOutputFormat.Text,
+            enableColor: false);
+
+        var apiKeyService = new ApiKeyManagementService(
+            envStore,
+            openAiGatewayClient: openAiClient,
+            secretRedactor: secretRedactor,
+            loggerFactory: loggerFactory);
+        var secretProvider = new GeminiSecretProvider(
+            environmentReader: envStore.Read,
+            environmentWriter: envStore.WriteProcess);
+
+        var runner = CreateMenuRunner(
+            workspaceService,
+            settingsService,
+            loggerFactory: loggerFactory,
+            environmentReader: envStore.Read,
+            openAiGatewayClient: openAiClient,
+            secretProvider: secretProvider,
+            apiKeyService: apiKeyService,
+            secretRedactor: secretRedactor);
+
+        // Flow:
+        // 4 (Settings) -> K (API Key Manager)
+        // -> 1 (Gemini, unset -> prompt): placeholder "YOUR_API_KEY" (rejected + re-prompt) -> valid geminiSecret -> "n" (skip live verify) -> "1" (session only)
+        // -> 2 (OpenAI, unset -> prompt): wrongProviderKey (cross-provider mismatch -> re-prompt) -> valid openAiSecret -> "y" (live verify succeeds) -> "2" (user scope)
+        // -> C (Clear) -> 1 (Gemini) -> 1 (Session only)
+        // -> 0 (back to Settings) -> 7 (Runtime Diagnostics) -> 0 (back to Main) -> /status -> 0 (Exit)
+        using var input = new StringReader(
+            "4\nK\n" +
+            "1\nYOUR_API_KEY\n" + geminiSecret + "\nn\n1\n" +
+            "2\n" + wrongProviderKey + "\n" + openAiSecret + "\ny\n2\n" +
+            "C\n1\n1\n" +
+            "0\n7\n0\n" +
+            "/status\n0\n");
+        using var output = new StringWriter();
+
+        var exitCode = runner.Run(
+            new WorkflowOptions(dirs.InputDirectory, _promptFilePath, WorkspaceRoot: _tempWorkspaceRoot, GeminiLive: true),
+            input,
+            output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("=== AI Provider API Key Manager ===", text);
+        Assert.Contains("Rejected placeholder API key", text);
+        Assert.Contains("****3344", text);
+        Assert.Contains("Mismatched provider key", text);
+        Assert.Contains("Anthropic Claude (claude)", text);
+        Assert.Contains("****7788", text);
+        Assert.Contains("OPENAI_API_KEY: configured [****7788]", text);
+        Assert.Contains("Cleared Google Gemini REST key [****3344]", text);
+        Assert.False(processEnv.ContainsKey(GeminiSecretProvider.PrimaryEnvVar));
+        Assert.Equal(openAiSecret, userEnv[OpenAiGatewayClient.ApiKeyEnvVar]);
+        Assert.DoesNotContain(geminiSecret, text);
+        Assert.DoesNotContain(wrongProviderKey, text);
+        Assert.DoesNotContain(openAiSecret, text);
+        Assert.DoesNotContain(geminiSecret, logErr.ToString());
+        Assert.DoesNotContain(openAiSecret, logErr.ToString());
+
+        var settingsPath = settingsService.GetSettingsFilePath(dirs);
+        if (File.Exists(settingsPath))
+        {
+            var json = File.ReadAllText(settingsPath);
+            Assert.DoesNotContain(geminiSecret, json);
+            Assert.DoesNotContain(openAiSecret, json);
+            Assert.DoesNotContain("apiKey", json, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void Run_InteractiveTtyKeyManager_MasksKeystrokesWithAsterisksWithoutEchoingPlaintext()
+    {
+        var workspaceService = new WorkspacePathService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        Directory.CreateDirectory(dirs.InputDirectory);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        var envStore = new SessionEnvironmentStore(externalReader: _ => null);
+        var apiKeyService = new ApiKeyManagementService(envStore);
+
+        // Simulate interactive TTY keystrokes for entering 'AIzaTtySecret99888' with a mistyped char fixed via Backspace
+        var keystrokes = new Queue<ConsoleKeyInfo>();
+        const string typedPrefix = "AIzaTtySecret998X";
+        foreach (var ch in typedPrefix)
+        {
+            keystrokes.Enqueue(new ConsoleKeyInfo(ch, ConsoleKey.A, false, false, false));
+        }
+
+        keystrokes.Enqueue(new ConsoleKeyInfo('\b', ConsoleKey.Backspace, false, false, false));
+        keystrokes.Enqueue(new ConsoleKeyInfo('8', ConsoleKey.D8, false, false, false));
+        keystrokes.Enqueue(new ConsoleKeyInfo('8', ConsoleKey.D8, false, false, false));
+        keystrokes.Enqueue(new ConsoleKeyInfo('\r', ConsoleKey.Enter, false, false, false));
+
+        var ttySecretProvider = new GeminiSecretProvider(
+            environmentReader: envStore.Read,
+            environmentWriter: envStore.WriteProcess,
+            keyReader: () => keystrokes.Dequeue(),
+            isInteractive: () => true);
+
+        var runner = CreateMenuRunner(
+            workspaceService,
+            environmentReader: envStore.Read,
+            secretProvider: ttySecretProvider,
+            apiKeyService: apiKeyService);
+
+        using var input = new StringReader("/keys\n1\nn\n1\n0\n0\n");
+        using var output = new StringWriter();
+
+        var exitCode = runner.Run(
+            new WorkflowOptions(dirs.InputDirectory, _promptFilePath, WorkspaceRoot: _tempWorkspaceRoot),
+            input,
+            output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Equal("AIzaTtySecret99888", envStore.Read(GeminiSecretProvider.PrimaryEnvVar));
+        Assert.Contains("****9888", text);
+        Assert.Contains("*****************\b \b**", text);
+        Assert.DoesNotContain("AIzaTtySecret99888", text);
+    }
+
+    [Fact]
+    public void Run_SlashKeysAndAzureClaudeModels_DiscoverLiveModelsWhenConfiguredAndFallbackAfterClear()
+    {
+        var workspaceService = new WorkspacePathService();
+        var dirs = workspaceService.Resolve(_tempWorkspaceRoot);
+        Directory.CreateDirectory(dirs.InputDirectory);
+        Directory.CreateDirectory(dirs.OutputDirectory);
+        var envStore = new SessionEnvironmentStore(externalReader: _ => null);
+
+        const string claudeSecret = "sk-ant-ReplClaudeSecret1234";
+        const string azureSecret = "AzureReplSecretKey99887766";
+
+        var openAiHandler = new StubHttpMessageHandler(req =>
+        {
+            Assert.True(req.RequestUri!.Host.Contains("foundry-repl.openai.azure.com", StringComparison.OrdinalIgnoreCase));
+            return JsonResponse("""{"data":[{"id":"gpt-4o","owned_by":"azure"}]}""");
+        });
+        using var openAiHttpClient = new HttpClient(openAiHandler);
+        var openAiClient = new OpenAiGatewayClient(openAiHttpClient);
+
+        var verificationHandler = new StubHttpMessageHandler(req =>
+        {
+            Assert.True(req.Headers.Contains("x-api-key"));
+            return JsonResponse("""{"data":[{"id":"claude-sonnet-4-5-20250929","display_name":"Claude Sonnet 4.5"}]}""");
+        });
+        using var verifyHttp = new HttpClient(verificationHandler);
+
+        var apiKeyService = new ApiKeyManagementService(
+            envStore,
+            openAiGatewayClient: openAiClient,
+            verificationHttpClient: verifyHttp);
+        var secretProvider = new GeminiSecretProvider(
+            environmentReader: envStore.Read,
+            environmentWriter: envStore.WriteProcess);
+
+        var runner = CreateMenuRunner(
+            workspaceService,
+            environmentReader: envStore.Read,
+            openAiGatewayClient: openAiClient,
+            secretProvider: secretProvider,
+            apiKeyService: apiKeyService);
+
+        using var input = new StringReader(
+            $"/keys set claude {claudeSecret} --verify\n" +
+            "/provider claude\n" +
+            "/models\n" +
+            "/keys clear claude\n" +
+            "/models\n" +
+            "/keys endpoint https://foundry-repl.openai.azure.com\n" +
+            $"/keys set azure {azureSecret} --verify\n" +
+            "/provider azure\n" +
+            "/models\n" +
+            "4\n7\n0\n" +
+            "0\n");
+        using var output = new StringWriter();
+
+        var exitCode = runner.Run(
+            new WorkflowOptions(dirs.InputDirectory, _promptFilePath, WorkspaceRoot: _tempWorkspaceRoot, GeminiLive: true),
+            input,
+            output);
+
+        Assert.Equal(0, exitCode);
+        var text = output.ToString();
+        Assert.Contains("Available Anthropic Claude Models:", text);
+        Assert.Contains("claude-sonnet-4-5-20250929", text);
+        Assert.Contains("ANTHROPIC_API_KEY not configured", text);
+        Assert.Contains("Available Azure OpenAI Models (https://foundry-repl.openai.azure.com):", text);
+        Assert.Contains("gpt-4o", text);
+        Assert.Contains("AZURE_OPENAI_API_KEY: configured [****7766]", text);
+        Assert.Contains("AZURE_OPENAI_ENDPOINT: https://foundry-repl.openai.azure.com", text);
+        Assert.DoesNotContain(claudeSecret, text);
+        Assert.DoesNotContain(azureSecret, text);
     }
 
     private sealed class StubCopilotSdkGateway(

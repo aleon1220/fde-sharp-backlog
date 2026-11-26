@@ -394,4 +394,58 @@ internal static partial class LogEvents
     public static partial void OpenAiGatewayFallback(
         ILogger logger,
         string reason);
+
+    [LoggerMessage(
+        EventId = 4014,
+        Level = LogLevel.Debug,
+        Message = "API key format check: provider={Provider}, maskedKey={MaskedKey}, valid={IsValid}")]
+    public static partial void ApiKeyValidated(
+        ILogger logger,
+        string provider,
+        string maskedKey,
+        bool isValid);
+
+    [LoggerMessage(
+        EventId = 4015,
+        Level = LogLevel.Information,
+        Message = "Registered API key: provider={Provider}, envVar={EnvVar}, maskedKey={MaskedKey}, scope={Scope}, persistedToUserEnv={PersistedToUserEnv}")]
+    public static partial void ApiKeySaved(
+        ILogger logger,
+        string provider,
+        string envVar,
+        string maskedKey,
+        string scope,
+        bool persistedToUserEnv);
+
+    [LoggerMessage(
+        EventId = 4016,
+        Level = LogLevel.Information,
+        Message = "Cleared API key: provider={Provider}, maskedKey={MaskedKey}, scope={Scope}")]
+    public static partial void ApiKeyCleared(
+        ILogger logger,
+        string provider,
+        string maskedKey,
+        string scope);
+
+    [LoggerMessage(
+        EventId = 4017,
+        Level = LogLevel.Information,
+        Message = "Live API key verification succeeded: provider={Provider}, maskedKey={MaskedKey}, endpoint={Endpoint}, elapsedMs={ElapsedMs}")]
+    public static partial void ApiKeyLiveVerificationSucceeded(
+        ILogger logger,
+        string provider,
+        string maskedKey,
+        string endpoint,
+        long elapsedMs);
+
+    [LoggerMessage(
+        EventId = 4018,
+        Level = LogLevel.Warning,
+        Message = "Live API key verification failed: provider={Provider}, maskedKey={MaskedKey}, endpoint={Endpoint}, reason={Reason}")]
+    public static partial void ApiKeyLiveVerificationFailed(
+        ILogger logger,
+        string provider,
+        string maskedKey,
+        string endpoint,
+        string reason);
 }
